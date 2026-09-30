@@ -27,10 +27,28 @@
  *   monster     phase 'enter' | 'rampage' | 'leave'; step (tiles walked, drives the walk cycle);
  *               stomp 0..1 (pulse on each footfall); roar 0..1 (pulse); breath {x, z, t} | null (atomic
  *               breath target, t = game days since it started)
- * Bus: 'disaster' {type, phase:'start'|'update'|'end', x, z, name, icon, entry, ...} (+ 'what' on
- * update: 'impact' | 'abduct' | 'breath' | 'aftershock'); 'sfx' names: alarm, siren, meteor, explosion,
- * rumble, crash, wind, ufo, abduct, roar, stomp.
+ * Bus: 'disaster' {type, phase:'start'|'update'|'end', x, z, id, name, icon, entry, ...} (+ 'what' on
+ * update: 'impact' | 'abduct' | 'breath'). On 'start', x/z is the point worth looking at (the UFO's
+ * target area, not the map edge it flies in from); UIs that keep a "Show me" button should follow the
+ * live entry: VC.disasters.focus({id}) / VC.disasters.get(id).
+ *
+ * NOTIFICATIONS (one domain event -> one notification + one sound): the start emits ONLY bus 'disaster'
+ * (the HUD shows the alert card, audio plays alarm + the type's sound) — no toast, no start sfx. The end
+ * is reported by one toast (bus 'toast', the summary). In-world sounds while a disaster runs (stomp,
+ * explosion, abduct, ufo, roar) are spatial 'sfx'. Building removals use VC.REMOVE.DISASTER ('disaster';
+ * particles + audio react to bus 'bldRemove' — no extra bursts here) and VC.REMOVE.ABDUCT ('abduct',
+ * UFO: the building is beamed up, no debris). Fires are started through VC.sim.ignite(b, {disaster:true})
+ * with b.fireCause = 'disaster' (cleared again when the fire ends) so sim does not toast each one.
+ * Nothing random happens while S.demo (title-screen city).
+ *
+ * UFO targets: growables (taller / denser preferred); non-essential small parks/plazas/statues only as a
+ * rare fallback. Never utilities (power/water), services, unique landmarks or big-ticket buildings.
+ *
+ * SAVE/LOAD: active entries are persisted through VC.save.register('disasters') (plain JSON: Sets become
+ * arrays, building references become ids) and resume after loading.
  * Persistent stats: S.disasterStats (= VC.disasters.stats) {count, byType, survived, destroyed, abducted, nextDay}.
+ * Random disasters need S.disastersEnabled && VC.settings.disasters !== false; flipping the Settings
+ * toggle also flips S.disastersEnabled of the running city (one switch from the player's view).
  */
 const M = VC.M, C = VC.C;
 
@@ -42,7 +60,7 @@ const TYPES = [
   { key: 'ufo', name: 'UFO Invasion', icon: '🛸', desc: 'Visitors from beyond abduct your buildings.' },
   { key: 'monster', name: 'Cubezilla', icon: '🦖', desc: 'A giant voxel lizard stomps across town.' },
 ];
-const TYPE = {};
+const TYPE = Object.create(null); // no prototype: trigger('toString') must not find anything
 for (const t of TYPES) TYPE[t.key] = t;
 // Relative odds of each random disaster (tornadoes in spring/summer, fires in summer, see seasonWeight).
 const ODDS = { fire: 30, tornado: 20, meteor: 12, earthquake: 16, ufo: 11, monster: 11 };
@@ -51,8 +69,10 @@ const YEAR = C.DAYS_PER_MONTH * 12;
 
 let rnd = M.rng(1);
 let seq = 0;
-let lastCrash = 0; // real time of the last crash sfx (throttle)
+let lastGlobal = null; // last seen VC.settings.disasters (mirrored into S.disastersEnabled on change)
 const seen = new Set(); // scratch for buildingsNear
+const REASON = () => VC.REMOVE || { DISASTER: 'disaster', ABDUCT: 'abduct' };
+const SET_FIELDS = ['hits', 'tiles']; // entry fields that are Sets (saved as arrays)
 
 function S_() { return VC.state; }
 function W_() { return VC.world; }
@@ -84,6 +104,13 @@ function buildingsNear(px, pz, r, filter) {
   return out;
 }
 const notRubble = (b) => b.key !== 'rubble';
+/** Whether sim would accept a fire on b (mirrors VC.sim.ignite's refusals: rubble, burning, parks without staff). */
+function canBurn(b) {
+  if (!b || b.key === 'rubble' || b.fire > 0) return false;
+  const def = VC.BLD[b.key];
+  return !(def && def.group === 'parks' && !def.jobs);
+}
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 function centerOf(b) {
   return [b.x + b.w / 2, b.z + b.d / 2];
 }
@@ -151,14 +178,16 @@ function shakeAt(x, z, amount, range = 40) {
   cam.shake(amount * f);
 }
 
-/** Destroys a building. opts.rubble (default true) leaves rubble behind. Returns true if destroyed. */
+/**
+ * Destroys a building. opts.rubble (default true) leaves rubble behind. Returns true if destroyed.
+ * Debris/dust particles and the crash sound come from particles/audio reacting to bus 'bldRemove'.
+ */
 function wreck(b, e, opts = {}) {
   const S = S_();
   if (!b || !S.buildings.has(b.id)) return false;
   const wasRubble = b.key === 'rubble';
   const { x, z, w, d } = b;
-  const hgt = b.hgt || 1;
-  W_().removeBuilding(b, 'disaster');
+  W_().removeBuilding(b, REASON().DISASTER);
   if (opts.rubble !== false && !wasRubble) {
     try {
       W_().addBuilding({ key: 'rubble', x, z, w, d, rot: 0 }, { instant: true, noFlatten: true });
@@ -167,20 +196,31 @@ function wreck(b, e, opts = {}) {
   if (!wasRubble) {
     if (e) e.destroyed = (e.destroyed || 0) + 1;
     stats().destroyed = (stats().destroyed || 0) + 1;
-    const cx = x + w / 2, cz = z + d / 2, gy = groundAt(cx, cz);
-    particles('debris', cx, cz, 10 + Math.min(30, (w * d) * 5), gy + hgt * 0.4);
-    particles('dust', cx, cz, 8 + w * d * 3, gy + 0.3);
-    const now = performance.now();
-    if (now - lastCrash > 250) { lastCrash = now; sfx('crash', cx, cz); }
   }
   return true;
 }
-/** Sets a building on fire through the sim (fallback: flag it). */
+/**
+ * Sets a building on fire through the sim (fallback: flag it). Returns true only if it really caught
+ * fire (sim refuses rubble, burning buildings and parks without staff); only then is it counted.
+ * b.fireCause = 'disaster' + {disaster:true} tell sim not to announce this fire on its own.
+ */
 function burn(b, e) {
   const S = S_();
-  if (!b || !S.buildings.has(b.id) || b.key === 'rubble' || b.fire > 0) return false;
-  if (VC.sim && VC.sim.ignite) VC.sim.ignite(b);
-  else { b.fire = 1; W_().changed(b); }
+  if (!b || !S.buildings.has(b.id) || !canBurn(b)) return false;
+  if (VC.sim && VC.sim.ignite) {
+    const prev = b.fireCause;
+    b.fireCause = 'disaster';
+    let ok = false;
+    try { ok = VC.sim.ignite(b, { disaster: true, cause: e ? e.type : 'disaster' }); } catch (err) { console.error('[disasters] ignite', err); }
+    if (ok === false || !(b.fire > 0)) {
+      if (prev === undefined) delete b.fireCause; else b.fireCause = prev;
+      return false;
+    }
+  } else {
+    b.fire = 1;
+    b.fireCause = 'disaster';
+    W_().changed(b);
+  }
   if (e) e.burned = (e.burned || 0) + 1;
   const [cx, cz] = centerOf(b);
   particles('fire', cx, cz, 12, groundAt(cx, cz) + (b.hgt || 1) * 0.6);
@@ -201,18 +241,18 @@ function trample(x, z, p = 1) {
 /* Disaster behaviours: start(e, x, z) -> bool, update(e, gd, dt)      */
 /* gd = game days elapsed this frame, dt = real seconds (unpaused)     */
 /* ------------------------------------------------------------------ */
-const H = {};
+const H = Object.create(null);
 
 /* ---------------- fire outbreak ---------------- */
 H.fire = {
   start(e, x, z) {
     let cx = x, cz = z;
     if (cx == null) {
-      const b = randomBuilding((b) => b.key === 'grow' && b.pop > 0 && !b.fire) || randomBuilding((b) => notRubble(b) && !b.fire);
+      const b = randomBuilding((b) => b.key === 'grow' && b.pop > 0 && canBurn(b)) || randomBuilding(canBurn);
       if (!b) return false;
       [cx, cz] = centerOf(b);
     }
-    const near = buildingsNear(cx, cz, 7, (b) => notRubble(b) && !(b.fire > 0));
+    const near = buildingsNear(cx, cz, 7, canBurn);
     if (!near.length) return false;
     near.sort((a, b) => a.d - b.d);
     const pool = near.slice(0, 10);
@@ -227,15 +267,21 @@ H.fire = {
     if (!e.targets.length) return false;
     e.x = cx; e.z = cz; e.radius = rad; e.phase = 'burning';
     e.burning = e.targets.length;
-    sfx('siren', cx, cz);
     return true;
   },
   update(e) {
     const S = S_();
-    let n = 0;
+    let n = 0, lost = 0;
     for (const id of e.targets) {
       const b = S.buildings.get(id);
-      if (b && b.fire > 0) n++;
+      if (!b) lost++; // burnt down (sim turned it into rubble)
+      else if (b.fire > 0) n++;
+    }
+    if (lost > (e.lost || 0)) {
+      const dl = lost - (e.lost || 0);
+      e.lost = lost;
+      e.destroyed = (e.destroyed || 0) + dl;
+      stats().destroyed = (stats().destroyed || 0) + dl;
     }
     e.burning = n;
     e.intensity = M.clamp(n / Math.max(1, e.targets.length) + 0.2, 0, 1);
@@ -267,8 +313,6 @@ H.tornado = {
     e.hits = new Set();
     e.tiles = new Set();
     e.phase = 'active';
-    sfx('siren', x, z);
-    sfx('wind', x, z);
     return true;
   },
   update(e, gd) {
@@ -338,8 +382,6 @@ H.meteor = {
     e.mx = e.sx; e.my = e.sy; e.mz = e.sz;
     e.y = e.my;
     e.phase = 'incoming';
-    sfx('alarm', x, z);
-    sfx('meteor', x, z);
     return true;
   },
   update(e, gd, dt) {
@@ -399,8 +441,7 @@ H.meteor = {
         }
       }
     shakeAt(cx, cz, 2.2, 90);
-    sfx('explosion', cx, cz, 1);
-    sfx('rumble', cx, cz);
+    sfx('explosion', cx, cz, 1); // one impact sound (the rumble is part of the explosion)
     const gy = groundAt(cx, cz);
     particles('debris', cx, cz, 90, gy + 0.5);
     particles('dust', cx, cz, 70, gy + 0.5);
@@ -448,8 +489,6 @@ H.earthquake = {
       const fx = Math.floor(x + cdx * s - cdz * j), fz = Math.floor(z + cdz * s + cdx * j);
       e.cracks.push({ x: fx, z: fz, at: ((s + L) / (2 * L)) * (e.duration * 0.7) + 0.3 });
     }
-    sfx('rumble', x, z, 1);
-    sfx('alarm', x, z);
     return true;
   },
   update(e, gd, dt) {
@@ -499,7 +538,7 @@ H.ufo = {
     e.goal = null;
     e.lastAbduct = 0;
     e.abducted = 0;
-    sfx('ufo', tx, tz);
+    e.taken = []; // names of the first few abducted buildings (for the end summary)
     return true;
   },
   update(e, gd) {
@@ -526,29 +565,35 @@ H.ufo = {
       if (e.lifting) {
         const L = e.lifting;
         const b = S.buildings.get(L.id);
-        if (!b) { e.lifting = null; }
-        else {
+        if (!b || !ufoTarget(b)) {
+          // gone (bulldozed, burnt) or caught fire mid-lift: drop it back down
+          if (b) delete b.disLift;
+          e.lifting = null;
+          e.lastAbduct = td - 1;
+        } else {
+          L.b = b;
           L.progress = Math.min(1, L.progress + gd / 1.4);
           L.lift = L.progress * L.progress * Math.max(0.5, e.y - L.y0 - L.h - 0.3);
           b.disLift = L.lift;
           if (L.progress >= 1) {
             const name = VC.sim && VC.sim.buildingName ? VC.sim.buildingName(b) : b.key;
-            W_().removeBuilding(b, 'disaster');
+            delete b.disLift;
+            W_().removeBuilding(b, REASON().ABDUCT);
             e.abducted++;
+            if (e.taken && e.taken.length < 3 && name && e.taken.indexOf(String(name)) < 0) e.taken.push(String(name));
             stats().abducted = (stats().abducted || 0) + 1;
             e.destroyed = (e.destroyed || 0) + 1;
             stats().destroyed = (stats().destroyed || 0) + 1;
             particles('sparkle', L.x, L.z, 40, e.y - 1);
             sfx('abduct', L.x, L.z);
             emit(e, 'update', { what: 'abduct', key: b.key, buildingName: name });
-            toast(`👽 The UFO abducted <b>${name}</b>!`, 'warn', '🛸');
             e.lifting = null;
             e.lastAbduct = td;
           }
         }
       } else if (e.goal) {
         const b = S.buildings.get(e.goal);
-        if (!b) e.goal = null;
+        if (!b || !ufoTarget(b)) e.goal = null;
         else {
           const [gx, gz] = centerOf(b);
           if (move(gx, gz, 3.5) < 0.15) {
@@ -562,18 +607,19 @@ H.ufo = {
         const a = td * 0.6;
         move(e.tx + Math.cos(a) * 3, e.tz + Math.sin(a) * 3, 2);
         if (td - e.lastAbduct >= 2 && td - e.hoverStart < e.hoverDays) {
-          const near = buildingsNear(e.x, e.z, 14, (b) => notRubble(b) && !b.fire);
-          if (near.length) {
-            // prefer taller / fancier buildings; remember the skyline so we fly over it
-            let best = null, bs = -1;
-            e.ceiling = 0;
-            for (const c of near) {
-              e.ceiling = Math.max(e.ceiling, groundAt(c.b.x, c.b.z) + (c.b.hgt || 1));
-              const s = rnd() * (1 + (b_level(c.b)) * 0.5 + (c.b.key !== 'grow' ? 1 : 0)) - c.d * 0.03;
-              if (s > bs) { bs = s; best = c.b; }
-            }
-            e.goal = best.id;
-          } else e.lastAbduct = td; // nothing here: try again later
+          const near = buildingsNear(e.x, e.z, 14, notRubble);
+          e.ceiling = 0;
+          let best = null, bs = -Infinity;
+          for (const c of near) {
+            // remember the skyline so we fly over it
+            e.ceiling = Math.max(e.ceiling, groundAt(c.b.x, c.b.z) + (c.b.hgt || 1));
+            const w = ufoWeight(c.b);
+            if (!w) continue;
+            const s = rnd() * w - c.d * 0.03;
+            if (s > bs) { bs = s; best = c.b; }
+          }
+          if (best) e.goal = best.id;
+          else e.lastAbduct = td; // nothing worth taking here: try again later
         }
       }
       if (td - e.hoverStart >= e.hoverDays && !e.lifting && !e.goal) {
@@ -591,10 +637,29 @@ H.ufo = {
     }
   },
   startText: () => '<b>Unidentified flying object</b> spotted over the city!',
-  endText: (e) => `The UFO has left${e.abducted ? ` with ${e.abducted} of our buildings` : ''}. We are not alone.`,
+  endText: (e) => {
+    if (!e.abducted) return 'The UFO has left without taking anything. We are not alone.';
+    const n = e.abducted, names = (e.taken || []).map(esc);
+    const list = names.length ? ` (${names.join(', ')}${n > names.length ? ', …' : ''})` : '';
+    return `The UFO has left with ${n === 1 ? 'one of our buildings' : `${n} of our buildings`}${list}. We are not alone.`;
+  },
 };
-function b_level(b) {
-  return b.key === 'grow' ? (b.level || 1) * (b.den || 1) * 0.5 : 2;
+/** Small cosmetic civic buildings a UFO may take when no ordinary building is around. */
+const UFO_MINOR = { small_park: 1, playground: 1, plaza: 1, statue: 1 };
+/** Whether a UFO may abduct b: growables, or a few cheap cosmetic civic buildings. Never utilities, services, landmarks. */
+function ufoTarget(b) {
+  if (!b || b.key === 'rubble' || b.fire > 0) return false;
+  if (b.key === 'grow') return true;
+  const def = VC.BLD[b.key];
+  if (!def || !UFO_MINOR[b.key]) return false;
+  return !(def.power || def.water || def.unique || (def.cost || 0) > 2000);
+}
+/** Target preference: taller / denser growables; finished buildings over construction sites; civic rarely. */
+function ufoWeight(b) {
+  if (!ufoTarget(b)) return 0;
+  if (b.key !== 'grow') return 0.25;
+  const w = 1 + (b.level || 1) * (b.den || 1) * 0.25;
+  return b.built < 1 ? w * 0.3 : w;
 }
 
 /* ---------------- Cubezilla ---------------- */
@@ -637,7 +702,6 @@ H.monster = {
     e.nextBreath = 3 + rnd() * 3;
     e.lastFoot = 0;
     e.phase = 'enter';
-    sfx('roar', sx, sz, 1);
     return true;
   },
   update(e, gd) {
@@ -708,6 +772,21 @@ H.monster = {
 function emit(e, phase, extra) {
   VC.bus.emit('disaster', Object.assign({ type: e.type, phase, x: e.x, z: e.z, name: e.name, icon: e.icon, entry: e, id: e.id }, extra || {}));
 }
+/**
+ * The point a camera should look at for entry e right now (clamped into the map): the UFO's target area
+ * while it is still flying in from the edge, the impact point of a meteor, else the entry itself.
+ */
+function focusPoint(e) {
+  const S = S_();
+  if (!e) return null;
+  let x = e.x, z = e.z;
+  if (e.type === 'ufo' && e.phase === 'arrive' && Number.isFinite(e.tx) && Number.isFinite(e.tz)) { x = e.tx; z = e.tz; }
+  else if (e.type === 'meteor' && Number.isFinite(e.ix) && Number.isFinite(e.iz)) { x = e.ix; z = e.iz; }
+  x = +x; z = +z;
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+  if (S) { x = M.clamp(x, 0, S.W - 1); z = M.clamp(z, 0, S.H - 1); }
+  return [x, z];
+}
 
 function randomType() {
   const S = S_();
@@ -729,6 +808,12 @@ function randomType() {
 function scheduleNext(S, minYears = 3, maxYears = 5) {
   stats().nextDay = S.time.day + Math.round(YEAR * (minYears + rnd() * (maxYears - minYears)));
 }
+/** After random disasters get switched on, give the player 6-12 months of peace (nextDay may be long overdue). */
+function grace(S) {
+  const st = stats();
+  const min = S.time.day + 180;
+  if (st.nextDay == null || st.nextDay < min) st.nextDay = min + Math.round(rnd() * 180);
+}
 
 function onDay() {
   const S = S_();
@@ -744,6 +829,70 @@ function onDay() {
   else st.nextDay = S.time.day + 30;
 }
 
+/** Settings → "Random disasters" also switches the running city (so the two toggles act as one). */
+function onSettings(set) {
+  const g = ((set || VC.settings || {}).disasters) !== false;
+  if (lastGlobal === null) { lastGlobal = g; return; }
+  if (g === lastGlobal) return;
+  const S = S_();
+  const before = !!(S && !S.demo && S.disastersEnabled && lastGlobal);
+  lastGlobal = g;
+  if (!S || S.demo) return;
+  S.disastersEnabled = g;
+  if (!before && D.randomEnabled()) grace(S);
+}
+
+/* ---------------- save / load of active entries ---------------- */
+/** Plain-JSON copy of an active entry: Sets -> arrays, building references -> ids. */
+function packEntry(e) {
+  const o = Object.assign({}, e);
+  delete o.entry;
+  for (const k of SET_FIELDS) if (o[k] instanceof Set) o[k] = Array.from(o[k]);
+  if (o.lifting) {
+    o.lifting = Object.assign({}, o.lifting);
+    delete o.lifting.b;
+  }
+  return JSON.parse(JSON.stringify(o));
+}
+/** Rebuilds an active entry saved by packEntry (null if it is unusable). */
+function unpackEntry(S, o) {
+  if (!o || typeof o !== 'object' || !H[o.type] || !TYPE[o.type]) return null;
+  const e = Object.assign({}, o);
+  const def = TYPE[e.type];
+  e.name = def.name; e.icon = def.icon;
+  for (const k of ['x', 'z']) { e[k] = +e[k]; if (!Number.isFinite(e[k])) return null; }
+  const num = (k, d) => { e[k] = Number.isFinite(+e[k]) && e[k] !== null ? +e[k] : d; };
+  num('y', 0); num('t', 0); num('rt', 0); num('dir', 0); num('radius', 1); num('intensity', 0); num('destroyed', 0); num('burned', 0);
+  for (const k of SET_FIELDS) if (k in e) e[k] = new Set(Array.isArray(e[k]) ? e[k] : []);
+  if (e.type === 'tornado') { if (!e.hits) e.hits = new Set(); if (!e.tiles) e.tiles = new Set(); }
+  if (e.lifting) {
+    const b = e.lifting.id != null ? S.buildings.get(e.lifting.id) : null;
+    if (b && ufoTarget(b)) { e.lifting.b = b; b.disLift = +e.lifting.lift || 0; }
+    else e.lifting = null;
+  }
+  if (e.type === 'ufo' && !Array.isArray(e.taken)) e.taken = [];
+  e.done = false;
+  e.id = Number.isFinite(+e.id) ? +e.id : ++seq;
+  if (e.id > seq) seq = e.id;
+  return e;
+}
+const saveHooks = {
+  save(S) {
+    if (!S || S !== S_() || !D.active.length) return undefined;
+    return { v: 1, day: S.time.day, active: D.active.map(packEntry) };
+  },
+  load(S, data) {
+    if (!S || S !== S_() || !data || !Array.isArray(data.active)) return;
+    D.active = [];
+    for (const o of data.active) {
+      if (D.active.length >= 4) break;
+      let e = null;
+      try { e = unpackEntry(S, o); } catch (err) { console.warn('[disasters] could not restore an active disaster', err); }
+      if (e && !D.active.some((a) => a.id === e.id)) D.active.push(e);
+    }
+  },
+};
+
 /* ------------------------------------------------------------------ */
 /* Public API                                                           */
 /* ------------------------------------------------------------------ */
@@ -756,10 +905,17 @@ const D = (VC.disasters = {
     VC.bus.on('day', () => {
       try { onDay(); } catch (err) { console.error('[disasters] day', err); }
     });
+    VC.bus.on('settings', (set) => {
+      try { onSettings(set); } catch (err) { console.error('[disasters] settings', err); }
+    });
+    // a disaster fire that went out is an ordinary building again
+    VC.bus.on('bldChange', (b) => { if (b && b.fireCause === 'disaster' && !(b.fire > 0)) delete b.fireCause; });
+    if (VC.save && VC.save.register) VC.save.register('disasters', saveHooks);
   },
 
   reset(S) {
-    D.active = [];
+    D.active = []; // a loaded game gets its running disasters back from the 'disasters' save hook
+    lastGlobal = VC.settings ? VC.settings.disasters !== false : true;
     rnd = M.rng((S.seed ^ 0x5eed) + S.time.day);
     const st = S.disasterStats || (S.disasterStats = {});
     if (st.count == null) st.count = 0;
@@ -796,8 +952,9 @@ const D = (VC.disasters = {
 
   /**
    * Starts a disaster. x, z (tiles, optional) = target point (fire/meteor/quake: centre; tornado/
-   * monster: start point; ufo: area to hover over). opts.random marks scheduler-triggered ones.
-   * Returns true if it started.
+   * monster: start point; ufo: area to hover over). Both or neither must be given; non-numeric /
+   * non-finite values or points far outside the map are refused (points up to 2 tiles off the edge are
+   * clamped). opts.random marks scheduler-triggered ones. Returns true if it started.
    */
   trigger(type, x, z, opts = {}) {
     const S = S_();
@@ -805,26 +962,35 @@ const D = (VC.disasters = {
     if (!S || !h || !def) return false;
     if (D.active.length >= 4) return false;
     if (type !== 'fire' && type !== 'meteor' && D.active.some((a) => a.type === type)) return false;
-    if (x != null && z != null) {
-      x = M.clamp(+x, 0, S.W - 0.01);
-      z = M.clamp(+z, 0, S.H - 0.01);
+    const given = (v) => v != null && v !== '';
+    if (given(x) || given(z)) {
+      const px = given(x) ? +x : NaN, pz = given(z) ? +z : NaN;
+      if (!Number.isFinite(px) || !Number.isFinite(pz) || px < -2 || pz < -2 || px > S.W + 2 || pz > S.H + 2) {
+        console.warn('[disasters] trigger: invalid coordinates', x, z);
+        return false;
+      }
+      x = M.clamp(px, 0, S.W - 0.01);
+      z = M.clamp(pz, 0, S.H - 0.01);
     } else x = z = null;
     const e = {
       id: ++seq, type, name: def.name, icon: def.icon,
       x: 0, z: 0, y: 0, t: 0, rt: 0, dir: 0, radius: 1, phase: 'start', intensity: 0,
-      destroyed: 0, burned: 0, random: !!opts.random, day: S.time.day,
+      destroyed: 0, burned: 0, random: !!(opts && opts.random), day: S.time.day,
     };
-    if (!h.start(e, x, z)) return false;
+    let ok = false;
+    try { ok = h.start(e, x, z); } catch (err) { console.error('[disasters] start ' + type, err); ok = false; }
+    if (!ok || !Number.isFinite(e.x) || !Number.isFinite(e.z)) return false;
     if (!e.y) e.y = groundAt(e.x, e.z);
     D.active.push(e);
     const st = stats();
     st.count++;
     st.byType[type] = (st.byType[type] || 0) + 1;
     st.lastDay = S.time.day;
-    toast(h.startText(e), type === 'ufo' ? 'warn' : 'bad', def.icon);
-    emit(e, 'start', { random: e.random });
+    // the only start notification: the HUD shows the alert card, audio plays the alarm
+    const fp = focusPoint(e) || [e.x, e.z];
+    emit(e, 'start', { x: fp[0], z: fp[1], random: e.random });
     // random disasters slow the game down so the player can react
-    if (opts.random && S.time.speed > 1 && VC.setSpeed) VC.setSpeed(1);
+    if (e.random && S.time.speed > 1 && VC.setSpeed) VC.setSpeed(1);
     return true;
   },
 
@@ -832,14 +998,24 @@ const D = (VC.disasters = {
   info(type) {
     return TYPE[type] || null;
   },
+  /** Live active entry by id (null once it has ended). */
+  get(id) {
+    if (id == null) return null;
+    const n = +id;
+    return D.active.find((e) => e.id === n) || null;
+  },
   /** Whether random disasters can currently happen. */
   randomEnabled() {
     const S = S_();
-    return !!(S && S.disastersEnabled && (!VC.settings || VC.settings.disasters !== false));
+    return !!(S && !S.demo && S.disastersEnabled && (!VC.settings || VC.settings.disasters !== false));
   },
+  /** Turns random disasters on/off for the running city (switching on grants 6-12 months of peace). */
   setEnabled(on) {
     const S = S_();
-    if (S) S.disastersEnabled = !!on;
+    if (!S) return;
+    const before = D.randomEnabled();
+    S.disastersEnabled = !!on;
+    if (!before && D.randomEnabled()) grace(S);
   },
   /** Days until the next random disaster may strike (null if disabled). */
   nextIn() {
@@ -847,13 +1023,23 @@ const D = (VC.disasters = {
     if (!S || !D.randomEnabled()) return null;
     return Math.max(0, (stats().nextDay || 0) - S.time.day);
   },
-  /** Moves the camera to an active disaster (entry or index; default the newest). */
+  /**
+   * Moves the camera to an active disaster: an entry, anything with an id (e.g. the 'disaster' event —
+   * the LIVE entry with that id is used; once it has ended, the object's own x/z), or an index into
+   * active (default the newest). Returns false if there is nothing (finite) to look at.
+   */
   focus(which) {
-    const e = typeof which === 'object' && which ? which : D.active[which == null ? D.active.length - 1 : which];
+    let e = null;
+    if (which && typeof which === 'object') e = (which.id != null && D.get(which.id)) || which;
+    else e = D.active[which == null ? D.active.length - 1 : which];
     if (!e || !VC.camera || !VC.camera.focus) return false;
-    VC.camera.focus(e.x, e.z, 38);
+    const p = focusPoint(e);
+    if (!p) return false;
+    VC.camera.focus(p[0], p[1], 38);
     return true;
   },
+  /** World point to look at for an entry (see focus); null if unknown. */
+  focusPoint,
   /** Ends every active disaster immediately (debug / new game). */
   clear() {
     for (const e of D.active.splice(0)) finish(e);
@@ -864,8 +1050,11 @@ function finish(e) {
   const st = stats();
   st.survived[e.type] = (st.survived[e.type] || 0) + 1;
   if (e.lifting && e.lifting.b) delete e.lifting.b.disLift;
+  e.lifting = null;
   e.phase = 'end';
   const h = H[e.type];
-  toast(h.endText(e), e.destroyed > 5 ? 'warn' : 'info', e.icon);
+  let text = '';
+  try { text = h.endText(e); } catch (err) { text = `${e.name} is over.`; }
+  toast(text, e.destroyed > 5 ? 'warn' : 'info', e.icon);
   emit(e, 'end', { destroyed: e.destroyed || 0, burned: e.burned || 0, abducted: e.abducted || 0 });
 }

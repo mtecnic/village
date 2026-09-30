@@ -1,34 +1,59 @@
 /*
  * VOXELPOLIS — advisors, news ticker, milestones + unlock announcements, achievements.
  *
+ * NOTIFICATION CONTRACT (one domain event -> one visible notification + one sound). This module only
+ * EMITS domain events; the HUD displays them and audio plays the matching sound from the same bus event,
+ * so nothing here emits 'toast' or 'sfx' for them.
+ *
  * ADVISORS: on bus 'month' (after econ) a context snapshot of the city is gathered once and every
  * RULE is evaluated. Triggered rules respect per-rule cooldowns; at most MAX_PER_MONTH new messages
  * are posted (worst severity first, one per advisor). Messages land in the inbox (newest first,
- * capped); 'warn'/'bad' ones are also emitted on bus 'advisor' (the HUD pops a card).
+ * capped). Broadcast on bus 'advisor' (message object): 'warn'/'bad' (the HUD pops a card; a repeated
+ * warning within 180 days only lands in the inbox) and 'good' (the HUD shows one toast); 'info' stays
+ * in the inbox (unread badge). Broadcasts are paced to one per CARD_GAP_MS real time (queue, worst
+ * first; stale / already-read queued messages are dropped). post(adv, {…, silent:true}) never
+ * broadcasts (inbox record of something shown elsewhere; add read:true to skip the unread badge).
  * advice(key) evaluates the same rules for one advisor right now (ignoring cooldowns).
  *
  * NEWS: 2-4 headlines per month are scheduled over the following month (context-aware ones built
  * from the snapshot + funny evergreen ones from VC.headlines.POOL); events (disasters, milestones,
- * policies, loans, landmarks) make the news immediately. Bus 'news' {text}.
+ * policies, loans, landmarks) make the news immediately, max 2 a day (extras queued; queued items older
+ * than NEWS_STALE_DAYS are dropped). Bus 'news' {text (plain text, not HTML), key?, day}; a newer item
+ * with the same key replaces queued older ones (e.g. key 'milestone'). Other modules: pushNews(text, 0, key).
  *
- * MILESTONES: whenever S.peakPop crosses VC.MILESTONES[i].pop (checked daily): S.milestone = i,
- * reward, bus 'milestone', toast, news, fireworks. Newly unlocked buildings / roads / zone densities /
- * policies are announced.
+ * MILESTONES (checked daily): when S.peakPop crosses one or more VC.MILESTONES thresholds in one check,
+ * S.milestone jumps to the highest and ONE bus 'milestone' {index, milestone, from, reward (sum of every
+ * crossed milestone, granted here), unlocked: [keys newly unlocked since the previous announcement],
+ * items: [{kind, key, name, icon, unlock}]} is emitted, plus one news item and fireworks. No toast.
+ * UNLOCKS between milestones: bus 'unlock' {keys, items} (HUD: one "New: … unlocked" toast). Announced
+ * keys are remembered in S.adv.announced, so nothing is announced twice (not even across save/load).
  *
- * ACHIEVEMENTS: ACH list below; S.achievements[key] = day unlocked; bus 'achievement'.
+ * ACHIEVEMENTS: ACH list below; S.achievements[key] = day unlocked; bus 'achievement' {key, name, icon,
+ * desc} only (A.toastAchievements = true adds a bus toast for HUD-less setups; default false).
  *
- * Persistent data (plain JSON, saved with the state): S.adv {inbox, news, cooldown, …}.
+ * DISASTERS: a start only adds an inbox entry (read) + a headline — the HUD shows the alert card.
+ * DEMO: nothing at all happens while S.demo (title-screen city): no posts, news, milestones, achievements.
+ *
+ * Persistent data (plain JSON, saved with the state): S.adv {inbox, news, cooldown, announced, …}.
  */
 const M = VC.M, C = VC.C;
 const INBOX_CAP = 60, NEWS_CAP = 40, MAX_PER_MONTH = 2;
 const SEV_RANK = { bad: 3, warn: 2, good: 1, info: 1 };
 const HL = () => VC.headlines || { POOL: ['{city} news'], CTX: {}, fill: (t) => t };
+const CARD_GAP_MS = 10000; // min real time between two advisor broadcasts (cards / praise toasts)
+const CARD_STALE_MS = 90000, CARD_STALE_DAYS = 45, CARD_QUEUE_MAX = 6;
+const NEWS_STALE_DAYS = 20;
 
 let rnd = M.rng(1);
 let sawMaps = false, sawFlags = false; // has the real sim produced maps / network flags this game?
 let ctxCache = null, ctxDay = -1, ctxS = null;
+let cardQ = []; // advisor broadcasts waiting for their turn: [{m, at (ms), day, S}]
+let lastCardAt = -1e9;
+const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 function S_() { return VC.state; }
+/** True when advisors should act on this state (a real game, not the title-screen demo). */
+function live(S) { return !!(S && !S.demo); }
 const pct = (v) => Math.round(v * 100);
 const money = (v) => VC.fmt.money(v);
 const num = (v) => VC.fmt.num(v);
@@ -50,8 +75,12 @@ function gather(force) {
     S, st, day: S.time.day, pop: st.pop || 0, money: S.money,
     fc: VC.econ && VC.econ.forecast ? VC.econ.forecast() : { income: {}, expenses: {}, totalIncome: 0, totalExpenses: 0, net: 0 },
     count: {}, dept: {}, grow: { R: 0, C: 0, I: 0 }, growN: 0,
-    unpowered: 0, unwatered: 0, abandoned: 0, burning: 0, rubble: 0, parks: 0, landmarks: 0,
+    unpowered: 0, unwatered: 0, abandoned: 0, burning: 0, burningDis: 0, rubble: 0, parks: 0, landmarks: 0,
     powerCap: 0, waterCap: 0, renewCap: 0, fossilCap: 0,
+    // water sources: count, built ones without power (pumps need electricity), capacity of the powered ones
+    waterSrc: 0, waterDark: 0, waterCapLive: 0, waterDarkBy: {},
+    // industry fire safety: job-weighted fire coverage (0..1) and share of jobs with little coverage
+    indN: 0, indJobs: 0, indFire: 1, indUncov: 0,
     zoned: 0, zonedEmpty: 0, noAccess: 0, roads: 0, roadType: [0, 0, 0, 0], jam: 0, trafficAvg: 0,
     mapsOn: sawMaps || (S.ver && S.ver.maps > 0), flagsOn: sawFlags || (S.ver && S.ver.flags > 0),
     avg: {}, homeAvg: {},
@@ -59,10 +88,11 @@ function gather(force) {
   const keys = ['crime', 'pollution', 'happiness', 'health', 'edu', 'police', 'fire', 'park', 'garbage', 'landValue', 'noise'];
   const sum = {}, hsum = {};
   for (const k of keys) { sum[k] = 0; hsum[k] = 0; }
-  let wsum = 0, hw = 0;
+  let wsum = 0, hw = 0, indF = 0, indU = 0;
+  const fireMap = S.maps.fire;
   for (const b of S.buildings.values()) {
     if (b.key === 'rubble') { c.rubble++; continue; }
-    if (b.fire > 0) c.burning++;
+    if (b.fire > 0) { c.burning++; if (b.fireCause === 'disaster') c.burningDis++; }
     if (b.key === 'grow') {
       c.growN++;
       const z = VC.ZONES[b.zt];
@@ -77,6 +107,13 @@ function gather(force) {
       for (const k of keys) { const m = S.maps[k]; if (m) sum[k] += m[i] * w; }
       wsum += w;
       if (b.zt === 1) { for (const k of keys) { const m = S.maps[k]; if (m) hsum[k] += m[i] * w; } hw += w; }
+      if (b.zt === 3 && b.built >= 1 && fireMap) {
+        const jobs = Math.max(1, b.pop || 0), fc = fireMap[i] / 255;
+        c.indN++;
+        c.indJobs += jobs;
+        indF += fc * jobs;
+        if (fc < 0.3) indU += jobs;
+      }
       continue;
     }
     const def = VC.BLD[b.key];
@@ -90,8 +127,21 @@ function gather(force) {
       if (RENEWABLE[b.key]) c.renewCap += def.power;
       if (FOSSIL[b.key] || b.key === 'nuclear_plant') c.fossilCap += def.power;
     }
-    if (def.water) c.waterCap += def.water;
+    if (def.water) {
+      c.waterCap += def.water;
+      c.waterSrc++;
+      if (b.built >= 1 && c.flagsOn && !b.powered) { c.waterDark++; c.waterDarkBy[b.key] = (c.waterDarkBy[b.key] || 0) + 1; }
+      else if (b.built >= 1) c.waterCapLive += def.water;
+    }
   }
+  c.indFire = c.indJobs ? indF / c.indJobs : 1;
+  c.indUncov = c.indJobs ? indU / c.indJobs : 0;
+  c.burningOrd = c.burning - c.burningDis; // fires not caused by an ongoing disaster
+  c.disasterActive = !!(VC.disasters && VC.disasters.active && VC.disasters.active.length);
+  // buildings that burned down recently (S.adv.burnLog, fed by bus 'bldRemove' reason 'fire')
+  const log = (S.adv && S.adv.burnLog) || [];
+  c.burnt90 = 0; c.burnt90I = 0;
+  for (const f of log) if (f.day >= S.time.day - 90) { c.burnt90++; if (f.zt === 3) c.burnt90I++; }
   for (const k of keys) {
     c.avg[k] = wsum ? sum[k] / wsum / 255 : 0;
     c.homeAvg[k] = hw ? hsum[k] / hw / 255 : 0;
@@ -203,17 +253,29 @@ const RULES = [
     when: (c) => c.mapsOn && c.pop >= 1500 && c.hasAny('fire_station', 'fire_hq') && c.avg.fire < 0.35,
     title: 'Gaps in fire coverage',
     text: (c) => `Only about ${pct(Math.min(1, c.avg.fire * 1.6))}% of neighbourhoods are well inside a fire station's reach. The rest are on their own.` },
+  { key: 's_fire_ind', adv: 'safety', sev: (c) => (c.burnt90I >= 3 ? 'bad' : 'warn'), cd: 150, overlay: 'fire',
+    when: (c) => c.mapsOn && c.indN >= 6 && c.indJobs >= 150 && c.hasAny('fire_station', 'fire_hq') && c.indUncov >= 0.35,
+    title: 'Factories without fire cover',
+    text: (c) => `${pct(c.indUncov)}% of our factory jobs are outside a fire station's reach, and industry catches fire twice as easily as homes.` +
+      (c.burnt90I ? ` We lost ${num(c.burnt90I)} industrial building${c.burnt90I === 1 ? '' : 's'} to fire in the last three months.` : '') +
+      ' Put a Fire Station next to the industrial zone.' },
+  { key: 's_fire_losses', adv: 'safety', sev: 'warn', cd: 120, overlay: 'fire', when: (c) => c.burnt90 >= 6,
+    title: 'Fires keep burning us down',
+    text: (c) => `We lost ${num(c.burnt90)} buildings to fire in the last three months${c.burnt90I ? ` (${num(c.burnt90I)} of them factories)` : ''}. ` +
+      `More fire stations closer to the blazes — and full fire funding (now ${pct(c.fund('fire'))}%) — would stop the spread.` },
   { key: 's_police_cov', adv: 'safety', sev: 'info', cd: 180, overlay: 'police',
     when: (c) => c.mapsOn && c.pop >= 2000 && c.hasAny('police_station', 'police_hq') && c.avg.police < 0.3,
     title: 'Thin police coverage',
     text: 'Our patrols cover too little of the city. Check the Police overlay and fill the gaps.' },
-  { key: 's_burning', adv: 'safety', sev: 'warn', cd: 30, when: (c) => c.burning >= 3,
+  // (fires set by an ongoing disaster are already on the HUD's disaster alert)
+  { key: 's_burning', adv: 'safety', sev: 'warn', cd: 30, when: (c) => c.burningOrd >= 3 && !c.disasterActive,
     title: 'Fires burning!',
-    text: (c) => `${c.burning} buildings are ablaze right now! Fire funding is at ${pct(c.fund('fire'))}% — my crews need everything they've got.` },
+    text: (c) => `${c.burningOrd} buildings are ablaze right now! Fire funding is at ${pct(c.fund('fire'))}% — my crews need everything they've got.` },
   { key: 's_nuclear', adv: 'safety', sev: 'warn', cd: 240, panel: 'budget', when: (c) => c.has('nuclear_plant') && c.fund('fire') < 0.8,
     title: 'Nuclear safety',
     text: "We run a nuclear plant with an underfunded fire department. That's not a plan, that's a movie plot." },
-  { key: 's_praise', adv: 'safety', sev: 'good', cd: 300, when: (c) => c.mapsOn && c.pop >= 2000 && c.avg.crime < 0.08 && c.hasAny('fire_station', 'fire_hq'),
+  { key: 's_praise', adv: 'safety', sev: 'good', cd: 300,
+    when: (c) => c.mapsOn && c.pop >= 2000 && c.avg.crime < 0.08 && c.hasAny('fire_station', 'fire_hq') && c.burning === 0 && c.burnt90 === 0 && c.indUncov < 0.35,
     title: 'All quiet',
     text: ["Streets are quiet and the hoses are dry. That's how I like it.", 'Crime is low and nothing is on fire. I may take a vacation. Kidding. I never take vacations.'] },
 
@@ -319,7 +381,12 @@ const RULES = [
     text: 'No water supply! A Water Pump by the shore or a Water Tower anywhere will get things flowing.' },
   { key: 'u_water_short', adv: 'utilities', sev: 'bad', cd: 75, overlay: 'water', when: (c) => c.st.waterDemand > c.st.waterSupply && c.st.waterDemand > 0,
     title: 'Water shortage!',
-    text: (c) => `Water demand (${num(c.st.waterDemand)} kL) is more than we pump (${num(c.st.waterSupply)} kL). Taps are sputtering!` },
+    text: (c) => `Water demand (${num(c.st.waterDemand)} kL) is more than we pump (${num(c.st.waterSupply)} kL). Taps are sputtering! ` +
+      (c.waterDark ? waterDarkText(c) : 'Build another Water Pump by the shore or a Water Tower — and make sure it has power.') },
+  { key: 'u_water_dark', adv: 'utilities', sev: (c) => (c.waterCapLive === 0 || c.st.waterDemand > c.st.waterSupply ? 'bad' : 'warn'), cd: 60, overlay: 'power',
+    when: (c) => c.flagsOn && c.waterDark > 0 && (c.growN >= 10 || c.pop >= 100),
+    title: 'Water pumps have no power',
+    text: (c) => waterDarkText(c) },
   { key: 'u_water_margin', adv: 'utilities', sev: 'warn', cd: 120, overlay: 'water',
     when: (c) => c.st.waterDemand > 50 && c.st.waterDemand <= c.st.waterSupply && c.st.waterDemand > c.st.waterSupply * 0.9,
     title: 'Water running tight',
@@ -396,6 +463,20 @@ for (const d of VC.DEPARTMENTS) {
   });
 }
 
+/** "2 Water Towers and 1 Water Pump have no power: …" (what, why, what to do). */
+function waterDarkText(c) {
+  const n = c.waterDark;
+  const parts = Object.keys(c.waterDarkBy).map((k) => {
+    const cnt = c.waterDarkBy[k], nm = (VC.BLD[k] && VC.BLD[k].name) || 'water source';
+    return cnt === 1 ? (n === 1 ? (c.waterSrc === 1 ? 'Our only ' : 'One ') + nm : '1 ' + nm) : `${num(cnt)} ${nm}s`;
+  });
+  const who = (parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0] || `${num(n)} water sources`) + (n === 1 ? ' has' : ' have');
+  const why = c.st.powerDemand > c.st.powerSupply
+    ? 'the brownout cut them off. Fix the power shortage first — water pumps run on electricity'
+    : 'water pumps run on electricity. Connect them to the grid with a road or a power line';
+  return `${who} no power: ${why}. Until then they pump nothing.`;
+}
+
 /** Generic tips per advisor, used by advice() when nothing is wrong. */
 const TIPS = {
   finance: ['Taxes around 9% keep everyone content. Above 12% growth slows; above 15% people start packing.', 'Budget sliders above 100% buy diminishing returns. 100% is usually the sweet spot.', 'Loans are fine for big investments, but interest adds up. Pay them off early when flush.', 'Wealthy citizens pay far more tax. Parks, schools and clean air attract them.'],
@@ -403,7 +484,7 @@ const TIPS = {
   health: ['Clinics keep neighbourhoods healthy; hospitals cover whole districts.', 'Education raises land value and attracts high-tech industry.', 'Libraries are cheap and people love them. So do I.'],
   environment: ['Keep industry downwind and away from homes. Parks soak up the grumbles.', 'Wind turbines love hills. Solar farms love money.', 'Recycling beats landfills once you can afford it.'],
   transport: ['Grids with an avenue every few blocks keep traffic moving.', 'Buses and metros take cars off the road — place them where it’s busiest.', 'Highways are fast but give no zone access. Connect them with streets.'],
-  utilities: ['Build power before zoning — buildings won’t grow in the dark.', 'Water pumps must touch water; water towers work anywhere.', 'Power lines carry electricity across empty land.'],
+  utilities: ['Build power before zoning — buildings won’t grow in the dark.', 'Water pumps must touch water; water towers work anywhere.', 'Water pumps and towers run on electricity: no power, no water.', 'Power lines carry electricity across empty land.'],
   planning: ['Watch the RCI demand bars and zone whatever is highest.', 'Mix homes near shops so people can walk to work.', `Density unlocks with population: Medium at ${num(VC.DENSITY_UNLOCK[2])}, High at ${num(VC.DENSITY_UNLOCK[3])}.`],
 };
 
@@ -422,6 +503,12 @@ function ensureAdv(S) {
   if (!a.recent) a.recent = [];
   if (a.nextId == null) a.nextId = 1;
   if (a.unlockPop == null) a.unlockPop = S.peakPop || 0;
+  if (!a.announced || typeof a.announced !== 'object') {
+    // everything below the last announced population was already announced (or was there from the start)
+    a.announced = {};
+    for (const u of unlocksBetween(0, a.unlockPop)) a.announced[u.key] = 1;
+  }
+  if (!Array.isArray(a.burnLog)) a.burnLog = [];
   if (!a.stats) a.stats = { spent: 0 };
   if (a.prevPop == null) a.prevPop = S.stats.pop || 0;
   if (a.prevTax == null) a.prevTax = null;
@@ -434,29 +521,64 @@ function textOf(r, c) {
   return t;
 }
 
-/** Posts a message from an advisor. msg: {title, text, severity, key?, panel?, overlay?, x?, z?}. */
+/**
+ * Posts a message from an advisor. msg: {title, text (plain text), severity, key?, panel?, overlay?, x?, z?,
+ * silent? (inbox only, never broadcast), read? (no unread badge)}. Returns the inbox entry (null in the demo).
+ * warn/bad/good messages are broadcast on bus 'advisor' (paced, see broadcast()); audio plays the sound.
+ */
 function post(advKey, msg) {
   const S = S_();
-  if (!S) return null;
+  if (!live(S)) return null;
   const a = ensureAdv(S);
   const def = VC.ADVISORS[advKey] || VC.ADVISORS.planning;
   const m = Object.assign({
     id: a.nextId++, advisor: advKey, name: def.name, role: def.role, icon: def.icon, color: def.color,
     title: '', text: '', severity: 'info', day: S.time.day, read: false,
   }, msg);
+  const silent = !!m.silent;
+  delete m.silent;
   a.inbox.unshift(m);
   if (a.inbox.length > INBOX_CAP) a.inbox.length = INBOX_CAP;
+  if (silent) return m;
   if (m.severity === 'warn' || m.severity === 'bad') {
     // pop a HUD card; a repeated warning within 180 days only lands in the inbox
     const k = m.key || m.title;
     const last = a.carded[k];
     if (m.severity === 'bad' || last == null || S.time.day - last >= 180) {
       a.carded[k] = S.time.day;
-      VC.bus.emit('advisor', m);
-      VC.bus.emit('sfx', { name: m.severity === 'bad' ? 'alert' : 'notify' });
+      broadcast(S, m);
     }
-  }
+  } else if (m.severity === 'good') broadcast(S, m); // the HUD shows praise as one toast
   return m;
+}
+/** Emits bus 'advisor' now, or queues it so at most one advisor popup appears per CARD_GAP_MS. */
+function broadcast(S, m) {
+  const t = nowMs();
+  if (!cardQ.length && t - lastCardAt >= CARD_GAP_MS) {
+    lastCardAt = t;
+    VC.bus.emit('advisor', m);
+    return;
+  }
+  const k = m.key || m.title;
+  cardQ = cardQ.filter((q) => (q.m.key || q.m.title) !== k); // a newer copy replaces the queued one
+  cardQ.push({ m, at: t, day: S.time.day, S });
+  cardQ.sort((x, y) => SEV_RANK[y.m.severity] - SEV_RANK[x.m.severity] || x.at - y.at);
+  if (cardQ.length > CARD_QUEUE_MAX) cardQ.length = CARD_QUEUE_MAX; // drop the least important
+}
+/** Releases the next queued advisor popup when its turn has come (called every frame). */
+function flushCards() {
+  if (!cardQ.length) return;
+  const t = nowMs();
+  if (t - lastCardAt < CARD_GAP_MS) return;
+  const S = S_();
+  while (cardQ.length) {
+    const q = cardQ.shift();
+    // stale: another game, read in the inbox meanwhile, or too old to still be news
+    if (q.S !== S || !live(S) || q.m.read || t - q.at > CARD_STALE_MS || S.time.day - q.day > CARD_STALE_DAYS) continue;
+    lastCardAt = t;
+    VC.bus.emit('advisor', q.m);
+    return;
+  }
 }
 
 function monthlyAdvice(S, c) {
@@ -496,25 +618,46 @@ function monthlyAdvice(S, c) {
 /* ------------------------------------------------------------------ */
 /* News                                                                 */
 /* ------------------------------------------------------------------ */
-function emitNews(text, force) {
+/**
+ * Publishes a headline (plain text). force: skip the 2-a-day limit (queued items). key: topic tag —
+ * a newer headline with the same key replaces queued older ones (e.g. 'milestone').
+ */
+function emitNews(text, force, key) {
   const S = S_();
-  if (!S || !text) return;
+  if (!live(S) || !text) return;
+  text = String(text);
   const a = ensureAdv(S);
+  if (key) a.queue = a.queue.filter((q) => q.key !== key);
   // at most 2 headlines a day: extra event news is queued for the following days
   if (a.newsDay !== S.time.day) { a.newsDay = S.time.day; a.newsDayCount = 0; }
   if (!force && a.newsDayCount >= 2) {
-    a.queue.push({ day: S.time.day + a.newsDayCount - 1, text });
+    a.queue.push(key ? { day: S.time.day + a.newsDayCount - 1, text, key } : { day: S.time.day + a.newsDayCount - 1, text });
     a.queue.sort((x, y) => x.day - y.day);
     a.newsDayCount++;
     return;
   }
   a.newsDayCount++;
+  if (a.news[0] === text) return; // identical to the last headline
   a.news.unshift(text);
   if (a.news.length > NEWS_CAP) a.news.length = NEWS_CAP;
-  a.newsLog.unshift({ text, day: S.time.day });
+  a.newsLog.unshift(key ? { text, day: S.time.day, key } : { text, day: S.time.day });
   if (a.newsLog.length > NEWS_CAP) a.newsLog.length = NEWS_CAP;
   A.news = a.news;
-  VC.bus.emit('news', { text });
+  ownNews = true;
+  try { VC.bus.emit('news', key ? { text, key, day: S.time.day } : { text, day: S.time.day }); } finally { ownNews = false; }
+}
+let ownNews = false; // true while emitNews is emitting (to tell our headlines from other modules')
+/** Headlines other modules emitted straight on bus 'news' still land in the persisted log (not re-emitted). */
+function onForeignNews(n) {
+  const S = S_();
+  if (ownNews || !live(S) || !S.adv || !n) return;
+  const text = typeof n === 'string' ? n : n.text;
+  if (!text || S.adv.news[0] === text) return;
+  S.adv.news.unshift(String(text));
+  if (S.adv.news.length > NEWS_CAP) S.adv.news.length = NEWS_CAP;
+  S.adv.newsLog.unshift({ text: String(text), day: S.time.day });
+  if (S.adv.newsLog.length > NEWS_CAP) S.adv.newsLog.length = NEWS_CAP;
+  A.news = S.adv.news;
 }
 function headline(key, vars) {
   const bank = HL().CTX[key];
@@ -583,7 +726,7 @@ function monthlyNews(S, c) {
   else if (c.powerCap === 0 && c.growN > 10) add('noPower', {}, 240);
   if (c.st.waterDemand > c.st.waterSupply && c.st.waterDemand > 0) add('waterShort', {}, 90);
   if (pop >= 2500 && !c.hasAny('landfill', 'incinerator', 'recycling')) add('garbage', {}, 180);
-  if (c.burning >= 4) add('fires', {}, 60);
+  if (c.burningOrd >= 4) add('fires', {}, 60);
   // weather & seasons
   const w = S.weather || {};
   if (w.type === 'rain') add('rain', {}, 60);
@@ -625,40 +768,57 @@ function cityCentre(S) {
   for (const b of S.buildings.values()) { if (b.key === 'rubble') continue; x += b.x + b.w / 2; z += b.z + b.d / 2; n++; }
   return n ? [x / n, z / n] : [S.W / 2, S.H / 2];
 }
+/**
+ * Daily: milestones crossed since the last check are announced as ONE 'milestone' event (the highest,
+ * with the summed reward and every item unlocked since the previous announcement); unlocks between
+ * milestones as one 'unlock' event. The HUD owns the banner / toast, audio the sound.
+ */
 function checkMilestones(S) {
+  if (!live(S)) return;
   const a = ensureAdv(S);
   if ((S.stats.pop || 0) > (S.peakPop || 0)) S.peakPop = S.stats.pop;
   const peak = S.peakPop || 0;
   const MS = VC.MILESTONES;
   if (S.milestone == null) S.milestone = 0;
-  while (S.milestone + 1 < MS.length && peak >= MS[S.milestone + 1].pop) {
-    S.milestone++;
-    const ms = MS[S.milestone];
-    if (ms.reward && !S.sandbox) VC.money.earn(ms.reward, 'reward');
-    VC.bus.emit('milestone', { index: S.milestone, milestone: ms });
-    VC.bus.emit('toast', { text: `<b>${S.name}</b> is now a <b>${ms.name}</b>!${ms.reward ? ` Reward: <b>${money(ms.reward)}</b>` : ''}`, type: 'good', icon: '🏆' });
-    VC.bus.emit('sfx', { name: 'milestone' });
-    emitNews(headline('milestone', { milestone: ms.name }));
-    post('planning', { key: 'milestone', severity: 'good', title: `${ms.name}!`, text: `We crossed ${num(ms.pop)} citizens and the council granted ${money(ms.reward)}. Onward!`, panel: 'milestones' });
+  const from = S.milestone;
+  let idx = from, reward = 0;
+  while (idx + 1 < MS.length && peak >= MS[idx + 1].pop) {
+    idx++;
+    reward += MS[idx].reward || 0;
+  }
+  // items unlocked since the previous announcement (never twice: S.adv.announced)
+  let items = [];
+  if (!S.sandbox && peak > a.unlockPop) {
+    items = unlocksBetween(0, peak).filter((u) => !a.announced[u.key]);
+    for (const u of items) a.announced[u.key] = S.time.day || 1;
+    a.unlockPop = peak;
+  }
+  const keys = items.map((u) => u.key);
+  const names = items.map((u) => u.name);
+  if (idx > from) {
+    S.milestone = idx;
+    const ms = MS[idx];
+    if (S.sandbox) reward = 0;
+    if (reward) VC.money.earn(reward, 'reward');
+    VC.bus.emit('milestone', { index: idx, milestone: ms, from, reward, unlocked: keys, items });
+    emitNews(headline('milestone', { milestone: ms.name }), false, 'milestone');
+    const skipped = idx - from > 1 ? ` (${MS.slice(from + 1, idx).map((m) => m.name).join(', ')} along the way)` : '';
+    post('planning', {
+      key: 'milestone', severity: 'good', silent: true, read: true, panel: 'milestones', title: `${ms.name}!`,
+      text: `We crossed ${num(ms.pop)} citizens${skipped}${reward ? ` and the council granted ${money(reward)}` : ''}. Onward!` +
+        (names.length ? ' Now available: ' + names.join(', ') + '.' : ''),
+    });
     if (VC.fx && VC.fx.fireworks) {
       const [cx, cz] = cityCentre(S);
-      try { VC.fx.fireworks(cx, cz, 10 + S.milestone * 3); } catch (err) { /* fx optional */ }
+      try { VC.fx.fireworks(cx, cz, 10 + idx * 3); } catch (err) { /* fx optional */ }
     }
-  }
-  if (!S.sandbox && peak > a.unlockPop) {
-    const items = unlocksBetween(a.unlockPop, peak);
-    a.unlockPop = peak;
-    if (items.length) {
-      const names = items.map((u) => u.name);
-      const shown = names.length > 5 ? names.slice(0, 5).join(', ') + ` +${names.length - 5} more` : names.join(', ');
-      VC.bus.emit('toast', { text: `<b>New:</b> ${shown} unlocked`, type: 'good', icon: '🔓', duration: 6000 });
-      post('planning', { key: 'unlock', severity: 'info', title: 'New options unlocked', text: 'Now available: ' + names.join(', ') + '.' });
-      emitNews(headline('unlock', { things: names.slice(0, 2).join(' and ') }));
-      VC.bus.emit('unlocked', { items });
-    }
+  } else if (items.length) {
+    VC.bus.emit('unlock', { keys, items });
+    post('planning', { key: 'unlock', severity: 'info', silent: true, read: true, title: 'New options unlocked', text: 'Now available: ' + names.join(', ') + '.' });
+    emitNews(headline('unlock', { things: names.slice(0, 2).join(' and ') }), false, 'unlock');
   }
 }
-/** Everything whose unlock threshold lies in (p0, p1]. */
+/** Everything whose unlock threshold lies in (p0, p1]: [{kind, key, name, icon, unlock}] by threshold. */
 function unlocksBetween(p0, p1) {
   const out = [];
   const inRange = (u) => u > p0 && u <= p1;
@@ -730,16 +890,17 @@ function zeroCrimeHomes(S) {
   return n;
 }
 
+/** Unlocks an achievement: bus 'achievement' only (the HUD shows it, audio plays the jingle). */
 function grant(key) {
   const S = S_();
   const def = ACH_BY[key];
-  if (!S || !def || !S.adv) return false;
+  if (!live(S) || !def || !S.adv) return false;
+  if (!S.achievements) S.achievements = {};
   if (S.achievements[key] != null) return false;
   if (def.noSandbox && S.sandbox) return false;
   S.achievements[key] = S.time.day;
   const info = { key, name: def.name, icon: def.icon, desc: def.desc };
   VC.bus.emit('achievement', info);
-  VC.bus.emit('sfx', { name: 'achievement' });
   if (A.toastAchievements) VC.bus.emit('toast', { text: `Achievement unlocked: <b>${def.name}</b><br><small>${def.desc}</small>`, type: 'good', icon: def.icon, duration: 5000 });
   if (rnd() < 0.5) emitNews(headline('achievement', { achievement: def.name }));
   return true;
@@ -768,34 +929,32 @@ const DISASTER_LINES = {
 
 function onDisaster(ev) {
   const S = S_();
-  if (!S || !S.adv) return;
+  if (!live(S) || !S.adv || !ev) return;
   const type = ev.type;
+  const nk = 'disaster' + (ev.id != null ? ev.id : type); // one news topic per disaster: newer replaces queued older
   if (ev.phase === 'start') {
-    post('safety', { key: 'disaster_' + type, severity: 'bad', title: `${ev.icon || '⚠️'} ${ev.name || type}!`, text: choose(DISASTER_LINES[type] || ['Disaster!']), panel: 'disasters', x: ev.x, z: ev.z });
-    emitNews(headline(type + '_start', { magnitude: ev.entry && ev.entry.magnitude ? ev.entry.magnitude.toFixed(1) : '6' }));
+    // the HUD's alert card is the notification; the inbox only keeps a (read) record of it
+    post('safety', { key: 'disaster_' + type, severity: 'bad', silent: true, read: true, title: `${ev.icon || '⚠️'} ${ev.name || type}!`, text: choose(DISASTER_LINES[type] || ['Disaster!']), panel: 'disasters', x: ev.x, z: ev.z });
+    const mag = ev.entry && Number.isFinite(ev.entry.magnitude) ? ev.entry.magnitude.toFixed(1) : '6';
+    emitNews(headline(type + '_start', { magnitude: mag }), false, nk);
   } else if (ev.phase === 'update') {
-    if (ev.what === 'impact') emitNews(headline('meteor_impact'));
+    if (ev.what === 'impact') emitNews(headline('meteor_impact'), false, nk);
     else if (ev.what === 'abduct') {
       grant('abducted');
-      emitNews(headline('ufo_abduct', { building: ev.buildingName ? 'the ' + ev.buildingName : 'a building' }));
+      emitNews(headline('ufo_abduct', { building: ev.buildingName ? 'the ' + ev.buildingName : 'a building' }), false, nk);
     }
   } else if (ev.phase === 'end') {
     grant('first_disaster');
     if (type === 'monster') grant('cubezilla');
     if (survivedAll(S)) grant('survivor');
-    emitNews(headline(type + '_end', { destroyed: num(ev.destroyed || 0), abducted: num(ev.abducted || 0) }));
+    emitNews(headline(type + '_end', { destroyed: num(ev.destroyed || 0), abducted: num(ev.abducted || 0) }), false, nk);
   }
 }
 
 let lastBuildNews = -999;
 function onBldAdd(b) {
   const S = S_();
-  if (!S || !S.adv || !A._live) return;
-  if (b.key === 'grow') {
-    if (b.zt === 1) grant('first_home');
-    else if (b.zt === 2 || b.zt === 3) grant('first_job');
-    return;
-  }
+  if (!live(S) || !S.adv || !A._live || !b || b.key === 'grow') return;
   const def = VC.BLD[b.key];
   if (!def) return;
   if (b.key === 'nuclear_plant') grant('nuclear');
@@ -810,13 +969,14 @@ function onBldAdd(b) {
 function onPolicy(key) {
   const S = S_();
   const def = VC.POLICY[key];
-  if (!S || !S.adv || !def || !A._live) return;
+  if (!live(S) || !S.adv || !def || !A._live) return;
   const on = !!S.policies[key];
-  // venues that need a policy (the casino) close / reopen with it
+  // venues that need a policy (the casino) close / reopen with it. The player just flipped the policy,
+  // so the reopening is only an inbox note; the closure (lost income, easy to miss) gets a card.
   for (const d of VC.CATALOG) {
     if (d.requiresPolicy !== key || !VC.world.count(d.key)) continue;
     post('finance', on
-      ? { key: 'venue_open_' + d.key, severity: 'good', title: `${d.name} reopens`, text: `The ${d.name} is back in business. Cha-ching!`, panel: 'budget' }
+      ? { key: 'venue_open_' + d.key, severity: 'good', silent: true, title: `${d.name} reopens`, text: `The ${d.name} is back in business. Cha-ching!`, panel: 'budget' }
       : { key: 'venue_closed_' + d.key, severity: 'warn', title: `${d.name} closed`, text: `Without ${def.name}, the ${d.name} can't operate — that's ${money(d.income || 0)} a month we're not earning.`, panel: 'policies' });
   }
   const k = 'pol_' + key;
@@ -827,7 +987,7 @@ function onPolicy(key) {
 
 function onLoan(l) {
   const S = S_();
-  if (!S || !S.adv || !A._live) return;
+  if (!live(S) || !S.adv || !A._live) return;
   if (l && l.amount) {
     grant('first_loan');
     emitNews(headline(l.emergency ? 'broke' : 'loan', { amount: money(l.amount) }));
@@ -838,16 +998,48 @@ function onLoan(l) {
 }
 
 const CAPITAL = { construction: 1, roads: 1, zoning: 1, terraform: 1, trees: 1, pline: 1, demolish: 1 };
+const REFUND = { refund: 1, undo: 1 }; // categories an undo may book its refund under
+/** Big Spender tally: capital spending minus refunds (undo books the cost back as a positive amount). */
 function onMoney(m) {
   const S = S_();
-  if (!S || !S.adv || !(m.amount < 0) || !CAPITAL[m.cat]) return;
-  S.adv.stats.spent = (S.adv.stats.spent || 0) + -m.amount;
-  if (S.adv.stats.spent >= 500000) grant('big_spender');
+  if (!live(S) || !S.adv || !m) return;
+  const amt = +m.amount;
+  if (!Number.isFinite(amt) || !amt) return;
+  const st = S.adv.stats || (S.adv.stats = { spent: 0 });
+  if (amt < 0 && CAPITAL[m.cat]) {
+    st.spent = (st.spent || 0) - amt;
+    if (st.spent >= 500000) grant('big_spender');
+  } else if (amt > 0 && (CAPITAL[m.cat] || REFUND[m.cat])) {
+    st.spent = Math.max(0, (st.spent || 0) - amt);
+  }
+}
+/** Buildings burned down by ordinary fires (for the fire-safety advice): S.adv.burnLog [{day, zt}]. */
+function onBldRemove(b) {
+  const S = S_();
+  if (!live(S) || !S.adv || !b || b.removed !== ((VC.REMOVE && VC.REMOVE.FIRE) || 'fire') || b.fireCause === 'disaster') return;
+  const log = S.adv.burnLog || (S.adv.burnLog = []);
+  log.push({ day: S.time.day, zt: b.key === 'grow' ? b.zt | 0 : 0 });
+  while (log.length && (log[0].day < S.time.day - 120 || log.length > 200)) log.shift();
+}
+/** Welcome Home / Open for Business: granted once residents / workers have actually arrived. */
+function checkFirsts(S) {
+  const got = S.achievements || {};
+  const needHome = got.first_home == null, needJob = got.first_job == null;
+  if (!needHome && !needJob) return;
+  let home = false, job = false;
+  for (const b of S.buildings.values()) {
+    if (b.key !== 'grow' || !(b.built >= 1) || !(b.pop > 0) || b.abandoned) continue;
+    if (b.zt === 1) home = true;
+    else job = true;
+    if ((home || !needHome) && (job || !needJob)) break;
+  }
+  if (needHome && home) grant('first_home');
+  if (needJob && job) grant('first_job');
 }
 
 function onMonth() {
   const S = S_();
-  if (!S) return;
+  if (!live(S)) return;
   ensureAdv(S);
   checkMilestones(S);
   const c = gather(true);
@@ -858,7 +1050,7 @@ function onMonth() {
 
 function onYear(year) {
   const S = S_();
-  if (!S || !S.adv) return;
+  if (!live(S) || !S.adv) return;
   const H = S.history || {};
   const pops = H.pop || [];
   const prev = pops.length > 12 ? pops[pops.length - 13] : 0; // a year ago (if we have that much history)
@@ -875,11 +1067,17 @@ function onYear(year) {
 
 function onDay() {
   const S = S_();
-  if (!S || !S.adv) return;
+  if (!live(S) || !S.adv) return;
   checkMilestones(S);
-  const q = S.adv.queue;
+  if (A._live) checkFirsts(S);
+  const a = S.adv, day = S.time.day;
+  // stale headlines (e.g. a long-paused queue) are dropped rather than shown late
+  if (a.queue.length && a.queue[0].day < day - NEWS_STALE_DAYS) a.queue = a.queue.filter((q) => q.day >= day - NEWS_STALE_DAYS);
   let n = 0;
-  while (q.length && q[0].day <= S.time.day && n++ < 2) emitNews(q.shift().text, true);
+  while (a.queue.length && a.queue[0].day <= day && n++ < 2) {
+    const q = a.queue.shift();
+    emitNews(q.text, true, q.key);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -890,8 +1088,8 @@ const A = (VC.advisors = {
   news: [],
   RULES,
   ACHIEVEMENTS: ACH,
-  /** Set false if the HUD shows its own achievement popups (bus 'achievement'). */
-  toastAchievements: true,
+  /** true: also toast achievements via bus 'toast' (only for setups without a HUD; the HUD shows bus 'achievement'). */
+  toastAchievements: false,
   _live: false,
 
   init() {
@@ -904,6 +1102,8 @@ const A = (VC.advisors = {
     VC.bus.on('policyChanged', safe(onPolicy));
     VC.bus.on('loanChanged', safe(onLoan));
     VC.bus.on('money', safe(onMoney));
+    VC.bus.on('bldRemove', safe(onBldRemove));
+    VC.bus.on('news', safe(onForeignNews));
     VC.bus.on('econ', safe((ev) => { if (ev && ev.type === 'strike') emitNews(headline('strike', { dept: ev.name })); }));
     VC.bus.on('built', safe((e) => { if (e && e.kind === 'road') grant('first_road'); }));
     VC.bus.on('mapsUpdated', () => { sawMaps = true; });
@@ -912,7 +1112,7 @@ const A = (VC.advisors = {
     VC.bus.on('newGame', () => {
       // a fresh city gets a welcome note
       const S = S_();
-      if (S && S.adv && !S.adv.welcomed) {
+      if (live(S) && S.adv && !S.adv.welcomed) {
         S.adv.welcomed = true;
         post('planning', { key: 'welcome', severity: 'info', title: `Welcome to ${S.name}!`, text: 'Your advisors are standing by. Roads first, then zones, power and water — we’ll shout if anything goes wrong.' });
       }
@@ -925,12 +1125,19 @@ const A = (VC.advisors = {
     sawMaps = false; sawFlags = false;
     ctxCache = null;
     lastBuildNews = -999;
+    cardQ = [];
     const a = ensureAdv(S);
     A.inbox = a.inbox;
     A.news = a.news;
   },
 
-  update() {},
+  update() {
+    flushCards();
+  },
+  /** Advisor broadcasts waiting for their turn (paced to one per CARD_GAP_MS). */
+  pending() {
+    return cardQ.map((q) => q.m);
+  },
 
   /** Inbox, newest first. */
   messages() {
@@ -950,9 +1157,9 @@ const A = (VC.advisors = {
     const i = A.inbox.findIndex((m) => m.id === id);
     if (i >= 0) A.inbox.splice(i, 1);
   },
-  /** Posts a message: post(advisorKey, {title, text, severity, key?, panel?, overlay?, x?, z?}). */
+  /** Posts a message: post(advisorKey, {title, text, severity, key?, panel?, overlay?, x?, z?, silent?, read?}). */
   post,
-  /** Pushes a headline to the ticker right away. */
+  /** Publishes a headline: pushNews(text, force?, key?) (plain text; max 2 a day unless force). */
   pushNews: emitNews,
   /** Recent headlines with their day: [{text, day}] (newest first). */
   newsLog() {
@@ -1012,4 +1219,8 @@ const A = (VC.advisors = {
   },
   /** Items unlocked in the population range (p0, p1]. */
   unlocksBetween,
+  /** {kind, key, name, icon, unlock} for an unlock key from a 'milestone'/'unlock' event (null if unknown). */
+  unlockItem(key) {
+    return unlocksBetween(-1, Infinity).find((u) => u.key === key) || null;
+  },
 });

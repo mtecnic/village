@@ -6,6 +6,8 @@
  *   VC.headlines.names(S)   deterministic per-city names: mayor, streets, districts, team
  *   VC.headlines.fill(tpl, vars, rng)  replaces {tokens}
  *
+ * Headlines are PLAIN TEXT (they may contain the player's city name): escape them before using them as HTML.
+ *
  * Tokens: {city} {mayor} {street} {street2} {district} {team} {person} {person2} {pet} {company}
  *         {n} (2-9) {nn} (10-99) {nnn} (100-999) {year} {month} {season} + any key passed in vars.
  */
@@ -257,9 +259,10 @@ const CTX = {
   monster_end: ['Cubezilla wanders off after flattening {destroyed} buildings', 'Monster gone; {city} begins long cleanup'],
 };
 
-/** Deterministic per-city names from the seed. */
+/** Deterministic per-city names from the seed (re-derived when the city or its mayor is renamed). */
 function names(S) {
-  if (names._S === S && names._c) return names._c;
+  const key = String(S.name) + '\u0001' + String(S.mayorName || S.mayor || '');
+  if (names._S === S && names._c && names._k === key) return names._c;
   const r = VC.M.rng((S.seed ^ 0x6e657773) >>> 0);
   const pick = (a) => a[Math.floor(r() * a.length)];
   const streets = [];
@@ -279,6 +282,7 @@ function names(S) {
   };
   names._S = S;
   names._c = c;
+  names._k = key;
   return c;
 }
 

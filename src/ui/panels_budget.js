@@ -9,13 +9,20 @@
  * WHAT-IF PREVIEW (Taxes + Departments tabs): grabbing a tax or funding slider (pointer or keyboard)
  * snapshots the city (forecast net, tax effects, funding, power/water supply); while it moves — the
  * settings apply live, as before — a glass card pinned to the bottom of the tab compares now vs.
- * that snapshot: monthly net change, R/C/I demand arrows (VC.econ.taxEffect deltas), citizens' mood
+ * that snapshot: monthly net change as a FIRST-MONTH ESTIMATE (the forecast at today's residents,
+ * corrected by how many residents a tax hike / service cut drives away — or a cut / boost draws in —
+ * within a month: reaction(), calibrated on branched saves of a stable town; every tax dollar
+ * follows the residents, since shops and factories lose their workers and customers too),
+ * R/C/I demand arrows (VC.econ.taxEffect deltas), citizens' mood
  * and approval, service effectiveness (VC.econ.effectivenessAt, strikes included), the likely knock-on
  * effects per department (crime, fires, traffic, brownouts…) and strike / diminishing-returns
  * warnings. It lingers ~2.5 s after release; grabbing the same slider again keeps the snapshot.
  * The Presets buttons show the same card for the whole budget. Departments also show the city
  * wage level (forecast().wageMul) and per-row cost breakdown tooltips; the Overview's income and
  * expense rows explain the state grant, wages and policies in tooltips.
+ * MAYOR'S DESK COMMITMENTS: recurring deals agreed on the Mayor's Desk are forecast lines ('deskDeal',
+ * "Mayor's Desk commitments") and, while any run, the Overview lists them (deal, $/month, months left)
+ * from VC.econ.deskCommitments().
  */
 const P = VC.panels, U = P.util, h = VC.h, M = VC.M;
 const ZK = ['R', 'C', 'I'];
@@ -181,6 +188,11 @@ function catTip(cat) {
   if (cat === 'income') return "<b>Venues</b><br>Ticket and casino income. Rises with happiness and the venues' department funding.";
   if (cat === 'tourism') return '<b>Tourism</b><br>Visitors drawn by landmarks, parks and the Tourism Campaign.';
   if (cat === 'loanPayment') return '<b>Loan payments</b><br>Interest + principal of every outstanding loan.';
+  if (cat === 'deskDeal') {
+    const deals = U.api('econ', 'deskCommitments', [], []) || [];
+    const rows = deals.map((d) => `${U.esc(d.label)}: <b>${U.smoney(d.amount)}/mo</b> · ${d.left} mo left`).join('<br>');
+    return "<b>Mayor’s Desk commitments</b><br>Recurring deals you agreed to on the Mayor’s Desk." + (rows ? '<br>' + rows : '');
+  }
   if (cat.startsWith('upkeep:') && WAGE[cat.slice(7)]) {
     const w = U.num(forecastRaw().wageMul, 1);
     return w > 1.005 ? `<b>Includes city wages ×${w.toFixed(2)}</b><br>Service staff earn more as the city grows.` : null;
@@ -190,6 +202,56 @@ function catTip(cat) {
 
 /* ---------------- What-if preview ---------------- */
 const LINGER = 2500; // ms the card stays after a slider is released
+/**
+ * First-month population reaction (fractions of residents), calibrated by branching one save of a
+ * stable ~4k town and running a month per change: R tax 9 -> 13/17/20 % lost 7/15/21 % of residents
+ * (C/I tax changes: none within the month), police / utilities at 25 % about 13 %, fire 3 %, roads 3 %,
+ * education 2 %; tax cuts and better funding draw people in more slowly.
+ */
+const REACT = {
+  taxDown: 0.28, // per unit of worse residential tax effect (VC.econ.taxEffect)
+  taxUp: 0.3, // per unit of better tax effect (only where homes have room — kept modest)
+  svc: { police: 0.19, fire: 0.05, education: 0.03, parks: 0.01 }, // per unit of lost effectiveness
+  up: 0.5, // gains from better funding count half (people move in slower than they leave)
+  roads: 0.1, // per unit of road effectiveness below 60 % (potholes)
+  power: 0.9, water: 0.7, // per share of demand left unserved
+};
+/** Estimated change in residents (fraction, first month) between the snapshot b and the current settings. */
+function reaction(b) {
+  let d = 0;
+  const dt = taxEff('R') - b.tax.R;
+  d += dt < 0 ? REACT.taxDown * dt : REACT.taxUp * dt;
+  for (const k in REACT.svc) {
+    if (b.eff[k] == null) continue;
+    const de = effAt(k, fundOf(k)) - b.eff[k];
+    d += REACT.svc[k] * de * (de > 0 ? REACT.up : 1);
+  }
+  if (b.eff.roads != null) {
+    const pot = (e) => Math.max(0, 0.6 - e);
+    const dp = pot(effAt('roads', fundOf('roads'))) - pot(b.eff.roads);
+    d -= REACT.roads * dp * (dp < 0 ? REACT.up : 1);
+  }
+  if (b.eff.utilities != null) {
+    const r = utilMul(effAt('utilities', fundOf('utilities'))) / Math.max(0.01, utilMul(b.eff.utilities));
+    for (const [s, k] of [[b.power, REACT.power], [b.water, REACT.water]]) {
+      if (!s || !(s.demand > 0)) continue;
+      const short = (sup) => Math.max(0, 1 - sup / s.demand);
+      const du = short(s.supply * r) - short(s.supply);
+      d -= k * du * (du < 0 ? REACT.up : 1);
+    }
+  }
+  return M.clamp(d, -0.6, 0.25);
+}
+/** {est (first-month net), move ($ the reaction adds / costs), pop (fraction)} for the current settings vs b. */
+function firstMonth(b, net) {
+  const f = forecastRaw(), inc = f.income || {};
+  const taxes = U.num(inc['tax:R']) + U.num(inc['tax:C']) + U.num(inc['tax:I']);
+  const pop = reaction(b);
+  const move = Math.round(taxes * pop);
+  return { est: net + move, move, pop };
+}
+/** "~15 % of residents" */
+const popPct = (p) => '~' + Math.max(1, Math.round(Math.abs(p) * 100)) + '% ' + (p < 0 ? 'of residents' : 'more residents');
 /** Mood label for a tax effect value (positive = citizens like it). */
 function moodOf(e) {
   if (e > 0.12) return ['😄 happy', 'good'];
@@ -241,6 +303,9 @@ function makeWhatIf(c, o = {}) {
     };
     rows.push(el);
   }
+  // the net row explains itself: the forecast vs the first-month estimate while comparing
+  rows[0].setAttribute('data-tip', 'Monthly net');
+  rows[0]._tip = () => (st && st.tip ? st.tip : '<b>Monthly net</b><br>Forecast for next month at the current settings.');
   const card = h('div', { class: 'pn-wi ' + (inline ? 'inline' : 'float'), role: 'status' }, h('div', { class: 'pn-wi-head' }, h('span', { class: 'pn-wi-badge' }, '🔮 What if'), title), ...rows);
   if (inline) c.appendChild(card);
   let st = null; // {kind, key, base, live, until}
@@ -289,7 +354,14 @@ function makeWhatIf(c, o = {}) {
     const who = z === 'R' ? 'Residents' : 'Businesses';
     rows[2].set('Mood', `${who} ` + (m0[0] === m1[0] ? span('t-' + m1[1], m1[0]) : `${m0[0]} → ${span('t-' + m1[1], m1[0])}`) + ' · approval ' + span('pn-wi-ar t-' + toneOf(Math.abs(sum) >= 0.01 ? sum : 0), arrows(sum / 3, 0.004, 0.04, 0.1)));
     const hi = to > 12, lo = to < 5;
-    rows[3].set(hi || lo ? 'Heads-up' : '', hi ? span('t-warn', 'Above 12% growth stalls and citizens start moving out.') : span('t-info', 'Very low taxes attract growth but thin the coffers.'));
+    const fm = st.fm;
+    const moves = fm && Math.abs(fm.pop) >= 0.01;
+    let warn = '';
+    if (moves && fm.pop < 0) warn = span('t-warn', `${popPct(fm.pop)} leave within a month (in the net)`);
+    else if (moves) warn = span('t-good', `${popPct(fm.pop)} if homes have room (in the net)`);
+    else if (hi) warn = span('t-warn', 'Above 12% growth stalls and citizens start moving out.');
+    else if (lo) warn = span('t-info', 'Very low taxes attract growth but thin the coffers.');
+    rows[3].set(warn ? 'Heads-up' : '', warn);
   }
   /** Inline idle readout: the city as it stands (what the next drag will be compared with). */
   function idleRows() {
@@ -350,6 +422,9 @@ function makeWhatIf(c, o = {}) {
       else if (key === 'utilities') fx.push('⚡💧 plant output ' + span(tn, '×' + r.toFixed(2)));
     }
     if (all || WAGE[key]) fx.push('😊 approval ' + span(tn, arrows(de, 0.01, 0.1, 0.25)));
+    // residents reacting within the first month (already counted in the monthly net above)
+    const fm = st.fm;
+    if (fm && Math.abs(fm.pop) >= 0.01) fx.unshift('👥 ' + span(fm.pop < 0 ? 't-bad' : 't-good', popPct(fm.pop) + (fm.pop < 0 ? ' move away' : '')));
     rows[2].set('Likely', fx.join(' · '));
     // warnings
     let warn = supply;
@@ -404,8 +479,12 @@ function makeWhatIf(c, o = {}) {
       const b = st.base;
       const f = forecastRaw();
       const net = typeof f.net === 'number' ? f.net : forecast().net;
-      const dn = net - b.net;
-      rows[0].set('Monthly net', `${U.smoney(b.net)} → <b>${U.smoney(net)}</b> ` + span('pn-wi-d t-' + (dn > 0.5 ? 'good' : dn < -0.5 ? 'bad' : 'muted'), (dn > 0.5 ? '▲ ' : dn < -0.5 ? '▼ ' : '') + U.smoney(dn) + '/mo'));
+      // first-month estimate: today's residents' forecast + the residents who leave / arrive meanwhile
+      st.fm = firstMonth(b, net);
+      const est = st.fm.est, dn = est - b.net;
+      const tipNet = `<b>First-month estimate</b><br>Forecast at today's residents: <b>${U.smoney(net)}</b>/mo<br>` + (Math.abs(st.fm.move) >= 1 ? `Residents ${st.fm.pop < 0 ? 'moving away' : 'moving in'} (${popPct(st.fm.pop)}): <b>${U.smoney(st.fm.move)}</b>/mo<br>` : '') + '<small>A rough guide: later months drift further as demand, growth and abandonment follow.</small>';
+      rows[0].set('Monthly net', `${U.smoney(b.net)} → <b>${U.smoney(est)}</b> ` + span('pn-wi-d t-' + (dn > 0.5 ? 'good' : dn < -0.5 ? 'bad' : 'muted'), (dn > 0.5 ? '▲ ' : dn < -0.5 ? '▼ ' : '') + U.smoney(dn) + '/mo') + ' <small>first-month est.</small>');
+      st.tip = tipNet;
       if (st.kind === 'tax') taxRows(b);
       else deptRows(b);
     },
@@ -435,6 +514,15 @@ function tabOverview(c) {
       h('div', { class: 'pn-brk-col exp' }, h('div', { class: 'pn-brk-head' }, h('span', null, '🧾 Expenses'), expTot), expBox, expEmpty)
     ), srcNote)
   );
+
+  // Mayor's Desk commitments (recurring deals; billed with the monthly budget, so already in the net above)
+  const dealBody = h('tbody');
+  const dealSec = U.sec('📨 Mayor’s Desk commitments',
+    h('table', { class: 'pn-table' },
+      h('thead', null, h('tr', null, h('th', null, 'Deal'), h('th', { class: 'num' }, 'Per month'), h('th', { class: 'num' }, 'Months left'))),
+      dealBody),
+    h('div', { class: 'note' }, 'Recurring payments agreed on the Mayor’s Desk — included in the monthly net and the breakdown above.'));
+  c.appendChild(dealSec);
 
   // actuals vs forecast table
   const cells = {};
@@ -491,6 +579,14 @@ function tabOverview(c) {
     U.show(expEmpty, !exp.length);
     U.txt(incTot, U.money(f.totalIncome));
     U.txt(expTot, U.money(f.totalExpenses));
+    const deals = U.api('econ', 'deskCommitments', [], []) || [];
+    U.show(dealSec, deals.length > 0);
+    U.keyed(dealBody, deals, (d) => d.id, () => h('tr', null, h('td'), h('td', { class: 'num' }), h('td', { class: 'num' })), (tr, d) => {
+      U.txt(tr.children[0], d.label);
+      U.txt(tr.children[1], U.smoney(d.amount) + '/mo');
+      U.tone(tr.children[1], d.amount > 0 ? 'good' : 'bad');
+      U.txt(tr.children[2], String(d.left));
+    });
     U.txt(srcNote, !inc.length && !exp.length ? 'Nothing on the books yet — zone land and build services to get the economy going.' : f.src === 'forecast' ? 'Forecast for next month at current rates, funding and policies.' : 'Based on last month’s books (no forecast available yet).');
 
     const cm = ledgerSums(S.ledger && S.ledger.month), cl = ledgerSums(S.ledger && S.ledger.last);

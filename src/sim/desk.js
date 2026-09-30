@@ -5,8 +5,15 @@
  * modifiers (VC.econ.addTempMod, source 'desk'), a recurring monthly payment, a demand nudge, a headline
  * (VC.advisors.pushNews) and special effects (fireworks, fixing up abandoned buildings, clearing rubble,
  * cheering residents up, putting out fires). Some choices are gambles (`roll`: with probability p an
- * extra outcome applies). The card waits — the game is not paused; after DECIDE_DAYS unanswered the
- * event resolves with its "ignore" outcome (the choice flagged ignore, else event.ignore, else nothing).
+ * extra outcome applies). The card waits — the game is not paused; once it has been on the desk for
+ * DECIDE_DAYS game days AND DECIDE_SEC seconds of real time while the HUD was showing it (paused /
+ * hidden time does not count, so fast-forwarding at 8 days a second still leaves a minute to read
+ * it), the event resolves with its "ignore" outcome (the choice flagged ignore, else event.ignore,
+ * else nothing).
+ *
+ * MONEY  one-off amounts are booked under ledger category 'desk' ("Mayor's Desk"); recurring ones
+ *   (S.desk.recurring) are billed by VC.econ with the monthly budget as 'deskDeal' ("Mayor's Desk
+ *   commitments") when VC.econ.billsDesk, else booked here on 'month' (category 'desk').
  *
  * CADENCE  never in the first 2 months of a city, during an active disaster, while the tutorial runs or
  *   in the title-screen demo (S.demo). The next event is due 90-150 days after the previous one was
@@ -15,9 +22,10 @@
  *
  * STATE (plain JSON, saved with the game): S.desk = {
  *   next (day), start (day the desk opened), seq,
- *   pending: {seq, id, day, expires, k ($ scale of this event), adv} | null,
+ *   pending: {seq, id, day, expires, k ($ scale of this event), adv, seen (real seconds shown)} | null,
  *   history: [{seq, id, title, icon, choice (-1 = ignored), label, out, day, auto}] (last 20),
- *   seen: {eventId: day}, recurring: [{id, label, amount (+ income / − cost), left (months)}] }
+ *   seen: {eventId: day}, recurring: [{id, label (the choice), title (the event), amount (+ income /
+ *   − cost), left (months)}] }
  * Money amounts in the pool are multiples of k = $1,000 + $0.35 per citizen (2 significant digits), so
  * a decision matters in a village and in a metropolis alike.
  *
@@ -25,17 +33,20 @@
  *   puts an event on the desk now, ignoring the cadence; an explicit id also ignores its conditions),
  *   history(), view(pending) -> {seq, id, icon, title, text, advisor:{key,name,role,icon,color},
  *   choices:[{i, label, chips:[{t, c:'good'|'bad'|'gold'|'risk'|'neu'}], dur ('6 mo'), cost, affordable, ignore}], day,
- *   expires, daysLeft, decideDays}, addTempMod(entry) / removeTempMod(id) (VC.econ's when it has them,
+ *   expires, daysLeft, decideDays, seen, secLeft, decideSec}, timeLeft() -> {days, sec, frac, bySec} | null (what
+ *   still has to pass before the pending decision may expire), addTempMod(entry) / removeTempMod(id) (VC.econ's when it has them,
  *   else a small fallback that keeps S.tempMods in the contract format and folds them into S.mods).
  * BUS  'deskEvent' {event: view} when a decision arrives; 'deskResolved' {event, choice, label, outcome,
  *   auto} when it is answered or expires. The HUD (ui/hud_desk.js) shows the card, plays 'advisor' on
  *   arrival and toasts expiries; this module emits no toast / sfx itself.
  *
- * LIFECYCLE  init() (bus listeners, once), reset(S) (creates / migrates S.desk), update() (no per-frame
- *   work: everything runs on bus 'day' / 'month'). Joins VC.MODULE_ORDER at boot if main.js lacks it.
+ * LIFECYCLE  init() (bus listeners, once), reset(S) (creates / migrates S.desk), update(dt, rdt) (counts
+ *   the real time a pending decision is on screen; the rest runs on bus 'day' / 'month'). Joins
+ *   VC.MODULE_ORDER at boot if main.js lacks it.
  */
 const M = VC.M;
-const DECIDE_DAYS = 60; // unanswered decisions resolve with their ignore outcome after this
+const DECIDE_DAYS = 60; // unanswered decisions resolve with their ignore outcome after this …
+const DECIDE_SEC = 60; // … and after at least this much real time on screen (game running, HUD visible)
 const FIRST_DAYS = 60; // no decisions during a city's first two months
 const GAP_MIN = 90, GAP_MAX = 150; // days between decisions
 const RETRY_DAYS = 12; // nothing eligible / blocked: look again after this
@@ -415,7 +426,7 @@ const EVENTS = [
     when: (c) => c.pop >= 300,
     choices: [
       { label: '🎆 Party for everyone!', fx: { money: -0.5, special: 'fireworks', n: 20, mods: { happiness: 0.03 }, days: 30 }, out: 'The whole city sings. You eat the highway interchange. Best birthday ever.' },
-      { label: '🍰 Just cake in the office', fx: { special: 'cheer' }, out: 'A quiet celebration. The cake is delicious. Somebody ate the park, which feels symbolic.' },
+      { label: '🍰 Just cake in the office', fx: { special: 'cheer', mods: { happiness: 0.01 }, days: 30 }, out: 'A quiet celebration. The cake is delicious. Somebody ate the park, which feels symbolic.' },
     ],
     ignore: { fx: {}, out: 'You were too busy to notice. The staff ate the cake. All of it. Even the river.' },
   },
@@ -565,7 +576,7 @@ function chipsFor(fx, k, roll) {
   }
   if (fx.demand) for (const z in fx.demand) out.push({ t: `${{ R: '🏠', C: '🏬', I: '🏭' }[z] || ''} ${{ R: 'Housing', C: 'Shop', I: 'Industry' }[z] || z} ${fx.demand[z] > 0 ? 'boom now' : 'slump now'}`, c: fx.demand[z] > 0 ? 'good' : 'bad' });
   if (fx.special === 'fireworks') out.push({ t: '🎆 Fireworks', c: 'good' });
-  if (fx.special === 'cheer') out.push({ t: '🥳 Happy residents', c: 'good' });
+  if (fx.special === 'cheer' && !(fx.mods && fx.mods.happiness)) out.push({ t: '🥳 Happy residents', c: 'good' });
   if (fx.special === 'extinguish') out.push({ t: '🧯 Puts out fires', c: 'good' });
   if (fx.note) out.push({ t: fx.note, c: 'neu' });
   if (roll && roll.note) out.push({ t: roll.note, c: 'risk' });
@@ -649,9 +660,12 @@ const SPECIAL = {
     for (const b of S.buildings.values()) if (b.key === 'rubble') list.push(b);
     for (const b of list) VC.world.removeBuilding(b, VC.REMOVE ? VC.REMOVE.CLEARED : 'cleared');
   },
-  /** A short happiness boost for every home (the sim eases it back over the following weeks). */
+  /**
+   * An instant lift for every home. On its own the sim eases it away within days, so the event pairs
+   * it with a happiness modifier (fx.mods, a temp mod) that keeps residents cheerful for weeks.
+   */
   cheer(S) {
-    for (const b of S.buildings.values()) if (b.key === 'grow' && !b.abandoned) b.happy = Math.min(1, (b.happy || 0.5) + 0.12);
+    for (const b of S.buildings.values()) if (b.key === 'grow' && !b.abandoned) b.happy = Math.min(1, (b.happy || 0.5) + 0.06);
   },
   extinguish(S) {
     if (!VC.sim || !VC.sim.extinguish) return;
@@ -679,10 +693,19 @@ function ensure(S) {
     const p = D.pending;
     if (!isFinite(p.expires)) p.expires = S.time.day + DECIDE_DAYS;
     if (!(p.k > 0)) p.k = scaleK(S);
+    if (!(p.seen >= 0)) p.seen = 0;
   }
+  for (const r of D.recurring) if (r && !r.title) r.title = r.label;
   return D;
 }
 const fill = (t, S) => String(t || '').replace(/\{city\}/g, (S && S.name) || 'the city');
+/** True while the pending decision counts as on screen (HUD showing, not in photo mode / menus). */
+function onScreen() {
+  const H = VC.hud;
+  if (!H) return true; // no HUD at all (tests / embeds): real time always counts
+  if (VC.menu && VC.menu.active) return false;
+  return typeof H.isVisible === 'function' ? !!H.isVisible() : !!H.visible;
+}
 /** Display object for a pending event (what the HUD renders). */
 function view(p) {
   const S = S_();
@@ -703,6 +726,7 @@ function view(p) {
     seq: p.seq, id: e.id, icon: e.icon, title: e.title, text: fill(e.text, S),
     advisor: { key: p.adv || e.adv, name: A.name, role: A.role, icon: A.icon, color: A.color },
     choices, day: p.day, expires: p.expires, daysLeft: Math.max(0, p.expires - S.time.day), decideDays: DECIDE_DAYS,
+    seen: p.seen || 0, secLeft: Math.max(0, DECIDE_SEC - (p.seen || 0)), decideSec: DECIDE_SEC,
   };
 }
 function pickEvent(S, c, forceId) {
@@ -725,13 +749,13 @@ function pickEvent(S, c, forceId) {
 /** Puts an event on the desk. Returns its view. */
 function open(S, e) {
   const D = S.desk, day = S.time.day;
-  D.pending = { seq: ++D.seq, id: e.id, day, expires: day + DECIDE_DAYS, k: scaleK(S), adv: e.adv };
+  D.pending = { seq: ++D.seq, id: e.id, day, expires: day + DECIDE_DAYS, k: scaleK(S), adv: e.adv, seen: 0 };
   D.seen[e.id] = day;
   const v = view(D.pending);
   VC.bus.emit('deskEvent', { event: v });
   return v;
 }
-function applyFx(S, fx, p, e, tag, force) {
+function applyFx(S, fx, p, e, tag, force, label) {
   if (!fx) return;
   const k = p.k, day = S.time.day;
   if (fx.money) {
@@ -740,7 +764,7 @@ function applyFx(S, fx, p, e, tag, force) {
     else VC.money.spend(-v, 'desk', force);
   }
   if (fx.monthly && fx.monthly.months > 0) {
-    S.desk.recurring.push({ id: 'desk:' + p.seq + tag, label: e.title, amount: nice(fx.monthly.k * k), left: fx.monthly.months | 0 });
+    S.desk.recurring.push({ id: 'desk:' + p.seq + tag, label: label || e.title, title: e.title, amount: nice(fx.monthly.k * k), left: fx.monthly.months | 0 });
   }
   if (fx.mods) addTempMod({ id: 'desk:' + p.seq + tag, source: 'desk', label: e.title, mods: Object.assign({}, fx.mods), until: day + (fx.days || 90) });
   if (fx.demand && S.demand) for (const z in fx.demand) if (z in S.demand) S.demand[z] = M.clamp(S.demand[z] + fx.demand[z], -1, 1);
@@ -775,9 +799,9 @@ function resolve(S, i, auto) {
     out = ig.out || 'The moment passed. Nothing changed.';
     label = 'No decision';
   }
-  applyFx(S, fx, p, e, ':' + i, !!auto);
+  applyFx(S, fx, p, e, ':' + i, !!auto, label);
   if (ch && ch.roll && Math.random() < ch.roll.p) {
-    applyFx(S, ch.roll.fx, p, e, ':' + i + 'r', true);
+    applyFx(S, ch.roll.fx, p, e, ':' + i + 'r', true, label);
     out = ch.roll.out || out;
   }
   out = fill(out, S);
@@ -796,7 +820,8 @@ function onDay() {
   const D = S.desk, day = S.time.day;
   if (!econTM() && Array.isArray(S.tempMods) && S.tempMods.length) refold(S);
   if (D.pending) {
-    if (day >= D.pending.expires) resolve(S, -1, true);
+    // both clocks must run out: game days AND real seconds on screen (see header)
+    if (day >= D.pending.expires && (D.pending.seen || 0) >= DECIDE_SEC) resolve(S, -1, true);
     return;
   }
   if (day < D.next) return;
@@ -809,6 +834,7 @@ function onDay() {
 function onMonth() {
   const S = S_();
   if (!live(S)) return;
+  if (VC.econ && VC.econ.billsDesk) return; // the monthly budget books + counts them down
   const R = S.desk.recurring;
   if (!R.length) return;
   for (const r of R) {
@@ -822,6 +848,7 @@ function onMonth() {
 const Desk = (VC.desk = {
   EVENTS,
   DECIDE_DAYS,
+  DECIDE_SEC,
   init() {
     if (inited) return;
     inited = true;
@@ -835,7 +862,29 @@ const Desk = (VC.desk = {
     ensure(S);
     if (!econTM() && Array.isArray(S.tempMods) && S.tempMods.length) refold(S);
   },
-  update() {},
+  update(dt, rdt) {
+    // real time the pending decision has been on screen while the game runs (dt is 0 when paused)
+    const S = S_();
+    if (!(dt > 0) || !live(S) || !S.desk.pending) return;
+    const p = S.desk.pending;
+    if ((p.seen || 0) < DECIDE_SEC && onScreen()) p.seen = Math.min(DECIDE_SEC, (p.seen || 0) + Math.min(0.25, rdt || dt));
+  },
+  /**
+   * What still has to pass before the pending decision may settle itself: {days (game days), sec (real
+   * seconds on screen), frac 0..1 (the larger of the two remaining shares; drives the countdown bar),
+   * bySec (true when the real-time clock is the one holding it open)} or null.
+   */
+  timeLeft() {
+    const S = S_();
+    if (!live(S) || !S.desk.pending) return null;
+    const p = S.desk.pending;
+    const days = Math.max(0, p.expires - S.time.day), sec = Math.max(0, DECIDE_SEC - (p.seen || 0));
+    const fd = days / DECIDE_DAYS, fs = sec / DECIDE_SEC;
+    // which clock ends later at the current speed (days per real second)?
+    const sp = (VC.C.SPEEDS && VC.C.SPEEDS[S.time.speed]) || 1;
+    const bySec = sec > 0 && (days <= 0 || sec > days / sp);
+    return { days, sec, frac: Math.min(1, bySec ? fs : fd), bySec };
+  },
   /** The decision waiting on the desk (display object) or null. */
   pending() {
     const S = S_();

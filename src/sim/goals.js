@@ -9,15 +9,26 @@
  * FLOW  generate (one goal at a time, a few game days apart) -> live progress (evaluated at most twice a
  *   second of real time, and only when a day passed or the city changed) -> complete (g.done, bus
  *   'goalDone' {goal}; the HUD celebrates: toast + confetti + sfx) -> claim (reward granted, bus
- *   'goalClaimed' {goal}; auto-claimed silently after AUTO_CLAIM_DAYS) -> a new goal after NEXT_DAYS.
- *   Nothing happens in the title-screen demo (S.demo) or while the tutorial runs (VC.hud.tutorialStep()).
+ *   'goalClaimed' {goal}; auto-claimed silently once it has waited AUTO_CLAIM_DAYS game days AND the
+ *   goals card has shown it for AUTO_CLAIM_SEC real seconds — g.shown, counted by ui/hud_goals.js — so a
+ *   fast-forwarded city still gets to see the gold Claim button) -> a new goal after NEXT_DAYS.
+ *   An open goal that has not made progress for STALE_DAYS rotates out (swapped for a fresh one, bus
+ *   'goalRotated' {goal, next}). Nothing happens in the title-screen demo (S.demo) or while the tutorial
+ *   runs (VC.hud.tutorialStep()).
+ *
+ * POPULATION goals aim at round numbers BETWEEN the milestones (POP_STEPS), never at a milestone itself:
+ *   reaching a milestone is already celebrated by the advisors' banner. Problem goals (power, water,
+ *   abandoned buildings) keep their title's count live. Cash rewards scale with the city (cash()) with a
+ *   floor, so the first goals are worth a wind turbine or a few blocks of road. Ledger category 'goal'.
  *
  * STATE (plain JSON, saved with the game): S.goals = {
  *   active: [{id, kind, cat, title, desc, icon, target, base, cur, progress 0..1, text, unit,
  *             reward: {money?, mods?, days?, label?, text (short), long}, focus: {panel?|group?|tool?|overlay?|locate?|x,z},
- *             day, done?, doneDay?, meta?}],
+ *             day, done?, doneDay?, shown? (real s the completed goal was on screen), best?, lastProg?
+ *             (best progress so far and the day it was reached), meta?}],
  *   done: [ids] (capped), log: [{id, kind, title, icon, day}] (last 30), seq, next (day the next goal may
- *   appear), cool: {kind: day} (per-kind cooldowns), count (goals completed), v }
+ *   appear), cool: {kind: day} (per-kind cooldowns), count (goals completed), rotDay (last stale-goal
+ *   rotation), v }
  *
  * API  list() -> active goals (live objects, read-only for callers), claim(id) -> bool, refresh() (debug:
  *   evaluate + fill every free slot now), swap(id) (replace a goal; its kind cools down), focusOf(id) ->
@@ -35,7 +46,13 @@ const EVAL_SEC = 0.5; // real seconds between progress evaluations
 const NEXT_DAYS = 4; // game days between a claim / swap and the next goal
 const FILL_DAYS = 1; // game days between goals while the card is filling up
 const FIRST_DAYS = 3; // a new city gets its first goal after this many days
-const AUTO_CLAIM_DAYS = 30; // unclaimed completed goals are claimed automatically after this
+const AUTO_CLAIM_DAYS = 30; // unclaimed completed goals are claimed automatically after this ...
+const AUTO_CLAIM_SEC = 15; // ... once the card has also shown them this long (real seconds, see hud_goals.js)
+const STALE_DAYS = 300; // an open goal without any progress for this long rotates out …
+const ROTATE_GAP = 30; // … one at a time, at least this many days apart
+const CASH_FLOOR = 2500; // cash rewards never go below this x the goal's multiplier (starter goals: $2,000)
+/** Population goal targets: round numbers between the milestones (never a milestone's own number). */
+const POP_STEPS = [100, 150, 400, 600, 800, 1500, 2000, 2500, 4000, 5000, 7500, 12500, 15000, 20000, 30000, 35000, 40000, 60000, 75000, 125000, 150000, 250000, 300000, 500000, 750000, 1000000];
 const DONE_CAP = 100, LOG_CAP = 30;
 const ONCE = 1e9; // cooldown for one-time goals
 
@@ -164,14 +181,24 @@ function cleanShare() {
   cx._clean = tot > 0 ? clean / tot : 0;
   return cx._clean;
 }
-/** Cash reward scaled to the city size (x mul), two significant digits. */
+/** Cash reward scaled to the city size (x mul), with a floor for young towns; two significant digits. */
 function cash(mul) {
-  return nice(M.clamp(600 + Math.max(cx.pop, cx.peak * 0.8) * 0.3, 750, 40000) * (mul || 1));
+  mul = mul || 1;
+  return nice(Math.max(M.clamp(600 + Math.max(cx.pop, cx.peak * 0.8) * 0.3, 750, 40000), CASH_FLOOR) * mul);
 }
 function nextMilestone() {
   const L = VC.MILESTONES || [];
   for (let i = 0; i < L.length; i++) if (L[i].pop > cx.peak) return L[i];
   return null;
+}
+/** Next population target: the first POP_STEPS entry comfortably above today's peak (never a milestone). */
+function popTarget(c) {
+  const base = Math.max(c.pop, c.peak);
+  const isMs = (v) => (VC.MILESTONES || []).some((m) => m.pop === v);
+  for (const v of POP_STEPS) if (v >= base * 1.15 && v - base >= 50 && !isMs(v)) return v;
+  let t = niceUp(Math.max(1000, base * 1.4));
+  while (isMs(t)) t = niceUp(t * 1.1);
+  return t;
 }
 
 /* ------------------------------------------------------------------ */
@@ -188,14 +215,14 @@ const KINDS = {};
 KINDS.first_roads = {
   cat: 'fix', cool: ONCE,
   score: (c) => (roads() < 10 ? 9 : 0),
-  make: (c) => ({ title: 'Lay down your first roads', desc: 'Every lot needs a street within 3 tiles. Open Roads and drag across the land.', icon: '🛣️', target: 30, base: 0, unit: 'num', focus: { group: 'roads', tool: 'road_street' }, reward: { money: cash(0.6) } }),
+  make: (c) => ({ title: 'Lay down your first roads', desc: 'Every lot needs a street within 3 tiles. Open Roads and drag across the land.', icon: '🛣️', target: 30, base: 0, unit: 'num', focus: { group: 'roads', tool: 'road_street' }, reward: { money: cash(0.8) } }),
   cur: () => roads(),
   prog: (c, g, v) => v / g.target,
 };
 KINDS.first_zones = {
   cat: 'fix', cool: ONCE,
   score: (c) => (roads() >= 10 && zones() < 30 ? 8.5 : 0),
-  make: (c) => ({ title: 'Zone land for homes and jobs', desc: 'Paint residential, commercial and industrial zones along your roads — buildings grow there by themselves.', icon: '🏘️', target: 60, base: 0, unit: 'num', focus: { group: 'zones' }, reward: { money: cash(0.6) } }),
+  make: (c) => ({ title: 'Zone land for homes and jobs', desc: 'Paint residential, commercial and industrial zones along your roads — buildings grow there by themselves.', icon: '🏘️', target: 60, base: 0, unit: 'num', focus: { group: 'zones' }, reward: { money: cash(0.8) } }),
   cur: () => zones(),
   prog: (c, g, v) => v / g.target,
 };
@@ -217,9 +244,12 @@ KINDS.pop = {
   cat: 'grow', cool: 0,
   score: (c) => (roads() >= 10 ? 3 : 0),
   make(c) {
+    // a round number between the milestones: the milestone itself has its own banner (no double party)
+    const target = popTarget(c);
     const m = nextMilestone();
-    const target = m ? m.pop : niceUp(Math.max(1000, c.peak * 1.4));
-    const why = m ? `Become a ${m.name}${m.reward ? ' and collect a ' + money(m.reward) + ' state grant' : ''}.` : 'The sky is the limit!';
+    let why = 'The sky is the limit!';
+    if (m && m.pop < target) why = `On the way you become ${/^[AEIOU]/.test(m.name) ? 'an' : 'a'} ${m.name}${m.reward ? ' (+' + money(m.reward) + ' state grant)' : ''}.`;
+    else if (m) why = `Next up: ${m.name} at ${num(m.pop)} citizens${m.reward ? ' (+' + money(m.reward) + ' state grant)' : ''}.`;
     return { title: `Grow to ${num(target)} citizens`, desc: why + ' Zone homes with jobs and shops nearby.', icon: '👥', target, base: 0, unit: 'num', focus: { panel: 'population' }, reward: { money: cash(1) } };
   },
   cur: (c) => c.pop,
@@ -286,20 +316,29 @@ KINDS.fix_power = {
   make(c) {
     const n = iss().unpowered || 0;
     const short = iss().powerShortage;
-    return { title: `Restore power to ${num(n)} buildings`, desc: short ? 'Demand exceeds supply — build another power plant.' : 'Some buildings are not connected — link them to the grid with roads or power lines.', icon: '🔌', target: 0, base: n, unit: 'left', focus: { overlay: 'power', locate: 'unpowered', group: 'power' }, reward: { money: cash(0.8) } };
+    return { title: powerTitle(n), desc: short ? 'Demand exceeds supply — build another power plant.' : 'Some buildings are not connected — link them to the grid with roads or power lines.', icon: '🔌', target: 0, base: n, unit: 'left', focus: { overlay: 'power', locate: 'unpowered', group: 'power' }, reward: { money: cash(0.8) } };
   },
   cur: () => iss().unpowered || 0,
   prog: (c, g, v) => 1 - v / Math.max(1, g.base),
+  title: (g, v) => powerTitle(v), // live count
+  doneTitle: () => 'Restore power to every building',
+  text: (g, v) => `${num(Math.max(0, g.base - v))} / ${num(g.base)} fixed`,
 };
+function powerTitle(n) { return `Restore power to ${num(n)} building${n === 1 ? '' : 's'}`; }
+function waterTitle(n) { return `Bring water to ${num(n)} building${n === 1 ? '' : 's'}`; }
+function abandTitle(n) { return `Revive ${num(n)} abandoned building${n === 1 ? '' : 's'}`; }
 KINDS.fix_water = {
   cat: 'fix', cool: 60,
   score: (c) => (counts().water > 0 && (iss().unwatered || 0) >= 5 ? 7 : 0),
   make(c) {
     const n = iss().unwatered || 0;
-    return { title: `Bring water to ${num(n)} buildings`, desc: iss().waterShortage ? 'The pumps can not keep up — add pumps or towers (and make sure they have power).' : 'Some buildings are cut off — connect them with roads to a pump or tower.', icon: '🚰', target: 0, base: n, unit: 'left', focus: { overlay: 'water', locate: 'unwatered', group: 'water' }, reward: { money: cash(0.8) } };
+    return { title: waterTitle(n), desc: iss().waterShortage ? 'The pumps can not keep up — add pumps or towers (and make sure they have power).' : 'Some buildings are cut off — connect them with roads to a pump or tower.', icon: '🚰', target: 0, base: n, unit: 'left', focus: { overlay: 'water', locate: 'unwatered', group: 'water' }, reward: { money: cash(0.8) } };
   },
   cur: () => iss().unwatered || 0,
   prog: (c, g, v) => 1 - v / Math.max(1, g.base),
+  title: (g, v) => waterTitle(v), // live count
+  doneTitle: () => 'Bring water to every building',
+  text: (g, v) => `${num(Math.max(0, g.base - v))} / ${num(g.base)} fixed`,
 };
 KINDS.fix_access = {
   cat: 'fix', cool: 90,
@@ -317,11 +356,13 @@ KINDS.fix_abandoned = {
   score: (c) => ((c.st.abandoned || 0) >= 4 ? 6 : 0),
   make(c) {
     const n = c.st.abandoned || 0;
-    return { title: `Revive ${num(n - Math.floor(n / 3))} abandoned buildings`, desc: 'Empty buildings drag the whole street down. Check power, water, jobs, services, pollution and taxes around them.', icon: '🏚️', target: Math.floor(n / 3), base: n, unit: 'left', focus: { locate: 'abandoned', overlay: 'happiness' }, reward: { money: cash(1) } };
+    return { title: abandTitle(n - Math.floor(n / 3)), desc: 'Empty buildings drag the whole street down. Check power, water, jobs, services, pollution and taxes around them.', icon: '🏚️', target: Math.floor(n / 3), base: n, unit: 'left', focus: { locate: 'abandoned', overlay: 'happiness' }, reward: { money: cash(1) } };
   },
   cur: (c) => c.st.abandoned || 0,
   prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
-  text: (g, v) => `${num(Math.max(0, v - g.target))} to go`,
+  title: (g, v) => abandTitle(Math.max(0, v - g.target)), // live count
+  doneTitle: () => 'Revive the abandoned buildings',
+  text: (g, v) => `${num(M.clamp(g.base - v, 0, g.base - g.target))} / ${num(g.base - g.target)} done`,
 };
 KINDS.fix_traffic = {
   cat: 'fix', cool: 180,
@@ -392,7 +433,9 @@ for (const s of SVC) {
       if (!r) return 0;
       const cov = r.coverage || 0;
       if (cov >= s.max * 0.6) return 0;
-      return 3 + (1 - cov / s.max) * 3 + Math.min(2, c.pop / 4000) + (r.buildings ? 0 : 1);
+      const sc = 3 + (1 - cov / s.max) * 3 + Math.min(2, c.pop / 4000) + (r.buildings ? 0 : 1);
+      // urgent (>= 8: skips the variety rule) only when the service is practically missing in a grown town
+      return cov < 0.1 && c.pop >= s.pop * 2 ? sc : Math.min(7.9, sc);
     },
     make(c) {
       const r = svc()[s.key] || {};
@@ -528,7 +571,7 @@ function addTempMod(entry) {
 }
 function grant(S, g) {
   const r = g.reward || {};
-  if (r.money > 0) VC.money.earn(r.money, 'reward');
+  if (r.money > 0) VC.money.earn(r.money, 'goal');
   if (r.mods) addTempMod({ id: 'goal:' + g.id, source: 'goal', label: r.label || g.title, mods: Object.assign({}, r.mods), until: S.time.day + (r.days || 90) });
 }
 
@@ -555,6 +598,7 @@ function ensure(S) {
     if (!g.reward.long) g.reward.long = rewardLong(g.reward);
     if (!g.focus || typeof g.focus !== 'object') g.focus = {};
     if (!g.cat) g.cat = KINDS[g.kind].cat;
+    if (!isFinite(g.lastProg)) g.lastProg = S.time.day; // older saves: the stale clock starts now
   }
   return G;
 }
@@ -590,6 +634,10 @@ function evaluate(S) {
     g.cur = typeof v === 'number' && isFinite(v) ? Math.round(v * 1000) / 1000 : 0;
     g.progress = clamp01(p);
     try { g.text = textOf(K, g, v); } catch (e) { g.text = ''; }
+    if (K.title && p < 1) { try { const t = K.title(g, v); if (t) g.title = t; } catch (e) { /* keep */ } }
+    // stale-goal bookkeeping: the best progress so far and when it was reached
+    if (!(g.best >= 0)) { g.best = g.progress; g.lastProg = S.time.day; }
+    else if (g.progress > g.best + 0.005) { g.best = g.progress; g.lastProg = S.time.day; }
     if (p >= 1) complete(S, g);
   }
   lastEvalDay = S.time.day;
@@ -599,7 +647,10 @@ function complete(S, g) {
   g.done = true;
   g.progress = 1;
   g.doneDay = S.time.day;
+  g.shown = 0;
   const G = S.goals;
+  const K0 = KINDS[g.kind];
+  if (K0 && K0.doneTitle) { try { g.title = K0.doneTitle(g); } catch (e) { /* keep */ } }
   G.count++;
   G.done.push(g.id);
   if (G.done.length > DONE_CAP) G.done.splice(0, G.done.length - DONE_CAP);
@@ -629,6 +680,8 @@ function generate(S, forceKind) {
       if (!(s > 0)) continue;
       // variety: a second goal of the same category has to be urgent to win
       if (s < 8 && G.active.some((g) => g.cat === K.cat)) s -= 2.5;
+      // ... and two "X coverage to N%" goals at once only when the new one is urgent
+      if (K.svc && s < 8 && G.active.some((g) => KINDS[g.kind] && KINDS[g.kind].svc)) s -= 3;
       cands.push({ K, s: s + rnd() * 1.5 });
     }
     cands.sort((a, b) => b.s - a.s);
@@ -638,7 +691,7 @@ function generate(S, forceKind) {
     let f = null;
     try { f = K.make(cx); } catch (e) { console.error('[goals] make ' + K.key, e); f = null; }
     if (!f) continue;
-    const g = Object.assign({ id: 'g' + (G.seq + 1), kind: K.key, cat: K.cat, day, progress: 0, cur: 0, text: '', done: false }, f);
+    const g = Object.assign({ id: 'g' + (G.seq + 1), kind: K.key, cat: K.cat, day, progress: 0, cur: 0, text: '', done: false, lastProg: day }, f);
     g.reward = Object.assign({}, g.reward || {});
     g.reward.text = rewardText(g.reward);
     g.reward.long = rewardLong(g.reward);
@@ -649,6 +702,7 @@ function generate(S, forceKind) {
       if (p >= 1 && !forceKind) { G.cool[K.key] = day + 30; continue; }
       g.cur = typeof v === 'number' && isFinite(v) ? v : 0;
       g.progress = clamp01(p);
+      g.best = g.progress;
       g.text = textOf(K, g, v);
     } catch (e) { /* keep defaults */ }
     G.seq++;
@@ -662,10 +716,19 @@ function onDay() {
   const S = S_();
   if (!live(S) || tutorialOn()) return;
   const G = S.goals, day = S.time.day;
-  // auto-claim forgotten rewards so the slot frees up
+  // auto-claim forgotten rewards so the slot frees up — only after the card has shown them a while
+  // (real seconds, counted by the HUD; without a HUD the game days alone decide)
+  const hudOn = !!(VC.hud && VC.hud.register);
   for (let i = G.active.length - 1; i >= 0; i--) {
     const g = G.active[i];
-    if (g.done && day - (g.doneDay || day) >= AUTO_CLAIM_DAYS) claim(g.id, true);
+    if (g.done && day - (g.doneDay || day) >= AUTO_CLAIM_DAYS && (!hudOn || (g.shown || 0) >= AUTO_CLAIM_SEC)) claim(g.id, true);
+  }
+  // rotate out a goal that has not moved for a long time (at most one a month; fresh progress first)
+  const isStale = (g) => !g.done && day - (isFinite(g.lastProg) ? g.lastProg : g.day) >= STALE_DAYS;
+  if (day - (G.rotDay || -1e9) >= ROTATE_GAP && G.active.some(isStale)) {
+    evaluate(S);
+    const stale = G.active.find(isStale);
+    if (stale) { G.rotDay = day; rotate(S, stale); }
   }
   if (G.active.length < MAX_ACTIVE && day >= G.next) {
     const g = generate(S);
@@ -704,6 +767,18 @@ function claim(id, silent) {
   VC.bus.emit('goalClaimed', { goal: g, auto: !!silent });
   VC.bus.emit('goalsChanged', G.active);
   return true;
+}
+/** A goal that sat still for STALE_DAYS makes room for a fresh one (its kind rests a while). */
+function rotate(S, g) {
+  const G = S.goals;
+  const i = G.active.indexOf(g);
+  if (i < 0) return;
+  G.active.splice(i, 1);
+  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + 240);
+  const n = generate(S);
+  G.next = S.time.day + (n ? NEXT_DAYS : 2);
+  if (!n) VC.bus.emit('goalsChanged', G.active);
+  VC.bus.emit('goalRotated', { goal: g, next: n });
 }
 /** Replaces an open goal with another (its kind cools down for a while). */
 function swap(id) {
@@ -750,6 +825,8 @@ function focusOf(id) {
 const Goals = (VC.goals = {
   KINDS,
   MAX_ACTIVE,
+  AUTO_CLAIM_SEC,
+  STALE_DAYS,
   init() {
     if (inited) return;
     inited = true;

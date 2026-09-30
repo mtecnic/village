@@ -10,11 +10,21 @@
  *   3. roll S.ledger.month -> S.ledger.last, set S.stats.income/expenses/net (operating cash flow),
  *      push S.history samples (capped), bankruptcy + low-funding (strike) bookkeeping.
  *
- * DAY-WEIGHTED BILLING (anti-exploit): every sim 'day' the current tax rates, department funding
- * levels and active policies are accumulated in S.econ.acc {days, tax, fund, pol}. The month bills
- * the AVERAGE tax rate and funding, and each policy (and a policy-gated venue's income) pro rata to
- * the days it was active — so raising taxes only on the last day, or cutting funding just before
- * the tick, gains nothing. forecast() shows the current settings (a full month at these rates).
+ * DAY-WEIGHTED BILLING (anti-exploit): every sim 'day' the current tax rates, tax modifiers
+ * (S.mods.taxR/C/I from policies and temporary modifiers, as the multiplier 1 + mod), department
+ * funding levels and active policies are accumulated in S.econ.acc {days, tax, taxMul, fund, pol}.
+ * The month bills the AVERAGE tax rate, tax multiplier and funding, and each policy (and a
+ * policy-gated venue's income) pro rata to the days it was active — so raising taxes (or dropping a
+ * tax break) only on the last day, or cutting funding just before the tick, gains nothing, and a
+ * 30-day tax holiday discounts exactly 30 days of taxes whenever it starts. forecast() shows the
+ * current settings (a full month at these rates).
+ *
+ * MAYOR'S DESK COMMITMENTS: recurring payments agreed on the Mayor's Desk (S.desk.recurring
+ * [{id, label, amount (+ income / − cost), left (months)}], sim/desk.js) are part of the operating
+ * budget: compute() lists them as income.deskDeal / expenses.deskDeal (forecast, budget window,
+ * top-bar /mo), monthly() books them (ledger category 'deskDeal') and counts down `left`
+ * (VC.econ.billsDesk tells the desk module not to book them itself). deskCommitments() -> the
+ * active list for the UI.
  *
  * WAGES: service departments (police, fire, health, education, transit, parks, waste) pay city
  * wages that rise with population (wageMul: 1 at 4k residents, ~1.8 at 25k, ~2.3 at 100k), while
@@ -46,7 +56,8 @@
  *
  * Persistent bookkeeping is kept in S.econ (plain JSON, saved with the state).
  * Extra API: upkeepOf(key|building) (actual $/month of one building), wageMul(), taxBilled(),
- * policyEffects(key, level?) -> {modKey: value at that level}, policyCost(key, level?).
+ * policyEffects(key, level?) -> {modKey: value at that level}, policyCost(key, level?),
+ * deskCommitments(). forecast() also carries deskDeals [{id, label, amount, left}].
  */
 const M = VC.M, C = VC.C;
 
@@ -88,9 +99,9 @@ const STRIKE_MUL = 0.7; // effectiveness multiplier while on strike
 const TEMP_MAX = 32; // cap on simultaneous temporary modifiers (oldest dropped)
 
 /** Ledger categories that make up the operating budget (shown as monthly income / expenses). */
-const OPER_IN = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income', 'grant'];
+const OPER_IN = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income', 'grant', 'deskDeal'];
 const OPER_OUT_PREFIX = 'upkeep:';
-const OPER_OUT = ['roadUpkeep', 'policy', 'loanPayment'];
+const OPER_OUT = ['roadUpkeep', 'policy', 'loanPayment', 'deskDeal'];
 /** Display names for ledger categories (budget window, charts). */
 const CATEGORIES = {
   'tax:R': { name: 'Residential taxes', icon: '🏠' },
@@ -101,6 +112,9 @@ const CATEGORIES = {
   refund: { name: 'Undo refunds', icon: '↩️' },
   income: { name: 'Venues (casino, stadium)', icon: '🎟️' },
   reward: { name: 'Milestone rewards', icon: '🏆' },
+  goal: { name: 'Goal rewards', icon: '🎯' },
+  desk: { name: 'Mayor’s Desk', icon: '📨' },
+  deskDeal: { name: 'Mayor’s Desk commitments', icon: '📨' },
   loan: { name: 'Loans received', icon: '🏦' },
   roadUpkeep: { name: 'Road maintenance', icon: '🛣️' },
   policy: { name: 'Policies', icon: '📜' },
@@ -276,7 +290,17 @@ function tourismPoints(S, a) {
 function newAcc() {
   const fund = {};
   for (const d of VC.DEPARTMENTS) fund[d.key] = 0;
-  return { days: 0, tax: { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] }, fund, pol: {} };
+  return { days: 0, tax: { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] }, taxMul: { R: 0, C: 0, I: 0 }, fund, pol: {} };
+}
+/** Tax multiplier of a zone from the tax modifiers (policies, desk / goal temp modifiers): 1 + mod, ≥ 0. */
+function taxMulNow(S, z) {
+  return Math.max(0, 1 + ((S.mods && S.mods['tax' + z]) || 0));
+}
+/** Active Mayor's Desk commitments (recurring payments with months left). */
+function deskDeals(S) {
+  const R = S.desk && Array.isArray(S.desk.recurring) ? S.desk.recurring : null;
+  if (!R) return [];
+  return R.filter((r) => r && r.left > 0 && isFinite(+r.amount) && +r.amount !== 0);
 }
 /** Adds today's tax rates, funding levels and active policies (bus 'day'). */
 function accumulate() {
@@ -284,10 +308,16 @@ function accumulate() {
   if (!S || !S.tax || !S.budget) return;
   const e = ensureEcon(S);
   const a = e.acc && e.acc.tax && e.acc.fund && e.acc.pol ? e.acc : (e.acc = newAcc());
+  if (!a.taxMul) {
+    // month in progress from an older save: assume today's modifiers for the days already counted
+    a.taxMul = {};
+    for (const z of ZONES) a.taxMul[z] = taxMulNow(S, z) * a.days;
+  }
   a.days++;
   for (const z of ZONES) {
     const t = S.tax[z], at = a.tax[z] || (a.tax[z] = [0, 0, 0]);
     if (t) for (let w = 0; w < 3; w++) at[w] += +t[w] || 0;
+    a.taxMul[z] = (a.taxMul[z] || 0) + taxMulNow(S, z);
   }
   for (const d of VC.DEPARTMENTS) a.fund[d.key] = (a.fund[d.key] || 0) + funding(d.key);
   // level-days: a month at 60 % bills 60 % of the policy's cost
@@ -325,7 +355,9 @@ function compute(S, force, billing) {
   const taxRates = { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] };
   for (const z of ZONES) {
     const base = a.base[z];
-    const k = TAX_K[z] * Math.max(0, 1 + (mods['tax' + z] || 0));
+    // tax modifiers: day-weighted average when billing (older saves without taxMul: today's value)
+    const mul = acc && acc.taxMul && acc.taxMul[z] != null ? acc.taxMul[z] / acc.days : Math.max(0, 1 + (mods['tax' + z] || 0));
+    const k = TAX_K[z] * mul;
     let sum = 0;
     for (let w = 0; w < 3; w++) {
       const rate = acc && acc.tax[z] ? acc.tax[z][w] / acc.days : S.tax[z][w];
@@ -350,6 +382,16 @@ function compute(S, force, billing) {
     special += v;
   }
   income.income = Math.round(special);
+  // Mayor's Desk commitments (a lottery pays, a union raise costs) — booked monthly like the rest
+  let dIn = 0, dOut = 0;
+  const deals = [];
+  for (const r of deskDeals(S)) {
+    const v = Math.round(+r.amount);
+    if (v > 0) dIn += v;
+    else dOut -= v;
+    deals.push({ id: r.id, label: r.label || 'Mayor’s Desk deal', amount: v, left: r.left | 0 });
+  }
+  if (dIn) income.deskDeal = dIn;
 
   const dept = {};
   for (const d of VC.DEPARTMENTS) {
@@ -378,13 +420,14 @@ function compute(S, force, billing) {
   let lp = 0;
   for (const l of S.loans) lp += loanDue(l).pay;
   expenses.loanPayment = Math.round(lp);
+  if (dOut) expenses.deskDeal = dOut;
 
   let ti = 0, te = 0;
   for (const k in income) ti += income[k];
   for (const k in expenses) te += expenses[k];
   return {
     income, expenses, totalIncome: ti, totalExpenses: te, net: ti - te,
-    taxDetail, taxRates, dept, policies, venues,
+    taxDetail, taxRates, dept, policies, venues, deskDeals: deals,
     taxBase: { R: a.base.R.slice(), C: a.base.C.slice(), I: a.base.I.slice() },
     roadTiles: a.roads.slice(),
     tourismPoints: Math.round(tourismPoints(S, a)),
@@ -493,6 +536,11 @@ function monthly() {
     if (l.months <= 0 || l.remaining < 0.5) done.push(l);
   }
   book(S, 'loanPayment', -paid);
+  // Mayor's Desk commitments were booked with the income / expenses above: count them down
+  if (S.desk && Array.isArray(S.desk.recurring) && S.desk.recurring.length) {
+    for (const r of S.desk.recurring) if (r && r.left > 0) r.left--;
+    S.desk.recurring = S.desk.recurring.filter((r) => r && r.left > 0);
+  }
   if (done.length) {
     S.loans = S.loans.filter((l) => done.indexOf(l) < 0);
     if (!S.demo) {
@@ -509,8 +557,11 @@ function monthly() {
   S.ledger.last = L;
   S.ledger.month = {};
   let inc = 0, exp = 0;
-  for (const k of OPER_IN) inc += L[k] > 0 ? L[k] : 0;
-  for (const k in L) if ((k.startsWith(OPER_OUT_PREFIX) || OPER_OUT.indexOf(k) >= 0) && L[k] < 0) exp -= L[k];
+  for (const k of OPER_IN) if (k !== 'deskDeal') inc += L[k] > 0 ? L[k] : 0;
+  for (const k in L) if (k !== 'deskDeal' && (k.startsWith(OPER_OUT_PREFIX) || OPER_OUT.indexOf(k) >= 0) && L[k] < 0) exp -= L[k];
+  // desk commitments: the ledger nets a lottery against a raise, the stats keep both sides
+  inc += f.income.deskDeal || 0;
+  exp += f.expenses.deskDeal || 0;
   S.stats.income = inc;
   S.stats.expenses = exp;
   S.stats.net = inc - exp;
@@ -633,6 +684,7 @@ VC.econ = {
   WEALTH_NAMES: ['Low', 'Mid', 'High'],
   STRIKE_FUNDING, STRIKE_MONTHS, STRIKE_MUL,
   WAGE_DEPTS, // departments that pay city wages (wageMul)
+  billsDesk: true, // monthly() books S.desk.recurring (ledger 'deskDeal'); sim/desk.js leaves them alone
 
   init() {
     VC.bus.on('month', () => {
@@ -985,6 +1037,11 @@ VC.econ = {
     const n = VC.econ.forecast().net;
     if (n >= 0) return Infinity;
     return Math.max(0, S.money / -n);
+  },
+  /** Active Mayor's Desk commitments: [{id, label, amount ($/month, + income / − cost), left (months)}]. */
+  deskCommitments() {
+    const S = S_();
+    return S ? deskDeals(S).map((r) => ({ id: r.id, label: r.label || 'Mayor’s Desk deal', amount: Math.round(+r.amount), left: r.left | 0 })) : [];
   },
   /** Display name/icon for a ledger category. */
   category(cat) {

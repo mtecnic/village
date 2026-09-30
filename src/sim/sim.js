@@ -290,10 +290,8 @@ function tryLevelUp(S, b) {
   b.simReplay = true;
   X.constructing.add(b.id);
   VC.world.changed(b);
-  if (++X.levelUps <= 3) {
-    burst('sparkle', b, 14);
-    sfx({ name: 'levelup', x: b.x + b.w / 2, z: b.z + b.d / 2, vol: 0.4 });
-  }
+  // (the sparkle burst comes from the particles module, which bursts on every level-up it sees)
+  if (++X.levelUps <= 3) sfx({ name: 'levelup', x: b.x + b.w / 2, z: b.z + b.d / 2, vol: 0.4 });
 }
 
 /**
@@ -590,7 +588,13 @@ function updateStats(S) {
   st.traffic = tr ? tr.avgCongestion : 0;
   // landmarks + parks + policy visitors (Tourism Campaign), all scaled by the tourism modifier
   let visitors = 0;
-  for (const k in S.policies) if (S.policies[k] && VC.POLICY[k] && VC.POLICY[k].visitors) visitors += VC.POLICY[k].visitors;
+  // (the policy's slider scales its visitors like its cost: 50 % ad budget = half the visitors)
+  for (const k in S.policies) {
+    const d = VC.POLICY[k];
+    if (!d || !d.visitors || !S.policies[k]) continue;
+    const lv = VC.econ && VC.econ.policyLevel ? VC.econ.policyLevel(k) : S.policies[k] === true ? 1 : clamp(+S.policies[k] || 0, 0, 1);
+    visitors += d.visitors * lv;
+  }
   st.tourism = Math.round((t.tourismRaw + t.parks * 1.5 + visitors) * Math.max(0, 1 + (mods.tourism || 0)));
   st.buildings = t.growables + t.catalog;
   st.abandoned = t.abandoned;

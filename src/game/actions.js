@@ -538,8 +538,11 @@ function utilityNote(S, def, res, link) {
     res.good = 'Connected to grid ✔';
   } else {
     // water: pipes run under roads and through buildings (not power lines), and pumps need electricity
-    if (!link.water && !link.power) { res.warn = 'Not connected — link it with roads or power lines'; return; }
-    if (!link.water) { res.warn = 'No pipes here — water flows along roads: place it beside one'; return; }
+    // (power lines carry no water: never suggest them for a pump or tower)
+    if (!link.water) {
+      res.warn = 'Not connected — build it beside a road (water pipes run under roads)';
+      return;
+    }
     const st = S.stats || {};
     if (!link.energized && !(st.powerSupply > 0) && !anyPlant(S)) { res.warn = 'Connected ✔ — but it needs power to pump: build a power plant'; return; }
     res.good = 'Connected to grid ✔';

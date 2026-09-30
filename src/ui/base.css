@@ -255,6 +255,58 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 @keyframes fadeIn { from { opacity: 0; } }
 @keyframes fadeOut { to { opacity: 0; } }
 
+/* ---------------- z-order: an open tool palette sits above manager windows ---------------- */
+/* (e.g. the tutorial's "Show me" or a hotkey while Budget is open; see Z-ORDER in ui.js). Browsers without
+ * :has() keep the old order. */
+#ui .hud-toolwrap:has(.hud-palette:not(.out)) { z-index: 22; }
+
+/* ---------------- no colour-emoji font (ui.js probe -> html.no-emoji) ---------------- */
+/* icon-only controls show a short text caption (data-abbr, set by ui.js) instead of a tofu / mono glyph */
+.no-emoji .ui-emo[data-abbr] { font-size: 0 !important; filter: none !important; line-height: 1; }
+.no-emoji .ui-emo[data-abbr]::before { content: attr(data-abbr); display: inline-block; font: 800 10.5px/1.15 var(--font); letter-spacing: 0.01em; color: var(--text); white-space: nowrap; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); }
+/* narrow square buttons (right dock, 40 px): a smaller caption that fits the button */
+.no-emoji .dock-btn .ui-emo[data-abbr]::before { font-size: 8.5px; letter-spacing: -0.02em; max-width: 38px; overflow: hidden; text-overflow: clip; }
+/* the dock's unread badge moves to the corner so it does not cover the caption */
+.no-emoji .dock-btn .dock-badge { top: -6px; right: -6px; }
+/* emoji next to a text label are decoration: without an emoji font they would only be tofu boxes */
+.no-emoji .ui-emo-deco { display: none !important; }
+
+/* ---------------- juice (ui/hud_notify.js): growth popups, coin showers, milestone progress ---------------- */
+/* first in the HUD (no stacking context of its own): pills paint under every other HUD element, the coins
+ * spraying from the funds display paint over the top bar (z-index 6); pills are positioned with `translate`
+ * (world point projected each frame), the rise / fade is a CSS animation of the inner pill */
+.juice { position: absolute; inset: 0; pointer-events: none; }
+.jp { position: absolute; left: 0; top: 0; width: 0; height: 0; will-change: translate; }
+.jp-in { position: absolute; left: 0; bottom: 0; translate: -50% 0; scale: var(--ui-scale); transform-origin: 50% 100%; white-space: nowrap; padding: 3px 10px 4px; border-radius: 999px; font: 800 13px/1.2 var(--num); letter-spacing: 0.01em; color: #fff; background: linear-gradient(180deg, rgba(34, 42, 66, 0.86), rgba(12, 16, 28, 0.9)); border: 1px solid rgba(255, 255, 255, 0.22); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4), var(--hi); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); animation: jpRise 1.75s var(--ease-out) forwards; }
+.jp-pop { color: #a6ffd0; border-color: rgba(61, 220, 132, 0.6); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4), 0 0 16px rgba(61, 220, 132, 0.32), var(--hi); }
+.jp-cash { color: var(--gold); border-color: rgba(255, 209, 102, 0.65); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4), 0 0 16px rgba(255, 209, 102, 0.35), var(--hi); }
+.jp-lvl { color: #fff; background: linear-gradient(180deg, rgba(186, 146, 255, 0.95), rgba(98, 66, 196, 0.95)); border-color: rgba(226, 208, 255, 0.75); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4), 0 0 20px rgba(179, 136, 255, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.35); }
+@keyframes jpRise {
+  0% { opacity: 0; transform: translateY(8px) scale(0.55); }
+  12% { opacity: 1; transform: translateY(-6px) scale(1.14); }
+  22% { transform: translateY(-10px) scale(1); }
+  72% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-48px) scale(0.96); }
+}
+.jc { position: absolute; z-index: 6; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; scale: var(--ui-scale); background: radial-gradient(circle at 35% 30%, #fff7cf 0 16%, #ffd166 42%, #e8a317 76%, #9c6608 100%); box-shadow: 0 0 9px rgba(255, 209, 102, 0.75), inset 0 -1px 2px rgba(0, 0, 0, 0.35); opacity: 0; animation: jcFly 1.1s cubic-bezier(0.3, 0.6, 0.45, 1) forwards; }
+@keyframes jcFly {
+  0% { opacity: 0; transform: translate(0, 0) scale(0.5) rotateY(0deg); }
+  12% { opacity: 1; }
+  35% { transform: translate(calc(var(--dx) * 0.45), var(--dy)) scale(1) rotateY(calc(var(--spin) * 0.35)); }
+  78% { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--dx), var(--fall)) scale(0.85) rotateY(var(--spin)); }
+}
+.jms { position: absolute; left: 50%; top: calc(70px * var(--ui-scale)); translate: -50% 0; scale: var(--ui-scale); transform-origin: 50% 0; display: flex; gap: 6px; align-items: baseline; padding: 7px 15px; border-radius: 999px; font-size: 13px; color: var(--text2); white-space: nowrap; cursor: pointer; background: radial-gradient(ellipse at 50% 0%, rgba(255, 209, 102, 0.22), transparent 70%), linear-gradient(180deg, rgba(44, 36, 20, 0.92), rgba(18, 16, 12, 0.94)); border: 1px solid rgba(255, 209, 102, 0.55); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 0 26px rgba(255, 209, 102, 0.22), var(--hi); animation: jmsIn 4.2s var(--ease-out) forwards; }
+.jms b { color: var(--gold); font-family: var(--num); font-weight: 850; }
+.jms em { font-style: normal; font-weight: 800; color: #fff; }
+@keyframes jmsIn {
+  0% { opacity: 0; transform: translateY(-12px) scale(0.9); }
+  8% { opacity: 1; transform: none; }
+  86% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translateY(-6px); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  .jp-in, .jms { animation: none !important; } /* static pills (hidden by JS when their time is up) */
 }

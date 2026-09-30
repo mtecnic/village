@@ -4,11 +4,25 @@
  * POINTER (canvas only; the #ui overlay swallows events over windows, so canvas events are game events):
  *   left        tool action (VC.tools.down/move/up); with the select tool: click = inspect, drag = pan
  *   right-drag  orbit (yaw + pitch); right-click without dragging = cancel drag / back to select tool
- *   middle-drag pan;  wheel = zoom toward the cursor (VC.settings.invertZoom); Ctrl/Shift/Alt+wheel = brush size
+ *   middle-drag pan;  wheel = zoom toward the cursor (VC.settings.invertZoom); Ctrl/Cmd/Shift/Alt+wheel = brush
+ *               size (only with a REAL modifier key held: a trackpad pinch arrives as ctrl+wheel and always zooms)
  *   double-click focus the camera on a building (or the ground) with the select tool
  *   edge scroll when VC.settings.edgeScroll
  *   touch       1 finger = tool (or pan with the select tool, tap = inspect); 2 fingers = pinch zoom + twist
  *               rotate + pan (any tool drag is cancelled)
+ *   trackpad    pinch = zoom (Chrome/Firefox: ctrl+wheel; Safari: gesturestart/change/end, also twist = rotate);
+ *               the page itself never zooms (ctrl+wheel and Safari gestures are prevented over the whole UI)
+ *   Mac         Ctrl-click = right-click (cancel / orbit drag); Cmd works for every Ctrl shortcut
+ * KEYBOARD LAYOUTS: positional keys use e.code (WASD / arrows / Q E / PgUp PgDn camera cluster); mnemonic
+ *   letters (managers M P G U V Y N J X K, tools T B, R H C O L), symbols (+ − , . [ ] ?) and Ctrl/Cmd shortcuts
+ *   use the CHARACTER (e.key), so AZERTY / QWERTZ / Dvorak players press the key labelled with the letter;
+ *   e.code is the fallback when e.key is not a Latin letter (Cyrillic, Greek…). Digits: the character when it
+ *   is a digit (AZERTY Shift+digit, numpad), else the physical digit-row key (AZERTY & é " ' ( - è _ ç à, Czech
+ *   + ě š …: the row keeps its 1 … 0 meaning; AZERTY zooms with = / + and the numpad). A printable character
+ *   with no meaning here does nothing (never its US-position code: AZERTY ')' or QWERTZ 'ß' do not zoom).
+ *   Backspace = Delete (Mac 'delete' key); '?' = help (F1 is brightness on Macs). AltGr characters count
+ *   ([ ] on many layouts), AltGr is never Ctrl. A remapped key blocks the positional fallbacks of other
+ *   modules (preventDefault).
  * KEYBOARD (central; behind menus and modals): see KEYMAP. Ignored only while TYPING — focus in a text-like
  *   field (text/search/number/email/password/… inputs, textarea, select, contenteditable). Sliders, checkboxes,
  *   radios and buttons keep focus after a click but never swallow hotkeys (a focused slider keeps only its own
@@ -19,16 +33,31 @@
  * FEEDBACK: toggles (cinematic, grid, overlay, undo) show ONE toast via VC.ui.toast directly (a bus 'toast' would
  *   add the audio module's notify sound); overlay cycling reuses a single toast that updates in place.
  * API: KEYMAP [{group, keys, action}] (help window; keys: alternatives separated by ', ', chords by ' + ', so a
- *   bare '+' / '−' is a key of its own), keys Set of held codes, mouse {x, y (client px), buttons, over},
- *   mods {shift, ctrl, alt}, enabled(), PANEL_KEYS {code: panelKey}, isTyping(e),
+ *   bare '+' / '−' is a key of its own; '⌘' instead of 'Ctrl' on Macs), keys Set of held (logical) codes,
+ *   mouse {x, y (client px), buttons, over}, mods {shift, ctrl, alt}, enabled(), PANEL_KEYS {code: panelKey},
+ *   isTyping(e), IS_MAC, MOD ('⌘' | 'Ctrl'), logicalKey(e) -> the layout-aware key code this module acts on,
  *   zoomDir() -> 1 | -1 (VC.settings.invertZoom; multiply wheel deltas by it), wheelZoom(e) -> camera zoom factor
  *   for a wheel event (normalised delta, clamped, invert applied) — for other zoomable views such as the minimap.
  */
 const M = VC.M;
 
+/** Mac: ⌘ in key labels, Ctrl-click = right-click. */
+const IS_MAC = (() => {
+  try {
+    const p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+    return /mac|iphone|ipad|ipod/i.test(p);
+  } catch (e) {
+    return false;
+  }
+})();
+const MOD = IS_MAC ? '⌘' : 'Ctrl';
+
 /** Panel hotkeys (fallback when VC.panels.list has no hotkey info). */
 const PANEL_KEYS = { KeyM: 'budget', KeyP: 'policies', KeyG: 'stats', KeyU: 'population', KeyV: 'services', KeyY: 'utilities', KeyN: 'advisors', KeyJ: 'milestones', KeyX: 'disasters', KeyK: 'save' };
-const HOLD = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyQ', 'KeyE', 'Equal', 'Minus', 'NumpadAdd', 'NumpadSubtract', 'PageUp', 'PageDown']);
+/** Continuous (held) keys by PHYSICAL position: the camera cluster. Zoom keys are resolved by character. */
+const HOLD = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyQ', 'KeyE', 'PageUp', 'PageDown']);
+const holdOf = new Map(); // held physical code -> its logical key (e.g. NumpadAdd / QWERTZ '+' -> 'Equal')
+let ctrlHeld = false; // a real Ctrl / Cmd key is down (a trackpad pinch sends ctrl+wheel without it)
 const DRAG_PX = 5; // movement before a press becomes a drag
 const EDGE_PX = 14;
 
@@ -51,7 +80,7 @@ function isTyping(e) {
 /** Keys a focused slider handles itself. */
 const SLIDER_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown']);
 /** Hotkeys that still work while the interface is hidden (camera, look & time; no windows, palettes or edits). */
-const HIDDEN_OK = new Set(['Escape', 'KeyH', 'KeyC', 'KeyO', 'Space', 'Comma', 'Period', 'BracketLeft', 'BracketRight']);
+const HIDDEN_OK = new Set(['Escape', 'KeyH', 'KeyC', 'KeyO', 'Space', 'SpeedDown', 'SpeedUp']);
 /** Interface shown (false in H / photo mode). */
 function uiVisible() {
   const H = VC.hud;
@@ -123,7 +152,7 @@ const I = (VC.input = {
     { group: 'Camera', keys: 'Right-drag', action: 'Rotate and tilt' },
     { group: 'Camera', keys: 'Middle-drag', action: 'Pan (drag the ground)' },
     { group: 'Camera', keys: 'Left-drag', action: 'Pan with the Inspect tool' },
-    { group: 'Camera', keys: 'Wheel, +, −', action: 'Zoom toward the cursor' },
+    { group: 'Camera', keys: 'Wheel, Pinch, +, −', action: 'Zoom toward the cursor' },
     { group: 'Camera', keys: 'Q, E', action: 'Rotate left / right' },
     { group: 'Camera', keys: 'PgUp, PgDn', action: 'Tilt the camera' },
     { group: 'Camera', keys: 'Double-click', action: 'Focus on a building' },
@@ -134,17 +163,17 @@ const I = (VC.input = {
     { group: 'Building', keys: 'Left-drag', action: 'Build roads, zones, power lines' },
     { group: 'Building', keys: 'Shift + Left-drag', action: 'Straight road / power line' },
     { group: 'Building', keys: 'R', action: 'Rotate building (Shift+R: back)' },
-    { group: 'Building', keys: 'Ctrl + Wheel', action: 'Brush size (terrain, trees)' },
-    { group: 'Building', keys: 'Right-click, Esc', action: 'Cancel / back to Inspect' },
-    { group: 'Building', keys: 'Ctrl + Z', action: 'Undo last action (' + ((VC.actions && VC.actions.UNDO_SEC) || 10) + ' s)' },
+    { group: 'Building', keys: MOD + ' + Wheel, Shift + Wheel', action: 'Brush size (terrain, trees)' },
+    { group: 'Building', keys: IS_MAC ? 'Right-click, Ctrl + Click, Esc' : 'Right-click, Esc', action: 'Cancel / back to Inspect' },
+    { group: 'Building', keys: MOD + ' + Z', action: 'Undo last action (' + ((VC.actions && VC.actions.UNDO_SEC) || 10) + ' s)' },
     { group: 'Building', keys: 'L', action: 'Toggle build grid' },
-    { group: 'Building', keys: 'Delete', action: 'Demolish the selected building' },
+    { group: 'Building', keys: IS_MAC ? 'Delete' : 'Delete, Backspace', action: 'Demolish the selected building' },
     { group: 'Game', keys: 'Space', action: 'Pause / resume' },
     { group: 'Game', keys: '[, ]', action: 'Slower / faster (the , and . keys work too)' },
     { group: 'Game', keys: 'O', action: 'Cycle map overlays (Shift+O: back)' },
     { group: 'Game', keys: 'H', action: 'Hide interface (photo mode)' },
-    { group: 'Game', keys: 'F1', action: 'Help' },
-    { group: 'Game', keys: 'Ctrl + S', action: 'Quick save' },
+    { group: 'Game', keys: IS_MAC ? '?' : 'F1, ?', action: 'Help' },
+    { group: 'Game', keys: MOD + ' + S', action: 'Quick save' },
     { group: 'Game', keys: 'Esc', action: 'Close window / pause menu' },
     { group: 'Managers', keys: 'M', action: 'Budget & taxes' },
     { group: 'Managers', keys: 'P', action: 'Policies' },
@@ -159,13 +188,22 @@ const I = (VC.input = {
   ],
 
   isTyping,
+  IS_MAC,
+  MOD,
+  logicalKey,
   /** +1, or -1 with VC.settings.invertZoom: multiply wheel deltas by it (minimap & co. zoom like the 3D view). */
   zoomDir,
-  /** Camera zoom factor (VC.camera.zoom(f)) for a wheel event: normalised delta, clamped, invert applied. */
+  /**
+   * Camera zoom factor (VC.camera.zoom(f)) for a wheel event: normalised delta, clamped, invert applied.
+   * A trackpad pinch (ctrl+wheel without a real Ctrl key) sends small deltas: scaled up so it feels direct.
+   */
   wheelZoom(e) {
-    const d = M.clamp(wheelPx(e, e.deltaY || 0), -300, 300) * zoomDir();
+    const pinch = isPinch(e);
+    const d = (pinch ? M.clamp(wheelPx(e, e.deltaY || 0) * 6, -150, 150) : M.clamp(wheelPx(e, e.deltaY || 0), -300, 300)) * zoomDir();
     return Math.exp(d * 0.0016);
   },
+  /** True for a trackpad pinch delivered as a wheel event (Chrome / Firefox / Edge: ctrlKey, no Ctrl held). */
+  isPinch,
 
   /** Game input is live (a city is running and no title menu is up). */
   enabled() {
@@ -187,6 +225,15 @@ const I = (VC.input = {
       if (!ptr && tools()) tools().pointer(I.mouse.x, I.mouse.y, false);
     });
     cv.addEventListener('wheel', onWheel, { passive: false });
+    // ctrl+wheel (mouse + Ctrl, or a trackpad pinch) never zooms the PAGE, wherever the pointer is (windows,
+    // HUD): the canvas handler above zooms the camera, everything else just scrolls normally without Ctrl
+    window.addEventListener('wheel', (e) => { if (e.ctrlKey && e.cancelable) e.preventDefault(); }, { passive: false });
+    // Safari trackpad pinch / twist (WebKit GestureEvents): camera zoom + rotate instead of page magnification
+    cv.addEventListener('gesturestart', onGestureStart);
+    cv.addEventListener('gesturechange', onGestureChange);
+    cv.addEventListener('gestureend', onGestureEnd);
+    document.addEventListener('gesturestart', (e) => e.preventDefault());
+    document.addEventListener('gesturechange', (e) => e.preventDefault());
     cv.addEventListener('dblclick', onDblClick);
     // middle-click autoscroll off
     cv.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
@@ -194,7 +241,8 @@ const I = (VC.input = {
     window.addEventListener('mouseout', (e) => { if (!e.relatedTarget) I.mouse.inside = false; });
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', (e) => {
-      I.keys.delete(e.code);
+      trackCtrl(e, false);
+      releaseKey(e.code);
       setMods(e);
     });
     window.addEventListener('blur', onBlur);
@@ -203,6 +251,7 @@ const I = (VC.input = {
 
   reset() {
     I.keys.clear();
+    holdOf.clear();
     ptr = null;
     touches.clear();
     tmode = null;
@@ -226,8 +275,8 @@ const I = (VC.input = {
       if (k.has('KeyE')) c.orbit(-1.6 * rdt * fast, 0);
       if (k.has('PageUp')) c.orbit(0, 0.9 * rdt);
       if (k.has('PageDown')) c.orbit(0, -0.9 * rdt);
-      if (k.has('Equal') || k.has('NumpadAdd')) c.zoom(Math.exp(-1.8 * rdt * fast));
-      if (k.has('Minus') || k.has('NumpadSubtract')) c.zoom(Math.exp(1.8 * rdt * fast));
+      if (k.has('Equal')) c.zoom(Math.exp(-1.8 * rdt * fast)); // (logical: '=' '+' numpad + …)
+      if (k.has('Minus')) c.zoom(Math.exp(1.8 * rdt * fast));
     }
     // edge scrolling (mouse only, never while dragging)
     const st = VC.settings || {};
@@ -267,17 +316,19 @@ function onDown(e) {
     return;
   }
   ptr = { id: e.pointerId, button: e.button, sx: e.clientX, sy: e.clientY, x: e.clientX, y: e.clientY, mode: '', moved: false, captured: false };
-  if (e.button === 0) {
+  // Mac convention: Ctrl-click is a secondary (right) click — cancel / orbit drag, never a tool action
+  const btn = IS_MAC && e.button === 0 && e.ctrlKey && !e.metaKey ? 2 : e.button;
+  if (btn === 0) {
     if (!T || T.kind === 'select') ptr.mode = 'panOrClick';
     else {
       ptr.mode = 'tool';
       if (T) T.pointer(px, py, true);
       if (!T.down(px, py)) ptr.mode = 'panOrClick';
     }
-  } else if (e.button === 1) {
+  } else if (btn === 1) {
     ptr.mode = 'pan';
     e.preventDefault();
-  } else if (e.button === 2) {
+  } else if (btn === 2) {
     ptr.mode = 'orbitOrCancel';
   } else {
     ptr = null;
@@ -371,6 +422,8 @@ function onCancel(e) {
 }
 function onBlur() {
   I.keys.clear();
+  holdOf.clear();
+  ctrlHeld = false;
   I.mods.shift = I.mods.ctrl = I.mods.alt = false;
   const T = tools();
   if (ptr) {
@@ -386,12 +439,24 @@ function onBlur() {
   }
 }
 
+/** Remembers whether a real Ctrl / Cmd key is down (keydown / keyup of the key itself). */
+function trackCtrl(e, down) {
+  const c = e.code || '';
+  if (c === 'ControlLeft' || c === 'ControlRight' || c === 'MetaLeft' || c === 'MetaRight' || e.key === 'Control' || e.key === 'Meta') ctrlHeld = down;
+  else if (down && !(e.ctrlKey || e.metaKey)) ctrlHeld = false; // missed keyup (focus left the page)
+}
+/** A trackpad pinch delivered as a wheel event: ctrlKey set by the browser while no Ctrl key is held. */
+function isPinch(e) {
+  return !!(e && e.ctrlKey && !ctrlHeld && !e.metaKey);
+}
 function onWheel(e) {
   e.preventDefault();
   if (!I.enabled()) return;
   const T = tools();
   const d = wheelPx(e, e.deltaY || e.deltaX); // Shift+wheel scrolls horizontally in some browsers
-  if ((e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) && T && T.isBrush && T.isBrush()) {
+  const pinch = isPinch(e);
+  if (pinch && gActive) return; // Safari: the gesture events already zoom (never both)
+  if (!pinch && (e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) && T && T.isBrush && T.isBrush()) {
     const now = performance.now();
     if (now - lastWheel > 90 && d) {
       lastWheel = now;
@@ -402,6 +467,35 @@ function onWheel(e) {
   if (!e.deltaY) return;
   const [px, py] = local(e);
   cam().zoom(I.wheelZoom(e), px, py);
+}
+
+/* Safari trackpad gestures (GestureEvent: scale / rotation since gesturestart). */
+let gScale = 1, gRot = 0, gActive = false;
+function onGestureStart(e) {
+  e.preventDefault();
+  gActive = true;
+  gScale = e.scale || 1;
+  gRot = e.rotation || 0;
+}
+function onGestureChange(e) {
+  e.preventDefault();
+  if (!I.enabled()) return;
+  const s = e.scale || 1, r = e.rotation || 0;
+  const c = cam();
+  if (c && s > 0 && gScale > 0) {
+    const [px, py] = e.clientX != null ? local(e) : [cv.clientWidth / 2, cv.clientHeight / 2];
+    c.zoom(M.clamp(gScale / s, 0.5, 2), px, py);
+    const dr = r - gRot;
+    if (dr && Math.abs(dr) < 45) c.orbit(-dr * (Math.PI / 180), 0);
+  }
+  gScale = s;
+  gRot = r;
+}
+function onGestureEnd(e) {
+  e.preventDefault();
+  gActive = false;
+  gScale = 1;
+  gRot = 0;
 }
 
 function onDblClick(e) {
@@ -517,49 +611,114 @@ function panelKey(code) {
   return PANEL_KEYS[code] || null;
 }
 
+/* ---- layout-aware key resolution ---- */
+/** The typed character, lower-cased ('' for named keys such as Escape / F1 / Shift). */
+function keyChar(e) {
+  const k = e.key;
+  return k && k.length === 1 ? k.toLowerCase() : '';
+}
+/** True when the key typed Latin letter `l`, or (non-Latin layouts only) sits where the US layout has it. */
+function isLetter(e, l) {
+  const k = keyChar(e);
+  if (k === l) return true;
+  return !/^[a-z]$/.test(k) && e.code === 'Key' + l.toUpperCase();
+}
+const ZOOM_IN = new Set(['+', '=']), SPEED_DOWN = new Set([',', '[', '<']), SPEED_UP = new Set(['.', ']', '>']);
+let LETTER_RE = /[a-z\u00C0-\u024F\u0370-\u04FF]/i;
+try { LETTER_RE = new RegExp('\\p{L}', 'u'); } catch (e) { /* old engines: Latin / Greek / Cyrillic */ }
+/**
+ * The layout-aware key this module acts on, as a code-like name: 'KeyM' (letter by CHARACTER; e.code when the
+ * character is not a Latin letter), 'Digit5', 'Equal' / 'Minus' (zoom by character), 'SpeedDown' / 'SpeedUp',
+ * 'Help' ('?'), 'Delete' (also Backspace), 'Space', 'Escape', 'F1'…; the positional camera cluster keeps e.code.
+ */
+function logicalKey(e) {
+  const code = e.code || '', k = keyChar(e);
+  if (HOLD.has(code)) return code; // WASD / QE / arrows / PgUp PgDn: physical position on every layout
+  if (code === 'NumpadAdd') return 'Equal';
+  if (code === 'NumpadSubtract') return 'Minus';
+  if (k) {
+    if (/^[a-z]$/.test(k)) return 'Key' + k.toUpperCase();
+    if (/^[0-9]$/.test(k)) return 'Digit' + k;
+    // the digit row keeps its 1 … 0 meaning (AZERTY & é " ' ( - è _ ç à, Czech + ě š …) — except AltGr
+    // characters typed there ([ ] on AZERTY / QWERTZ), which mean themselves
+    if (/^Digit\d$/.test(code) && !(e.getModifierState && e.getModifierState('AltGraph'))) return code;
+    if (/^Key[A-Z]$/.test(code) && LETTER_RE.test(k)) return code; // non-Latin letter (Cyrillic, Greek…): US position
+    if (ZOOM_IN.has(k)) return 'Equal';
+    if (k === '-' || (k === '_' && code === 'Minus')) return 'Minus';
+    if (SPEED_DOWN.has(k)) return 'SpeedDown';
+    if (SPEED_UP.has(k)) return 'SpeedUp';
+    if (k === '?') return 'Help';
+    if (k === ' ') return 'Space';
+    return ''; // a character without a meaning here (not its US-position code: AZERTY ')' is not zoom)
+  }
+  // named keys and dead keys (e.key 'Dead', 'Unidentified'): by position where that is unambiguous
+  if (/^Digit\d$/.test(code)) return code;
+  if (/^Numpad\d$/.test(code)) return 'Digit' + code.slice(6);
+  if (/^Key[A-Z]$/.test(code)) return code;
+  if (code === 'Backspace' || e.key === 'Backspace') return 'Delete';
+  if (code === 'Space') return 'Space';
+  if (code === 'Equal' || code === 'Minus' || code === 'Comma' || code === 'Period' || /^Bracket/.test(code)) return ''; // dead keys there
+  return code || e.key || '';
+}
+/** keyup: releases a held key; a logical key stays held while another physical key still maps to it. */
+function releaseKey(code) {
+  const L = holdOf.get(code);
+  if (L === undefined) { I.keys.delete(code); return; }
+  holdOf.delete(code);
+  for (const v of holdOf.values()) if (v === L) return; // (e.g. '=' and numpad + both held)
+  I.keys.delete(L);
+}
+
 function onKeyDown(e) {
   setMods(e);
+  trackCtrl(e, true);
   if (isTyping(e)) return;
   if (!I.enabled()) return;
   if (VC.ui && VC.ui.modalCount && VC.ui.modalCount() > 0) return;
-  const code = e.code;
+  const code = e.code || '';
   const tg = e.target;
   // a focused slider keeps its own keys (value steps); everything else is a hotkey
   if (tg && tg.tagName === 'INPUT' && tg.type === 'range' && SLIDER_KEYS.has(code)) return;
   const T = tools();
-  const ctrl = e.ctrlKey || e.metaKey;
+  // AltGr (Windows reports it as Ctrl+Alt) types characters such as [ ] on many layouts: not a shortcut
+  const altGr = !!(e.getModifierState && e.getModifierState('AltGraph'));
+  const ctrl = (e.ctrlKey || e.metaKey) && !altGr;
   const shown = uiVisible();
-  // ---- Ctrl / Cmd shortcuts ----
+  // ---- Ctrl / Cmd shortcuts (by character: Ctrl+Z is the key labelled Z on AZERTY / QWERTZ too) ----
   if (ctrl) {
-    if (code === 'KeyS') {
+    if (isLetter(e, 's')) {
       e.preventDefault();
       if (!e.repeat && VC.save && VC.save.save) {
         try { VC.save.save('quick'); } catch (err) { console.error('[input] quick save failed', err); }
       }
-    } else if (code === 'KeyZ' && !e.shiftKey) {
+    } else if (isLetter(e, 'z') && !e.shiftKey) {
       e.preventDefault();
       if (!e.repeat && shown) undo(); // no invisible edits in photo mode
-    }
+    } else if (code === 'KeyS') e.preventDefault(); // (not S on this layout: keep the positional save fallback out)
     return;
   }
-  if (e.altKey) return;
-  if (HOLD.has(code)) {
-    I.keys.add(code);
-    if (code.startsWith('Arrow') || code.startsWith('Page')) e.preventDefault();
+  if (e.altKey && !altGr) return;
+  const L = logicalKey(e);
+  // a remapped letter / digit key must not also trigger other modules' positional (e.code) fallbacks
+  if (L !== code && /^(Key|Digit)/.test(code)) e.preventDefault();
+  if (HOLD.has(L) || L === 'Equal' || L === 'Minus') {
+    I.keys.add(L);
+    holdOf.set(code || L, L);
+    if (L.startsWith('Arrow') || L.startsWith('Page') || L === 'Equal' || L === 'Minus') e.preventDefault();
     return;
   }
   // interface hidden (H / photo mode): camera, time and look keys only — never invisible windows / palettes / edits
-  if (!shown && !HIDDEN_OK.has(code)) {
+  if (!shown && !HIDDEN_OK.has(L)) {
     // consumed: later hotkey fallbacks (panels, HUD) must not open invisible windows either
-    if (/^(Key|Digit|Numpad|F\d)/.test(code) || code === 'Delete') {
+    if (/^(Key|Digit|Numpad|F\d)/.test(L) || L === 'Delete' || L === 'Help') {
       e.preventDefault();
       e.stopImmediatePropagation();
     }
     return;
   }
-  if (e.repeat && code !== 'KeyR') return;
-  // ---- tool groups: Digit1..Digit0, T, B ----
-  const grp = VC.TOOL_GROUPS.find((g) => g.hotkey && (code === 'Digit' + g.hotkey || code === 'Numpad' + g.hotkey || code === 'Key' + g.hotkey));
+  if (e.repeat && L !== 'KeyR') return;
+  // ---- tool groups: 1..0 (digit row / numpad), T, B ----
+  const grp = VC.TOOL_GROUPS.find((g) => g.hotkey && (L === 'Digit' + g.hotkey || L === 'Key' + g.hotkey));
   if (grp) {
     e.preventDefault();
     if (grp.key === 'bulldoze' && T) {
@@ -570,12 +729,13 @@ function onKeyDown(e) {
     } else VC.bus.emit('toolGroup', { key: grp.key });
     return;
   }
-  const pk = panelKey(code);
+  const pk = panelKey(L);
   if (pk) {
+    e.preventDefault(); // (the panels module's own e.code fallback stays out of it)
     if (VC.panels && VC.panels.toggle) VC.panels.toggle(pk); // synchronous: panels de-duplicate their own fallback
     return;
   }
-  switch (code) {
+  switch (L) {
     case 'Escape':
       if (!shown) showUI();
       else escape();
@@ -588,12 +748,12 @@ function onKeyDown(e) {
       VC.togglePause();
       break;
     }
-    case 'Comma':
-    case 'BracketLeft':
+    case 'SpeedDown':
+      e.preventDefault();
       VC.setSpeed(Math.max(0, VC.speed() - 1));
       break;
-    case 'Period':
-    case 'BracketRight':
+    case 'SpeedUp':
+      e.preventDefault();
       VC.setSpeed(Math.min(VC.C.SPEEDS.length - 1, VC.speed() + 1));
       break;
     case 'KeyR':
@@ -620,11 +780,13 @@ function onKeyDown(e) {
       break;
     }
     case 'F1':
+    case 'Help':
       e.preventDefault();
       if (VC.hud && VC.hud.openHelp) VC.hud.openHelp();
       break;
     case 'Delete':
-      // Delete: bulldoze the selected building (with the usual confirmation for landmarks)
+      // Delete / Backspace (the Mac 'delete' key): bulldoze the selected building (usual landmark confirmation)
+      e.preventDefault();
       if (T && T.selectedId && T.demolish && VC.state.buildings.has(T.selectedId)) T.demolish(VC.state.buildings.get(T.selectedId));
       break;
   }

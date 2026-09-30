@@ -10,7 +10,8 @@
  *   prio   0 ui .. 3 critical   max        max simultaneous voices          duck   music duck amount
  *   pos    false = never positional (UI / global events)
  * Sound names: see the ALIAS table at the end for accepted synonyms (money/coin -> cash, fanfare ->
- * milestone, level_up -> levelup, monster -> roar, earthquake -> rumble, …).
+ * milestone, level_up -> levelup, monster -> roar, earthquake -> rumble, …). Juice (ui/hud_notify.js):
+ * 'chaching' (profitable month end, gentle), 'progress' (every 25 % toward the next milestone).
  */
 const A = VC.audio;
 const R = A.RECIPES;
@@ -205,6 +206,33 @@ R.cash = {
     }
     D.crackle(b, 0.12, 0.4, 120, 0.12, { f: 7000, q: 1, rnd: r, env: (x) => 1 - x });
     return fin(D, b);
+  },
+};
+/**
+ * Month-end income: a gentle "cha-ching" (register drawer + two bright bells + a little coin jingle), much
+ * softer than 'cash'. Played by the HUD juice layer at most every few seconds, only for a profitable month.
+ */
+R.chaching = {
+  vol: 0.22, group: 'chaching', win: 2500, variants: 2, prio: 1, pos: false, wet: 0.3,
+  render(D, r, v) {
+    const b = D.buf(1.2);
+    D.noise(b, 0, 0.05, 0.45, { f: 'bp', f0: 1900, q: 1.1, d: 0.015, rnd: r }); // drawer "cha"
+    D.modal(b, 0.004, 0.05, 760, [[1, 1, 0.012], [2.6, 0.5, 0.008]], 0.3);
+    const base = v ? 91 : 93;
+    chime(D, b, 0.075, base, 0.5, 0.9, 1.1); // "ching"
+    chime(D, b, 0.13, base + 7, 0.34, 0.85, 0.9);
+    D.crackle(b, 0.1, 0.5, 70, 0.08, { f: 6800, q: 1.2, len: 0.002, rnd: r, env: (x) => (1 - x) ** 1.6 }); // coins
+    return fin(D, b, 0.8);
+  },
+};
+/** Milestone progress (every 25 % toward the next milestone): three soft rising mallet notes. */
+R.progress = {
+  vol: 0.2, group: 'progress', win: 2000, variants: 1, pitch: 0, prio: 1, pos: false, wet: 0.35,
+  render(D) {
+    const b = D.buf(1.1);
+    [79, 83, 86, 91].forEach((m, k) => mallet(D, b, k * 0.085, m, k === 3 ? 0.8 : 0.55, 0.7));
+    chime(D, b, 0.26, 98, 0.12, 0.9, 0.6);
+    return fin(D, b, 0.8);
   },
 };
 R.milestone = {
@@ -622,7 +650,8 @@ R.construct = {
 /* Synonyms used by other modules                                       */
 /* ================================================================== */
 Object.assign(A.ALIAS, {
-  money: 'cash', coin: 'cash', cash_register: 'cash', income: 'cash',
+  money: 'cash', coin: 'cash', cash_register: 'cash', income: 'cash', cha_ching: 'chaching', payday: 'chaching',
+  milestone_progress: 'progress',
   ding: 'notify', toast: 'notify', notification: 'notify', message: 'notify', news: 'notify',
   warn: 'alert', warning: 'alert', bad: 'alert', danger: 'alert',
   fanfare: 'milestone', celebrate: 'milestone',

@@ -2,25 +2,42 @@
  * VOXELPOLIS — save / load / export / import / autosave (VC.save). Format + compression: io/save_codec.js.
  *
  * STORAGE: localStorage 'voxelpolis.save.<slot>' = storage string (see codec), plus the index
- *   'voxelpolis.saves' = [{slot, name, city, pop, money, day, savedAt, time, thumb, mapType, size,
+ *   'voxelpolis.saves' = [{slot, name, city, cityId, pop, money, day, savedAt, time, thumb, mapType, size,
  *   difficulty, milestone, bytes, auto}] (thumb = small JPEG data URL from VC.gfx.capture). When storage
  *   is blocked (e.g. Safari on file://) an in-memory store is used for the session and the player is
  *   told to use Export. Quota errors are reported with a toast that suggests Export / deleting saves.
+ *
+ * CITY ID: every real city carries a stable S.cityId (created when it starts, saved with the state), so
+ *   all saves of one city can be grouped: list() entries carry `cityId` (null for old saves).
+ * AUTOSAVE: slot 'autosave:<cityId>' — ONE rolling backup PER CITY, so starting or loading another city
+ *   never overwrites this city's backup (the old shared slot 'autosave' stays listed and loadable). At most
+ *   VC.save.autosaveKeep autosave slots are kept (oldest removed); when storage is full, an autosave first
+ *   evicts the oldest autosave of another city (manual saves are never touched). Automatic triggers run
+ *   only with VC.settings.autosave !== false, never for the title-screen demo city or an untouched map, and
+ *   only when the city changed since it was last saved (buildings, terrain, day, money, taxes, budget, …):
+ *     - every VC.save.autosaveMonths game months (at most once per autosaveMinMs real time)
+ *     - every VC.save.autosaveEveryMs real time (5 min), also while paused
+ *     - when the tab becomes hidden (async), and synchronously (JS gzip, quiet) on beforeunload / pagehide
+ *     - for the old city when another state replaces it (new game, load, import, main menu)
+ *   A quiet "Autosaved" toast (no sound) shows at most every autosaveToastMs.
+ * PAUSE MENU: while it is open (or after it paused the game) a save stores the speed the game resumes at
+ *   (VC.menu.resumeSpeed() when available, else the speed before the menu paused), so it never loads paused.
  *
  * API (all async calls resolve false on failure after telling the player why; they never reject):
  *   serialize(S) -> object            deserialize(obj) -> S (throws Error(.friendly) on corrupt data)
  *   save(slot, name?, opts?) -> Promise<bool>   opts {auto, quiet, thumb:false, force (allow demo), toast}
  *   load(slot, opts?) -> Promise<bool>          (VC.startState + camera restore + toast "Loaded …")
- *   list() -> index entries, newest first (sync)   latest()   has(slot)   remove(slot)   rename(slot, name)
+ *   list() -> index entries (+cityId), newest first (sync)   latest()   has(slot)   remove(slot)   rename(slot, name)
  *   exportFile(slot?) / exportBlob(slot?) -> {blob, name, text}   (slot omitted = the running city)
  *   importFile() -> Promise<bool> (file picker)   importText(text|bytes) -> Promise<bool>
  *   parse(text|bytes|object) -> Promise<S> (no start)   encode(S) -> Promise<storage string>
- *   quickSave() / quickLoad()   register(key, {save(S) -> json, load(S, data)})   selfTest()   storageInfo()
- * Slots 'autosave' (every VC.save.autosaveMonths game months when VC.settings.autosave, never for the
- * title-screen demo city) and 'quick' (Ctrl+S; input.js normally calls save('quick'), this module only
- * handles Ctrl+S itself if nothing else prevented the key's default).
+ *   quickSave() / quickLoad()   autosave() -> Promise<bool> (now, to this city's slot)   autosaveSync() -> bool
+ *   cityId(S?)   autosaveSlot(S?)   isAutoSlot(slot)   changed(S?)
+ *   register(key, {save(S) -> json, load(S, data)})   selfTest()   storageInfo()
+ * Slot 'quick' = Ctrl+S (input.js normally calls save('quick'); this module only handles Ctrl+S itself if
+ * nothing else prevented the key's default).
  * Toasts: suppressed while the 'save' manager window is open (the panel reports results itself).
- * Bus: emits 'saved' {slot, name, auto, bytes}, 'loaded' {slot, name}, 'saveFailed' {slot, reason}.
+ * Bus: emits 'saved' {slot, name, auto, bytes, cityId}, 'loaded' {slot, name}, 'saveFailed' {slot, reason}.
  */
 const PREFIX = 'voxelpolis.save.', INDEX_KEY = 'voxelpolis.saves';
 const THUMB_W = 200;
@@ -28,14 +45,20 @@ let store = null; // window.localStorage when usable
 let memory = null; // Map fallback (session only)
 let indexCache = null;
 let chain = Promise.resolve();
-let monthsSince = 0, lastAutoAt = 0, lastAutoToast = -1e9;
+let monthsSince = 0, lastAutoAt = 0, lastAutoToast = -1e9, nextCheck = 0, unloadAt = -1e9;
 let warnedMemory = false, warnedQuota = false;
 const hooks = Object.create(null);
+const AUTO_PREFIX = 'autosave:';
+const CITY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+let cur = null; // the running real (non-demo) city
+let saved = null; // {S, fp}: fingerprint of `cur` when it started or was last written to storage
+let lastSpeed = 1; // last speed seen on the bus (to know what the pause menu paused from)
+let menuPause = null; // {S, from}: the pause menu paused S, which was running at speed `from`
 
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
-function toast(text, type, icon, duration) {
-  VC.bus.emit('toast', { text, type: type || 'info', icon: icon || '💾', duration });
+function toast(text, type, icon, duration, extra) {
+  VC.bus.emit('toast', Object.assign({ text, type: type || 'info', icon: icon || '💾', duration }, extra));
 }
 /** The save manager window reports results itself; avoid double toasts while it is open. */
 const panelOpen = () => !!(VC.ui && VC.ui.isOpen && VC.ui.isOpen('save'));
@@ -136,7 +159,7 @@ function readIndex() {
     return true;
   });
   // saves whose index entry got lost still show up (without details)
-  for (const s of present) if (!seen.has(s)) arr.push({ slot: s, name: s, savedAt: 0, auto: s === 'autosave' });
+  for (const s of present) if (!seen.has(s)) arr.push({ slot: s, name: s, savedAt: 0, auto: isAutoSlot(s), cityId: cityIdOfSlot(s) });
   indexCache = arr;
   return arr;
 }
@@ -160,6 +183,131 @@ function writeIndex(arr) {
 function entryOf(slot) {
   const s = String(slot);
   return readIndex().find((e) => e.slot === s) || null;
+}
+function dropSlot(slot) {
+  sdel(PREFIX + slot);
+  writeIndex(readIndex().filter((e) => e.slot !== slot));
+}
+
+/* ------------------------------------------------------------------ */
+/* City identity, change tracking, per-city autosave slots              */
+/* ------------------------------------------------------------------ */
+function isAutoSlot(slot) {
+  const s = String(slot);
+  return s === 'autosave' || s.startsWith(AUTO_PREFIX);
+}
+function cityIdOfSlot(slot) {
+  const s = String(slot);
+  return s.startsWith(AUTO_PREFIX) ? s.slice(AUTO_PREFIX.length) : null;
+}
+function newCityId() {
+  let r = '';
+  try {
+    const a = new Uint32Array(2);
+    crypto.getRandomValues(a);
+    r = a[0].toString(36) + a[1].toString(36);
+  } catch (e) {
+    r = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  }
+  return 'c' + Date.now().toString(36) + r.slice(0, 10);
+}
+/** Stable id of a city (created on first use and stored in the state, so it travels with every save). */
+function cityIdOf(S) {
+  if (!S) return null;
+  if (typeof S.cityId !== 'string' || !CITY_ID_RE.test(S.cityId)) S.cityId = newCityId();
+  return S.cityId;
+}
+const autoSlotOf = (S) => AUTO_PREFIX + cityIdOf(S);
+/** Cheap summary of everything a player can change (compared to decide whether a city needs saving). */
+function fingerprint(S) {
+  const v = S.ver || {}, t = S.time || {};
+  let f = [v.terrain, v.bld, v.trees, t.day, Math.round(S.money || 0), S.name, S.buildings ? S.buildings.size : 0, S.nextId, S.loans ? S.loans.length : 0, S.disastersEnabled].join('|');
+  try { f += JSON.stringify(S.tax) + JSON.stringify(S.budget) + JSON.stringify(S.policies); } catch (e) { /* ignore */ }
+  return f;
+}
+/** True when S changed since it started or was last saved (unknown states count as changed). */
+function changedSinceSave(S) {
+  return !saved || saved.S !== S || saved.fp !== fingerprint(S);
+}
+/** A freshly generated map nobody built on is not worth a backup. */
+function isEmptyCity(S) {
+  if (S.buildings && S.buildings.size) return false;
+  const r = S.road, z = S.zone;
+  if (!r || !z) return false;
+  for (let i = 0; i < r.length; i++) if (r[i] || z[i]) return false;
+  return true;
+}
+/** Automatic saves are allowed for this state (real city, setting on). */
+function autoOK(S) {
+  return !!(S && S.buildings && S.height && S.time && !S.demo) && !(VC.settings && VC.settings.autosave === false);
+}
+/**
+ * Speed index to store. A game paused by the pause menu stores the speed it resumes at, so a city saved
+ * from the pause menu (or backed up while leaving through it) does not load paused.
+ */
+function storedSpeed(S) {
+  const t = S.time;
+  if (t.speed > 0) return t.speed;
+  const m = VC.menu;
+  if (S === VC.state && m && typeof m.resumeSpeed === 'function' && (!m.isPaused || m.isPaused())) {
+    const v = m.resumeSpeed();
+    if (v != null && Number.isFinite(+v)) return +v;
+  }
+  if (menuPause && menuPause.S === S) return menuPause.from;
+  return t.speed;
+}
+/** Synchronous snapshot with the stored speed patched in (restored before returning). */
+function snapshotOf(S, withExtra) {
+  if (!S || !S.time) return codec().snapshot(S, null); // throws the friendly "no city" error
+  const t = S.time, keep = t.speed, sp = storedSpeed(S);
+  if (sp !== keep) t.speed = sp;
+  try {
+    return codec().snapshot(S, withExtra === false ? null : collectExtra(S));
+  } finally {
+    t.speed = keep;
+  }
+}
+/** Writes a storage string. An autosave that hits the quota evicts other cities' oldest autosaves first. */
+function writeSlot(slot, text, auto) {
+  for (let tries = 0; ; tries++) {
+    try {
+      return sset(PREFIX + slot, text);
+    } catch (e) {
+      if (!isQuota(e) || !auto || tries >= 8) throw e;
+      let victim = null;
+      for (const x of readIndex()) if (x.slot !== slot && isAutoSlot(x.slot) && (!victim || (x.savedAt || 0) < (victim.savedAt || 0))) victim = x;
+      if (!victim) throw e;
+      console.warn('[save] storage full: removing the oldest autosave (' + (victim.city || victim.name || victim.slot) + ')');
+      dropSlot(victim.slot);
+    }
+  }
+}
+/** Keeps at most SV.autosaveKeep autosave slots (the one just written always stays). */
+function pruneAutosaves(keep) {
+  const autos = readIndex().filter((e) => e.slot !== keep && isAutoSlot(e.slot)).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+  for (let i = Math.max(0, SV.autosaveKeep - 1); i < autos.length; i++) dropSlot(autos[i].slot);
+}
+/**
+ * Stores a finished save + its index entry (synchronous). Returns 'local' | 'memory'. Throws storage
+ * errors (quota) after an autosave's evictions failed.
+ */
+function commit(S, slot, display, text, meta, thumb, auto) {
+  const where = writeSlot(slot, text, auto);
+  const prev = entryOf(slot);
+  const cityId = meta.cityId || null;
+  const entry = {
+    slot, name: display, city: meta.name, cityId, pop: meta.pop, money: meta.money, day: meta.day, savedAt: Date.now(),
+    // no fresh thumbnail (hidden tab, page unload): keep the previous one of the same city
+    thumb: thumb || (prev && prev.thumb && prev.cityId === cityId && cityId ? prev.thumb : null),
+    mapType: meta.mapType, size: meta.size, difficulty: meta.difficulty, milestone: meta.milestone,
+    bytes: text.length, auto, v: codec().VERSION,
+  };
+  entry.time = entry.savedAt;
+  const idx = readIndex().filter((e) => e.slot !== slot);
+  idx.push(entry);
+  writeIndex(idx);
+  if (auto) pruneAutosaves(slot);
+  return where;
 }
 
 /* ------------------------------------------------------------------ */
@@ -263,22 +411,145 @@ function start(S, slot, quiet) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Saving                                                               */
+/* ------------------------------------------------------------------ */
+/** Saves state S (normally the running city) to a slot. opts as SV.save plus extra:false (no extras). */
+function saveState(S, slot, name, opts) {
+  slot = normSlot(slot);
+  const quiet = opts.quiet != null ? !!opts.quiet : panelOpen();
+  if (!S || !S.buildings) return Promise.resolve(fail(slot, 'There is no city to save.', quiet));
+  if (S.demo && !opts.force) return Promise.resolve(false);
+  const auto = !!opts.auto || isAutoSlot(slot);
+  let snap, meta, fp;
+  try {
+    // snapshot synchronously so the running game can't change what gets written
+    if (!S.demo) cityIdOf(S);
+    fp = fingerprint(S);
+    snap = snapshotOf(S, opts.extra);
+    meta = codec().meta(S);
+  } catch (e) {
+    console.error('[save] serialize failed', e);
+    return Promise.resolve(fail(slot, friendlyMsg(e, 'The city could not be saved.'), quiet));
+  }
+  const prev = entryOf(slot);
+  const display = name ? String(name).slice(0, 60) : isAutoSlot(slot) || slot === 'quick' ? meta.name : (prev && prev.name) || slot;
+  const t0 = now();
+  const thumbP = opts.thumb === false ? Promise.resolve(null) : captureThumb();
+  SV.busy++;
+  const job = chain.then(async () => {
+    const t1 = now();
+    const text = await codec().finish(snap);
+    const t2 = now();
+    const thumb = await thumbP;
+    SV.lastTimings = { snapshot: +(t1 - t0).toFixed(1), compress: +(t2 - t1).toFixed(1), thumb: +(now() - t2).toFixed(1) };
+    try {
+      const where = commit(S, slot, display, text, meta, thumb, auto);
+      if (where === 'memory' && !warnedMemory) {
+        warnedMemory = true;
+        toast('Your browser blocks storage for this page, so saves only last until the tab is closed. Use <b>Export</b> in the Save window to keep your city.', 'warn', '💾', 9000);
+      }
+    } catch (e) {
+      if (isQuota(e)) {
+        // autosave keeps trying: tell the player once per session
+        const silent = auto ? warnedQuota : quiet;
+        if (auto) warnedQuota = true;
+        return fail(slot, 'Not enough browser storage to save. Delete old saves, or use <b>Export</b> to keep this city as a file.', silent);
+      }
+      throw e;
+    }
+    if (S === cur) saved = { S, fp };
+    VC.bus.emit('saved', { slot, name: display, auto, bytes: text.length, cityId: meta.cityId || null });
+    if ((!quiet && !auto) || opts.toast) toast(`Saved <b>${esc(display)}</b>${slot === 'quick' ? ' <small>(quick save)</small>' : ''}`, 'good', '💾', 2600);
+    return true;
+  }).catch((e) => {
+    console.error('[save] save failed', e);
+    return fail(slot, friendlyMsg(e, 'The city could not be saved.'), quiet);
+  }).then((ok) => {
+    SV.busy = Math.max(0, SV.busy - 1);
+    return ok;
+  });
+  chain = job;
+  return job;
+}
+
+/* ------------------------------------------------------------------ */
 /* Autosave + Ctrl+S fallback                                           */
 /* ------------------------------------------------------------------ */
+/**
+ * Autosaves S to its own slot when it changed (and is not an empty map). why: 'month' | 'timer' | 'hidden' |
+ * 'leave' | 'manual' ('manual' = VC.save.autosave(): always writes).
+ */
+function autosaveNow(S, why) {
+  if (why !== 'leave') {
+    monthsSince = 0;
+    lastAutoAt = now();
+  }
+  if (why !== 'manual' && (!changedSinceSave(S) || isEmptyCity(S))) return Promise.resolve(false);
+  // leaving: the renderer and camera already show the next city (no thumbnail, no camera/module extras)
+  const leaving = why === 'leave';
+  return saveState(S, autoSlotOf(S), null, { auto: true, quiet: true, thumb: !leaving && why !== 'hidden', extra: leaving ? false : undefined }).then((ok) => {
+    if (ok && (why === 'month' || why === 'timer') && now() - lastAutoToast > SV.autosaveToastMs && !panelOpen()) {
+      lastAutoToast = now();
+      toast('Autosaved', 'info', '💾', 1800, { sfx: false }); // quiet: no sound for a routine backup
+    }
+    return ok;
+  });
+}
+/**
+ * Best-effort synchronous autosave for page unload (promises never settle there): JS gzip, no thumbnail,
+ * no toast. Returns true when written.
+ */
+function saveSync(S, force) {
+  if (!S || !S.buildings || S.demo) return false;
+  if (!force && (!changedSinceSave(S) || isEmptyCity(S))) return false;
+  const t0 = now();
+  try {
+    cityIdOf(S);
+    const fp = fingerprint(S);
+    const meta = codec().meta(S);
+    const text = codec().finishSync(snapshotOf(S));
+    const slot = autoSlotOf(S);
+    commit(S, slot, meta.name, text, meta, null, true);
+    if (S === cur) saved = { S, fp };
+    SV.lastSync = { ms: +(now() - t0).toFixed(1), bytes: text.length, slot };
+    VC.bus.emit('saved', { slot, name: meta.name, auto: true, bytes: text.length, cityId: meta.cityId || null, sync: true });
+    return true;
+  } catch (e) {
+    console.warn('[save] unload autosave failed', e);
+    return false;
+  }
+}
 function onMonth() {
   const S = VC.state;
-  if (!S || S.demo || !VC.running) return;
-  if (VC.settings && VC.settings.autosave === false) return;
+  if (!autoOK(S) || !VC.running) return;
   if (++monthsSince < SV.autosaveMonths) return;
   if (now() - lastAutoAt < SV.autosaveMinMs || SV.busy) return; // retried next month
-  monthsSince = 0;
-  lastAutoAt = now();
-  SV.save('autosave', null, { auto: true, quiet: true }).then((ok) => {
-    if (ok && now() - lastAutoToast > 300000 && !panelOpen()) {
-      lastAutoToast = now();
-      toast('Autosaved', 'info', '💾', 1800);
-    }
-  });
+  autosaveNow(S, 'month');
+}
+/** Tab hidden (switching away, minimizing, closing on mobile): back up now while promises still run. */
+function onVisibility() {
+  if (document.visibilityState !== 'hidden') return;
+  const S = VC.state;
+  if (!autoOK(S) || !VC.running || SV.busy || now() - lastAutoAt < 20000) return;
+  autosaveNow(S, 'hidden');
+}
+/** beforeunload / pagehide (reload, close, navigate away): synchronous, quiet, once. */
+function onUnload() {
+  if (now() - unloadAt < 1500) return; // beforeunload and pagehide both fire
+  const S = VC.state;
+  if (!autoOK(S) || !VC.running) return;
+  unloadAt = now();
+  saveSync(S, false);
+}
+/** Tracks what the pause menu paused from (it keeps the resume speed private). */
+function onSpeed(s) {
+  const S = VC.state;
+  if (!S) return;
+  const m = VC.menu;
+  if (s === 0 && m && m.isPaused && m.isPaused()) {
+    if (!menuPause || menuPause.S !== S) menuPause = { S, from: lastSpeed };
+  } else if (s > 0) menuPause = null;
+  lastSpeed = s;
 }
 function onKey(e) {
   if (e.code !== 'KeyS' || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
@@ -299,18 +570,48 @@ function onKey(e) {
 const SV = (VC.save = Object.assign(VC.save || {}, {
   autosaveMonths: 3,
   autosaveMinMs: 45000, // never autosave more often than this (fast-forward speed)
+  autosaveEveryMs: 300000, // real-time autosave interval (also while paused, when something changed)
+  autosaveKeep: 8, // autosave slots kept in total (one per city)
+  autosaveToastMs: 600000, // at most one quiet "Autosaved" toast per 10 minutes
   busy: 0,
 
   init() {
     store = detectStorage();
     if (!store) useMemory();
-    VC.bus.on('month', () => { try { onMonth(); } catch (e) { console.error('[save] autosave', e); } });
+    const guard = (fn) => (d) => { try { fn(d); } catch (e) { console.error('[save] autosave', e); } };
+    VC.bus.on('month', guard(onMonth));
+    VC.bus.on('speed', guard(onSpeed));
+    // baseline for change tracking once every module has reset (reset() runs before the initial repaint)
+    VC.bus.on('started', guard((S) => { if (S && S === cur) saved = { S, fp: fingerprint(S) }; }));
     window.addEventListener('keydown', onKey);
     window.addEventListener('storage', (e) => { if (!e.key || e.key.startsWith('voxelpolis.')) indexCache = null; });
+    document.addEventListener('visibilitychange', guard(onVisibility));
+    window.addEventListener('pagehide', guard(onUnload));
+    window.addEventListener('beforeunload', guard(onUnload)); // never prompts
   },
-  reset() {
+  reset(S) {
+    const prev = cur;
+    cur = S && !S.demo ? S : null;
+    // the city being replaced (new game, load, main menu) keeps its progress in its own autosave slot
+    if (prev && prev !== S && autoOK(prev)) {
+      try { autosaveNow(prev, 'leave'); } catch (e) { console.error('[save] leave autosave', e); }
+    }
+    if (cur) cityIdOf(cur);
+    saved = null; // set on 'started'
+    menuPause = null;
+    lastSpeed = S && S.time ? S.time.speed : 1;
     monthsSince = 0;
     lastAutoAt = now();
+  },
+  /** Real-time autosave timer (runs while paused too; saves only when something changed). */
+  update() {
+    const t = now();
+    if (t < nextCheck) return;
+    nextCheck = t + 2000;
+    const S = VC.state;
+    if (!autoOK(S) || !VC.running || SV.busy || S !== cur) return;
+    if (t - lastAutoAt < SV.autosaveEveryMs) return;
+    autosaveNow(S, 'timer');
   },
 
   serialize(S) {
@@ -319,10 +620,11 @@ const SV = (VC.save = Object.assign(VC.save || {}, {
   deserialize(obj) {
     return codec().deserialize(obj);
   },
-  /** State -> storage string (gzip+base64 container, or raw JSON without CompressionStream). */
+  /** State -> storage string (gzip+base64 container; stores the resume speed when the pause menu paused it). */
   encode(S) {
     S = S || VC.state;
-    return codec().finish(codec().snapshot(S, collectExtra(S)));
+    if (S && S.buildings && !S.demo) cityIdOf(S);
+    return codec().finish(snapshotOf(S));
   },
   /** Storage string / file bytes / serialized object -> new state (not started). */
   async parse(data) {
@@ -335,76 +637,23 @@ const SV = (VC.save = Object.assign(VC.save || {}, {
     return C.deserialize(obj);
   },
 
+  /** Saves the running city. slot 'autosave' means this city's own autosave slot ('autosave:<cityId>'). */
   save(slot, name, opts = {}) {
     const S = VC.state;
-    slot = normSlot(slot);
-    const quiet = opts.quiet != null ? !!opts.quiet : panelOpen();
-    if (!S || !S.buildings) return Promise.resolve(fail(slot, 'There is no city to save.', quiet));
-    if (S.demo && !opts.force) return Promise.resolve(false);
-    let snap, meta;
-    try {
-      // snapshot synchronously so the running game can't change what gets written
-      snap = codec().snapshot(S, collectExtra(S));
-      meta = codec().meta(S);
-    } catch (e) {
-      console.error('[save] serialize failed', e);
-      return Promise.resolve(fail(slot, friendlyMsg(e, 'The city could not be saved.'), quiet));
-    }
-    const prev = entryOf(slot);
-    const display = name ? String(name).slice(0, 60) : slot === 'autosave' || slot === 'quick' ? S.name : (prev && prev.name) || slot;
-    const t0 = now();
-    const thumbP = opts.thumb === false ? Promise.resolve(null) : captureThumb();
-    SV.busy++;
-    const job = chain.then(async () => {
-      const t1 = now();
-      const text = await codec().finish(snap);
-      const t2 = now();
-      const thumb = await thumbP;
-      SV.lastTimings = { snapshot: +(t1 - t0).toFixed(1), compress: +(t2 - t1).toFixed(1), thumb: +(now() - t2).toFixed(1) };
-      try {
-        const where = sset(PREFIX + slot, text);
-        if (where === 'memory' && !warnedMemory) {
-          warnedMemory = true;
-          toast('Your browser blocks storage for this page, so saves only last until the tab is closed. Use <b>Export</b> in the Save window to keep your city.', 'warn', '💾', 9000);
-        }
-      } catch (e) {
-        if (isQuota(e)) {
-          // autosave keeps trying every few months: tell the player once per session
-          const silent = opts.auto ? warnedQuota : quiet;
-          if (opts.auto) warnedQuota = true;
-          return fail(slot, 'Not enough browser storage to save. Delete old saves, or use <b>Export</b> to keep this city as a file.', silent);
-        }
-        throw e;
-      }
-      const entry = {
-        slot, name: display, city: S.name, pop: meta.pop, money: meta.money, day: meta.day, savedAt: Date.now(),
-        thumb, mapType: meta.mapType, size: meta.size, difficulty: meta.difficulty, milestone: meta.milestone,
-        bytes: text.length, auto: !!opts.auto || slot === 'autosave', v: codec().VERSION,
-      };
-      entry.time = entry.savedAt;
-      const idx = readIndex().filter((e) => e.slot !== slot);
-      idx.push(entry);
-      writeIndex(idx);
-      VC.bus.emit('saved', { slot, name: display, auto: entry.auto, bytes: text.length });
-      if ((!quiet && !entry.auto) || opts.toast) toast(`Saved <b>${esc(display)}</b>${slot === 'quick' ? ' <small>(quick save)</small>' : ''}`, 'good', '💾', 2600);
-      return true;
-    }).catch((e) => {
-      console.error('[save] save failed', e);
-      return fail(slot, friendlyMsg(e, 'The city could not be saved.'), quiet);
-    }).then((ok) => {
-      SV.busy = Math.max(0, SV.busy - 1);
-      return ok;
-    });
-    chain = job;
-    return job;
+    if (slot === 'autosave' && S && !S.demo) slot = autoSlotOf(S);
+    return saveState(S, slot, name, opts || {});
   },
 
   load(slot, opts = {}) {
     slot = normSlot(slot);
     const quiet = opts.quiet != null ? !!opts.quiet : panelOpen();
-    const text = sget(PREFIX + slot);
-    if (text == null) return Promise.resolve(fail(slot, 'That save no longer exists.', quiet));
-    const job = chain.then(() => SV.parse(text)).then((S) => {
+    if (!SV.busy && sget(PREFIX + slot) == null) return Promise.resolve(fail(slot, 'That save no longer exists.', quiet));
+    // read the slot once saves queued before this load (e.g. the autosave of the city being left) are written
+    const job = chain.then(() => {
+      const text = sget(PREFIX + slot);
+      if (text == null) throw codec().friendly('That save no longer exists.');
+      return SV.parse(text);
+    }).then((S) => {
       start(S, slot, quiet);
       return true;
     }, (e) => {
@@ -415,12 +664,12 @@ const SV = (VC.save = Object.assign(VC.save || {}, {
     return job;
   },
 
-  /** Index entries, newest first (copies). */
+  /** Index entries, newest first (copies). Every entry has cityId (null for old saves) and auto. */
   list() {
     return readIndex()
       .slice()
       .sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0))
-      .map((e) => Object.assign({}, e, { time: e.savedAt || 0 }));
+      .map((e) => Object.assign({}, e, { time: e.savedAt || 0, cityId: e.cityId || cityIdOfSlot(e.slot) || null, auto: !!e.auto || isAutoSlot(e.slot) }));
   },
   latest() {
     return SV.list()[0] || null;
@@ -516,8 +765,31 @@ const SV = (VC.save = Object.assign(VC.save || {}, {
   quickLoad() {
     return SV.load('quick', { quiet: false });
   },
+  /** Autosaves the running city to its own slot now (ignores the change check). */
   autosave() {
-    return SV.save('autosave', null, { auto: true, quiet: true });
+    const S = VC.state;
+    if (!S || !S.buildings || S.demo) return Promise.resolve(false);
+    return autosaveNow(S, 'manual');
+  },
+  /** Synchronous best-effort autosave of the running city (what page unload does). force: even if unchanged. */
+  autosaveSync(force) {
+    return saveSync(VC.state, force !== false);
+  },
+  /** Stable id of a city (the running one by default); created if missing. */
+  cityId(S) {
+    S = S || VC.state;
+    return S && !S.demo ? cityIdOf(S) : null;
+  },
+  /** This city's autosave slot ('autosave:<cityId>'). */
+  autosaveSlot(S) {
+    S = S || VC.state;
+    return S && !S.demo ? autoSlotOf(S) : null;
+  },
+  isAutoSlot,
+  /** True when the city changed since it was started / last saved. */
+  changed(S) {
+    S = S || VC.state;
+    return !!S && changedSinceSave(S);
   },
   /** Lets a module persist data outside VC.state: hooks {save(S) -> JSON-able, load(S, data)}. */
   register(key, h) {

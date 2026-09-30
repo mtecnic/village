@@ -394,7 +394,9 @@ function readMood() {
   mood.rain = w ? Math.max(w.wet || 0, w.type === 'rain' || w.type === 'storm' ? w.intensity || 0 : 0) : 0;
   const dis = VC.disasters && VC.disasters.active ? VC.disasters.active.length : 0;
   mood.tension = dis ? 1 : S && S.money < 0 && !S.sandbox ? 0.55 : 0;
-  mood.growth = S ? M.clamp((S.milestone || 0) / 7, 0, 1) : 0;
+  // city size: 0 at the first milestone .. 1 at the last one
+  const nMs = VC.MILESTONES && VC.MILESTONES.length > 1 ? VC.MILESTONES.length - 1 : 7;
+  mood.growth = S ? M.clamp((+S.milestone || 0) / nMs, 0, 1) : 0;
   mood.speed = S ? S.time.speed : 0;
   mood.paused = !S || !VC.running || !S.time.speed;
   return mood;

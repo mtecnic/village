@@ -27,6 +27,13 @@
  *
  * MIGRATION: MIGRATIONS[v](obj) upgrades format v -> v+1. Newer-than-known formats are refused with a
  * friendly error; structurally broken data throws Error with .friendly = true.
+ * VALIDATION (deserialize): values other modules trust are clamped / sanitized — time.speed within
+ * C.SPEEDS, time.prevSpeed, time.tod in [0,1), day >= 0, finite money, known mapType / difficulty,
+ * milestone index, and the city name (tags, angle brackets, quotes and control characters stripped,
+ * max 40 chars) because names are shown in HTML. S.cityId (stable id, see VC.save) must match
+ * [A-Za-z0-9_-]{1,64} or is dropped (VC.save creates a new one).
+ * API (VC.save.codec): serialize, deserialize, validate, cleanName(name, fallback), meta, snapshot,
+ * finish (async gzip), finishSync (JS gzip, for page unload), decodeText, decodeBytes, diff, …
  */
 const CODEC_V = 1;
 const MAGIC = 0x42505856; // 'VXPB' little-endian
@@ -226,7 +233,8 @@ function decTA(v, cx) {
 function meta(S) {
   const st = S.stats || {};
   return {
-    name: S.name, pop: Math.round(st.pop || 0), money: Math.round(S.money || 0), day: S.time ? S.time.day : 0,
+    name: cleanName(S.name, 'Voxelpolis'), cityId: typeof S.cityId === 'string' ? S.cityId : null,
+    pop: Math.round(st.pop || 0), money: Math.round(S.money || 0), day: S.time ? S.time.day : 0,
     savedAt: Date.now(), mapType: S.mapType, size: S.W, difficulty: S.difficulty, milestone: S.milestone || 0,
     buildings: S.buildings ? S.buildings.size : 0, seed: S.seed, sandbox: !!S.sandbox,
   };
@@ -275,6 +283,59 @@ function mergeDefaults(fresh, loaded) {
 }
 
 const num = (v) => typeof v === 'number' && Number.isFinite(v);
+const NAME_MAX = 40;
+/**
+ * City names end up in HTML (toasts, tooltips, headlines): strip tags, angle brackets, quotes/backticks
+ * and control characters, collapse whitespace and limit the length. Returns `fallback` when nothing is left.
+ */
+function cleanName(v, fallback) {
+  if (typeof v !== 'string') return fallback;
+  let s = v
+    .replace(/<\/?[a-z!?][^>]*>?/gi, ' ') // tags (also unterminated ones)
+    .replace(/[<>"`\u0000-\u001f\u007f\u2028\u2029]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (s.length > NAME_MAX) s = s.slice(0, NAME_MAX).trim();
+  return s || fallback;
+}
+/** Stable city ids (VC.save autosave slots): short [A-Za-z0-9_-] strings. */
+const CITY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function knownMapType(t) {
+  const types = VC.MAP_TYPES || [];
+  return types.some((m) => m.key === t) ? t : (types[0] && types[0].key) || 'river';
+}
+const clampInt = (v, lo, hi, def) => {
+  v = Math.round(+v);
+  return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : def;
+};
+/**
+ * Validates / clamps the loaded values other modules trust blindly (a hand-edited, foreign or older
+ * file must neither freeze the sim nor inject HTML): time (day >= 0, speed index within C.SPEEDS,
+ * prevSpeed, tod in [0,1)), money, name, map type, difficulty, milestone, peakPop, cityId.
+ */
+function validate(S, diff) {
+  const t = S.time;
+  if (!isPlain(t) || !num(t.day)) throw friendly(DAMAGED);
+  const maxSp = VC.C && VC.C.SPEEDS ? VC.C.SPEEDS.length - 1 : 3;
+  t.day = Math.max(0, t.day);
+  t.speed = clampInt(t.speed, 0, maxSp, 1);
+  if (t.prevSpeed != null) {
+    const p = clampInt(t.prevSpeed, 0, maxSp, 0);
+    if (p > 0) t.prevSpeed = p;
+    else delete t.prevSpeed;
+  }
+  if (!num(t.tod)) t.tod = 0.32;
+  else if (!(t.tod >= 0 && t.tod < 1)) t.tod = ((t.tod % 1) + 1) % 1; // wrap (valid values stay bit-exact)
+  if (!num(S.money)) S.money = 0;
+  S.name = cleanName(S.name, 'Voxelpolis');
+  S.mapType = knownMapType(S.mapType);
+  S.difficulty = diff;
+  const nMs = VC.MILESTONES ? VC.MILESTONES.length - 1 : 9;
+  S.milestone = clampInt(S.milestone, 0, nMs, 0);
+  if (!num(S.peakPop) || S.peakPop < 0) S.peakPop = 0;
+  if (S.cityId != null && (typeof S.cityId !== 'string' || !CITY_ID_RE.test(S.cityId))) delete S.cityId;
+}
 
 /**
  * Rebuilds a complete state from a serialized object. Throws Error(.friendly) on corrupt data.
@@ -289,8 +350,8 @@ function deserialize(obj) {
   const st = obj.state;
   const W = st.W | 0, H = st.H == null ? W : st.H | 0;
   if (!(W >= 8 && W <= 2048) || H !== W) throw friendly(DAMAGED);
-  const diff = VC.DIFFICULTY[st.difficulty] ? st.difficulty : 'normal';
-  const S = VC.createState({ size: W, difficulty: diff, seed: st.seed, name: typeof st.name === 'string' ? st.name : 'Voxelpolis', mapType: st.mapType });
+  const diff = typeof st.difficulty === 'string' && VC.DIFFICULTY[st.difficulty] ? st.difficulty : 'normal';
+  const S = VC.createState({ size: W, difficulty: diff, seed: st.seed, name: cleanName(st.name, 'Voxelpolis'), mapType: knownMapType(st.mapType) });
   const N = S.N;
   const cx = { bmap: S.buildings, blob };
 
@@ -349,8 +410,7 @@ function deserialize(obj) {
     console.warn('[save] building tile index repaired');
   }
   if (!(S.nextId > maxId)) S.nextId = maxId + 1;
-  if (!S.time || !num(S.time.day)) throw friendly(DAMAGED);
-  if (!num(S.money)) S.money = 0;
+  validate(S, diff);
   if (dropped) console.warn('[save] dropped ' + dropped + ' invalid building(s)');
   // renderers compare change counters: make sure everything counts as changed
   for (const k in S.ver) S.ver[k] = (S.ver[k] | 0) + 1;
@@ -653,6 +713,15 @@ async function finish(snap) {
     return 'VXPB1:' + VC.b64.fromBytes(snap.bin);
   }
 }
+/**
+ * Synchronous finish (page unload, where promises never settle): the built-in JS gzip encoder, or the
+ * uncompressed container if that fails. Same storage-string formats as finish().
+ */
+function finishSync(snap) {
+  if (snap.text != null) return snap.text;
+  try { return 'VXPZ1:' + VC.b64.fromBytes(gzipJS(snap.bin)); } catch (e) { /* fall through */ }
+  return 'VXPB1:' + VC.b64.fromBytes(snap.bin);
+}
 /** Storage string / exported text -> serialized object (with _blob when binary). */
 async function decodeText(text) {
   if (typeof text !== 'string') throw friendly(DAMAGED);
@@ -726,7 +795,7 @@ function diff(a, b, opts = {}) {
 
 VC.save = VC.save || {};
 VC.save.codec = {
-  VERSION: CODEC_V, MIGRATIONS, BLD_SKIP, STATE_SKIP,
-  serialize, deserialize, meta, migrate, snapshot, finish, decodeText, decodeBytes,
+  VERSION: CODEC_V, MIGRATIONS, BLD_SKIP, STATE_SKIP, NAME_MAX,
+  serialize, deserialize, validate, cleanName, meta, migrate, snapshot, finish, finishSync, decodeText, decodeBytes,
   containerEncode, containerDecode, gzip, gunzip, gzipJS, crc32, inflateGzip, inflateRaw, canGzip, diff, enc, dec, friendly,
 };

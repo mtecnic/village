@@ -6,27 +6,42 @@
  *   audio_music.js music:   generative soundtrack (scheduler, instruments, sections, moods)
  *   audio_amb.js   amb:     ambience beds + scheduled one-shots driven by what the camera sees
  *
- * MIXER   sources -> music / sfx / amb busses (volumes from VC.settings.musicVol / sfxVol, optional
- *         ambienceVol / masterVol / muted) -> master in -> glue compressor -> limiter -> master -> out.
+ * MIXER   sources -> music / sfx / amb busses (volumes from VC.settings.musicVol / sfxVol / ambienceVol,
+ *         masterVol (default 1) and muted; muted or masterVol 0 silences every bus, so nothing is created
+ *         or scheduled) -> master in -> glue compressor -> limiter -> master -> out.
  *         Music and SFX each have a generated-IR ConvolverNode reverb (hall / room).
  * LIFECYCLE  The AudioContext is created + resumed on the first pointerdown/keydown/touchend (autoplay
  *         policy); nothing throws if WebAudio is missing. Hidden tab -> fade out + suspend.
  * SFX     play(name, {x, z, vol, rate}) or bus 'sfx' {name, x?, z?, vol?}. With x,z the sound is attenuated
  *         by distance from the camera target (scaled by zoom), low-passed when far and panned by screen x.
  *         Duplicate suppression: every sound belongs to a GROUP with a minimum re-trigger window, so the
- *         same event reported by several modules (e.g. 'built' + sfx 'build', HUD 'fanfare' + advisors
- *         'milestone') plays once. Voice cap 32 (low-priority sounds are dropped first).
- * AUTO-HANDLED BUS EVENTS: built (by kind), bldRemove (reason bulldoze/fire/disaster), milestone,
- *         achievement, advisor (by severity), noMoney, disaster (phase 'start': alarm + type sound),
- *         windowOpened/windowClosed, toast (by type), policyChanged, speed; plus a soft hover tick on UI
- *         buttons. Other modules may still emit 'sfx' for the same events: group de-duplication plays one.
+ *         same event reported by several modules (e.g. 'built' + sfx 'build') plays once. Voice cap 32
+ *         (low-priority sounds are dropped first).
+ * ONE EVENT = ONE SOUND  Notification sounds (notify, success, advisor, alert, achievement, alarm,
+ *         milestone; also when requested via bus 'sfx' or an alias like 'fanfare') go through a LANE:
+ *         everything requested in the same synchronous burst (one frame / one bus cascade, e.g. a
+ *         'milestone' + a reward toast + a HUD 'fanfare') collapses into the single most important one,
+ *         played when the burst ends (microtask). stats.merged counts the collapsed requests.
+ * AUTO-HANDLED BUS EVENTS (the event owns its sound; UI modules should not add their own):
+ *         built (by kind), bldRemove (bulldoze -> bulldoze/demolish, fire -> collapse, disaster -> crash;
+ *         abduct / upgrade / replace / undo / cleared / abandon are silent), milestone -> 'milestone',
+ *         achievement -> 'achievement', unlock -> 'notify', advisor (bad 'alert', warn 'advisor',
+ *         good 'success', info silent = inbox badge only; messages flagged read / silent / sfx:false are
+ *         silent), noMoney -> 'error' (at most one per 0.6 s), disaster phase 'start' -> alarm + the
+ *         type's sound, windowOpened/windowClosed, toast by type (bad 'alert', good 'success', else
+ *         'notify'; {sfx:false} or {silent:true} = no sound, {sfx:'name'} = that sound), policyChanged,
+ *         speed; plus a soft hover tick on UI buttons.
+ * DEMO    While VC.state.demo (title-screen demo city) game events make no sound; UI feedback (click,
+ *         hover, open/close, whoosh, camera) and the world's own sounds (ambience, traffic, thunder,
+ *         fireworks) still play.
  * RENDERING  sounds render once into cached AudioBuffers; frequent ones are pre-rendered in idle time after
  *         unlock (requestIdleCallback + a 3 ms slice per frame); heavy rare ones on first use or when a
  *         disaster starts. Emits bus 'audioStarted' once the context runs.
- * API     play(name, opts) -> bool, duck(amount, sec), stop(), spatial(x, z) -> {g, pan, lp}, ready(),
- *         unlocked(), volumes() -> {music, sfx, amb, master}, lastPlayed(group), list() (sound names),
+ * API     play(name, opts) -> bool, notify(name, opts) (through the lane), duck(amount, sec), stop(),
+ *         spatial(x, z) -> {g, pan, lp}, ready(), unlocked(), muted(), volumes() -> {music, sfx, amb,
+ *         master} (effective gains; 0 = silent), lastPlayed(group), list() (sound names),
  *         buffer(name, variant), warm([names]), job(fn, urgent), dsp (offline synthesis toolkit),
- *         toBuffer(data, trim), stats {played, deduped, dropped, voices, live (nodes), renders, names{}}.
+ *         toBuffer(data, trim), stats {played, deduped, dropped, merged, voices, live (nodes), renders, names{}}.
  *         A zero-volume bus creates no nodes (muted music stops scheduling).
  */
 const M = VC.M;
@@ -35,7 +50,7 @@ const A = (VC.audio = Object.assign(VC.audio || {}, {
   bus: null, // {master, in, music, sfx, amb, musicIn, sfxIn, ambIn, musicVerb, sfxVerb, duck}
   RECIPES: {},
   ALIAS: {},
-  stats: { played: 0, deduped: 0, dropped: 0, voices: 0, live: 0, renders: 0, renderMs: 0, jobs: 0, names: {} },
+  stats: { played: 0, deduped: 0, dropped: 0, merged: 0, voices: 0, live: 0, renders: 0, renderMs: 0, jobs: 0, names: {} },
   started: false,
 }));
 
@@ -522,14 +537,27 @@ function onVisibility() {
 }
 /** Perceptual volume curve for 0..1 sliders. */
 const curve = (v) => (v > 0 ? Math.pow(M.clamp(v, 0, 1), 1.6) : 0);
+/** Settings value -> 0..1 (missing, non-numeric or NaN values fall back to `def`). */
+function vol01(v, def) {
+  if (v == null || v === '' || typeof v === 'boolean') return def;
+  v = +v;
+  return Number.isFinite(v) ? M.clamp(v, 0, 1) : def;
+}
+/** True when the player muted the game (settings.muted, or the master volume at 0). */
+A.muted = function () {
+  const st = VC.settings || {};
+  return !!st.muted || vol01(st.masterVol, 1) === 0;
+};
 function applyVolumes(force) {
   const B = A.bus, ctx = A.ctx;
   if (!B || !ctx) return;
   const st = VC.settings || {};
-  const music = curve(st.musicVol == null ? 0.5 : st.musicVol) * 0.62;
-  const sfx = curve(st.sfxVol == null ? 0.7 : st.sfxVol) * 0.95;
-  const amb = curve(st.ambienceVol != null ? st.ambienceVol : st.sfxVol == null ? 0.7 : st.sfxVol) * 0.85;
-  const master = document.hidden || st.muted ? 0 : st.masterVol != null ? M.clamp(st.masterVol, 0, 1) : 1;
+  const mute = A.muted();
+  // muted: the busses go to 0 as well, so voices, ambience beds and the music scheduler create nothing
+  const music = mute ? 0 : curve(vol01(st.musicVol, 0.5)) * 0.62;
+  const sfx = mute ? 0 : curve(vol01(st.sfxVol, 0.7)) * 0.95;
+  const amb = mute ? 0 : curve(st.ambienceVol != null ? vol01(st.ambienceVol, 0.6) : vol01(st.sfxVol, 0.7)) * 0.85;
+  const master = document.hidden || mute ? 0 : curve(vol01(st.masterVol, 1));
   const t = ctx.currentTime;
   setVol(B.music, 'music', music, force ? 1.2 : 0.08, t, force); // the soundtrack eases in on start
   setVol(B.sfx, 'sfx', sfx, 0.05, t, force);
@@ -634,7 +662,7 @@ function pump() {
   }, { timeout: 400 });
 }
 A.ready = () => !!(A.ctx && A.ctx.state === 'running' && A.bus);
-/** Current bus volume targets ({music, sfx, amb, master}; 0 = muted). */
+/** Current effective bus gains ({music, sfx, amb, master}; 0 = silent: muted, slider at 0 or hidden tab). */
 A.volumes = () => lastVols;
 /** Queues idle-time rendering of every variant of the named recipes. */
 function warm(names) {
@@ -665,7 +693,8 @@ A.play = function (name, opts) {
     if (!warnedUnknown[name]) { warnedUnknown[name] = 1; console.info('[audio] unknown sfx "' + name + '"'); }
     return false;
   }
-  if ((R.bus === 'amb' ? lastVols.amb : lastVols.sfx) === 0) return false; // bus muted: create nothing
+  // bus or game muted, or tab hidden: create nothing (a suspended context would play it late on return)
+  if ((R.bus === 'amb' ? lastVols.amb : lastVols.sfx) === 0 || lastVols.master === 0) return false;
   const nowMs = performance.now();
   const grp = R.group || name;
   if (nowMs - (lastGroup[grp] || -1e9) < (R.win == null ? 60 : R.win)) { A.stats.deduped++; return false; }
@@ -770,41 +799,106 @@ function onBuilt(d) {
 }
 function onRemove(b) {
   if (!b || !b.removed) return;
+  const R = VC.REMOVE || {};
+  const why = b.removed;
+  // beamed up by the UFO (disasters voices 'abduct' itself): no crash, no debris sound
+  if (why === (R.ABDUCT || 'abduct') || (why === (R.DISASTER || 'disaster') && b.disLift)) return;
   const c = center(b);
   const big = (b.w || 1) * (b.d || 1) >= 4 || b.level >= 3;
-  if (b.removed === 'bulldoze') A.play(big ? 'demolish' : 'bulldoze', c);
-  else if (b.removed === 'fire') A.play('collapse', c);
-  else if (b.removed === 'disaster') A.play('crash', c);
+  if (why === (R.BULLDOZE || 'bulldoze')) A.play(big ? 'demolish' : 'bulldoze', c);
+  else if (why === (R.FIRE || 'fire')) A.play('collapse', c);
+  else if (why === (R.DISASTER || 'disaster')) A.play('crash', c);
+  // upgrade / replace / undo / cleared / abandon: silent (the action that caused it has its own sound)
 }
 const DISASTER_START = { fire: 'fire', tornado: 'wind', meteor: 'meteor', earthquake: 'rumble', ufo: 'ufo', monster: 'roar' };
 const DISASTER_WARM = { fire: ['collapse'], tornado: ['collapse'], meteor: ['explosion', 'collapse'], earthquake: ['collapse', 'explosion'], ufo: ['abduct'], monster: ['stomp', 'collapse', 'explosion'] };
+
+/* ---- notification lane: one event, one sound ---- */
+/** Notification-class sounds by importance; everything else plays directly. */
+const LANE_RANK = { notify: 1, success: 2, advisor: 3, alert: 4, achievement: 5, alarm: 6, milestone: 7 };
+let lane = null; // {name, opts, rank} pending until the current synchronous burst ends
+const later = typeof queueMicrotask === 'function' ? queueMicrotask : (fn) => Promise.resolve().then(fn);
+function flushLane() {
+  const l = lane;
+  lane = null;
+  if (l && A.ready()) A.play(l.name, l.opts);
+}
+const soundKey = (name) => (A.RECIPES[name] ? name : A.ALIAS[name] || name);
+/**
+ * Plays a sound; notification sounds requested in the same burst (one frame / one bus cascade) are
+ * collapsed into the most important one, which plays once the burst ends.
+ */
+function notifySound(name, opts) {
+  if (!name) return false;
+  const key = soundKey(name);
+  const rank = LANE_RANK[key];
+  if (!rank) return A.play(key, opts);
+  if (!lane) {
+    lane = { name: key, opts: opts || null, rank };
+    later(flushLane);
+  } else {
+    A.stats.merged++;
+    if (rank > lane.rank) { lane.name = key; lane.opts = opts || null; lane.rank = rank; }
+  }
+  return true;
+}
+A.notify = notifySound;
+
+/* ---- title-screen demo city: no game-event sounds ---- */
+const inDemo = () => !!(VC.state && VC.state.demo);
+/** Sound groups that still play over the demo city: UI feedback and the world's own sounds. */
+const DEMO_OK = { click: 1, hover: 1, open: 1, close: 1, whoosh: 1, camera: 1, thunder: 1, horn: 1, firework: 1, fwlaunch: 1, crackle: 1, burner: 1 };
+function demoAllowed(name) {
+  const key = soundKey(name), R = A.RECIPES[key];
+  return !!R && (R.bus === 'amb' || !!DEMO_OK[R.group || key]);
+}
+
+const ADVISOR_SOUND = { bad: 'alert', warn: 'advisor', good: 'success' }; // info: inbox badge only -> silent
+let lastNoMoney = -1e9;
 function hookBus() {
-  const on = (ev, fn) => VC.bus.on(ev, (d) => { if (A.ready()) fn(d); });
+  // game-event hooks are silent while the title-screen demo city runs; ui = true keeps a hook active
+  const on = (ev, fn, ui) => VC.bus.on(ev, (d) => { if (A.ready() && (ui || !inDemo())) fn(d); });
   on('sfx', (d) => {
     if (!d) return;
     const name = typeof d === 'string' ? d : d.name;
+    if (!name) return;
     if (name === 'thunder') A.extThunder = true; // the weather module voices its own lightning
-    A.play(name, typeof d === 'string' ? null : d);
-  });
+    if (inDemo() && !demoAllowed(name)) return;
+    notifySound(name, typeof d === 'string' ? null : d);
+  }, true);
   on('built', onBuilt);
   on('bldRemove', onRemove);
-  on('milestone', () => A.play('milestone'));
-  on('achievement', () => A.play('achievement'));
-  on('advisor', (m) => A.play(m && m.severity === 'bad' ? 'alert' : m && m.severity === 'warn' ? 'advisor' : 'notify'));
-  on('noMoney', () => A.play('error'));
+  on('milestone', () => notifySound('milestone'));
+  on('achievement', () => notifySound('achievement'));
+  on('unlock', (d) => { if (!d || !Array.isArray(d.keys) || d.keys.length) notifySound('notify'); });
+  on('advisor', (m) => {
+    if (!m || m.read || m.silent || m.sfx === false) return;
+    notifySound(typeof m.sfx === 'string' ? m.sfx : ADVISOR_SOUND[m.severity]);
+  });
+  on('noMoney', () => {
+    // one beep per burst of failed purchases (a road drag can fail on every tile)
+    const t = performance.now();
+    if (t - lastNoMoney < 600) return;
+    lastNoMoney = t;
+    A.play('error');
+  });
   on('disaster', (d) => {
     if (!d || d.phase !== 'start') return;
     warm(DISASTER_WARM[d.type] || []);
-    A.play('alarm');
+    notifySound('alarm');
     const n = DISASTER_START[d.type];
-    if (n) A.play(n, { x: d.x, z: d.z, delay: 0.25 });
+    if (n) A.play(n, { x: d.x, z: d.z, delay: 0.25 }); // the disaster itself (positional), layered on the alarm
   });
-  on('windowOpened', () => A.play('open'));
-  on('windowClosed', () => A.play('close'));
-  on('toast', (t) => A.play(t && (t.type === 'bad' || t.type === 'error') ? 'alert' : t && t.type === 'good' ? 'success' : 'notify', { vol: 0.8 }));
+  on('windowOpened', () => A.play('open'), true);
+  on('windowClosed', () => A.play('close'), true);
+  on('toast', (t) => {
+    if (!t || t.sfx === false || t.silent) return;
+    const n = typeof t.sfx === 'string' ? t.sfx : t.type === 'bad' || t.type === 'error' ? 'alert' : t.type === 'good' ? 'success' : 'notify';
+    notifySound(n, { vol: 0.8 });
+  });
   on('policyChanged', () => A.play('policy'));
-  on('speed', (s) => A.play(s ? 'tick' : 'pause')); // same group as 'click': a UI button click wins
-  on('settings', () => applyVolumes(false));
+  on('speed', (s) => A.play(s ? 'tick' : 'pause'), true); // same group as 'click': a UI button click wins
+  on('settings', () => applyVolumes(false), true);
 }
 /** Very soft hover ticks on buttons (mouse only). */
 function hookHover() {

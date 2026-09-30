@@ -411,17 +411,22 @@ K.tree = (g, x, y, z, kind = 'oak', s = 1, leaf = 0) => {
     g.set(x, y, z, P.TRUNK);
     g.ellipsoid(cx, y + 1 + 2.6 * s, cz, 1.2 * s + 0.2, 2.9 * s + 0.3, 1.2 * s + 0.2, leaf || P.PINE);
   } else {
-    // oak / blossom: round crown
-    const t = Math.round(2 * s + 1), r = 1.8 * s + 0.45;
+    // oak / blossom: round crown. Radii are quantized to values that voxelize into round blobs
+    // (r ~ 2 would give a plain 3x3x3 cube).
+    const r = s < 0.75 ? 1.5 : s < 1.12 ? 2.35 : 2.95, t = s < 0.75 ? 2 : s < 1.12 ? 3 : 4;
     g.box(x, y, z, 1, t, 1, P.TRUNK);
-    g.sphere(cx, y + t + r - 0.6, cz, r, leaf || (kind === 'blossom' ? P.FLOWER_P : P.LEAF));
+    g.sphere(cx, y + t + r - 0.9, cz, r, leaf || (kind === 'blossom' ? P.FLOWER_P : P.LEAF));
   }
   return g;
 };
-/** Bench (seat + backrest) of length len along X (back toward -Z) or along Z (axis 'z', back toward -X). */
-K.bench = (g, x, y, z, axis = 'x', len = 2) => {
-  if (axis === 'x') { g.box(x, y, z + 1, len, 1, 1, P.WOOD); g.box(x, y, z, len, 2, 1, P.WOOD_D); }
-  else { g.box(x + 1, y, z, 1, 1, len, P.WOOD); g.box(x, y, z, 1, 2, len, P.WOOD_D); }
+/**
+ * Bench (seat + backrest, 2 deep) of length len along X (back toward -Z) or along Z (axis 'z', back toward -X).
+ * flip puts the backrest on the + side instead.
+ */
+K.bench = (g, x, y, z, axis = 'x', len = 2, flip = false) => {
+  const s = flip ? 0 : 1, b = flip ? 1 : 0;
+  if (axis === 'x') { g.box(x, y, z + s, len, 1, 1, P.WOOD); g.box(x, y, z + b, len, 2, 1, P.WOOD_D); }
+  else { g.box(x + s, y, z, 1, 1, len, P.WOOD); g.box(x + b, y, z, 1, 2, len, P.WOOD_D); }
   return g;
 };
 /** Flag pole (height h) with a 3x2 flag pointing +X (dir 'x') or +Z (dir 'z'). cols = [top, bottom]. */
@@ -463,7 +468,8 @@ K.flowers = (g, x, y, z, w, d, cols = [P.FLOWER_R, P.FLOWER_Y, P.FLOWER_P], rim 
 /** Rectangular pool: rim + water surface one voxel below the rim top. */
 K.pool = (g, x, y, z, w, d, rim, water = P.WATER, rimH = 2) => {
   g.box(x, y, z, w, rimH, d, rim);
-  g.box(x + 1, y + rimH - 1, z + 1, w - 2, 1, d - 2, water);
+  g.box(x + 1, y + rimH - 1, z + 1, w - 2, 1, d - 2, 0);
+  g.box(x + 1, y + rimH - 2, z + 1, w - 2, 1, d - 2, water);
   return g;
 };
 

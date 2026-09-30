@@ -19,13 +19,17 @@
  * only through voxels buried inside the canopy (the summer look is unchanged). Their definitions carry
  * `openFoliage: true`, so the registry also builds model.winter meshes in which the wood faces touching leaves
  * exist (VC.voxel.mesh open set); when the renderer drops the leaves in late autumn it draws those, and the bare
- * tree keeps a real branch structure (the summer meshes stay as lean as before). Bush flowers and
+ * tree keeps a real branch structure (the summer meshes stay as lean as before). The winter LOD mesh is built
+ * from the wood alone (VC.voxel.winterLodMesh: trunk, leader and limbs survive the half-resolution downsample,
+ * the 2x2 trunk stays 2 voxels wide) and also stands in for the 1/4-res tier while crowns are bare, so keep
+ * trunks on voxels 3..4 and skeletons connected. Bush flowers and
  * fallen cherry petals use FOLIAGE-flagged colours (BLOOM_*), so they follow the seasons like leaves.
  *
  * Non-building models (props, vehicles, creatures) are centred on their grid: the renderer's origin
  * is the bottom centre (sx/2, 0, sz/2); the front faces +Z. See the per-file headers for meta fields.
  * Thin models carry `lodMinFill: 1` in their definition: a hint that the LOD downsample should keep
- * any block with >= 1 voxel (poles, stems and rotor blades otherwise vanish at LOD).
+ * any block with >= 1 voxel (poles, stems and rotor blades otherwise vanish at LOD). Thin street furniture
+ * (streetlamp, traffic_light, hydrant) is `lod: false` instead: no downsampled LOD at all (see nature_props.js).
  *
  * VC.natureKit (usable by any module after load):
  *   seasonPalette()          { autumn, winter: Float32Array(256*3) sRGB, mask: Uint8Array(256) }

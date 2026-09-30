@@ -27,7 +27,10 @@
  * registered in init() only if those keys are missing.
  *
  * Props end at their LOD-1 mesh (no 1/4-res tier) and are culled well before they shrink below a pixel
- * (VC.bldgfx skip table); lamp and signal glows are sprites and stay visible farther out.
+ * (VC.bldgfx skip table); lamp and signal glows are sprites and stay visible farther out. Thin street furniture
+ * (lamps, traffic lights, hydrants: model `lod: false`) has no coarser mesh at all — a half-resolution LOD would
+ * double the 1-voxel poles into pillars — so only big props (pylons) switch to their LOD-1 mesh. Lamps and
+ * traffic lights are ~0.8-0.9 units tall (a one-storey eave).
  *
  * WEBGL CONTEXT LOSS: tick() does nothing while the context is lost (queued rects / wires wait); restore() re-creates
  *   the wire buffers + VAO and re-uploads the wires. Prop instances live in VC.bldgfx.eng, restored by VC.bldgfx.
@@ -154,17 +157,18 @@ function defineFallbacks() {
   const P = VC.P;
   if (!VC.models.has('streetlamp')) {
     VC.models.define('streetlamp', {
+      lod: false,
       variants: 2,
       scale: 0.5,
       gen(rng, v) {
-        const g = new VC.VoxelGrid(9, 19, 9);
+        const g = new VC.VoxelGrid(9, 13, 9);
         const X = 4, Z = 4, dark = v ? P.METAL : P.BLACK;
         g.box(3, 0, 3, 3, 1, 3, P.CONCRETE_D);
-        g.box(X, 1, Z, 1, 15, 1, dark);
-        g.box(X, 15, Z + 1, 1, 1, 3, dark);
-        g.box(X, 13, Z + 3, 1, 2, 1, v ? P.LAMP_WHITE : P.LAMP);
-        g.meta.head = [X + 0.5, 13, Z + 3.5];
-        g.light(X + 0.5, 13, Z + 3.5, v ? [0.85, 0.92, 1] : [1, 0.78, 0.45], 1.2);
+        g.box(X, 1, Z, 1, 11, 1, dark);
+        g.box(X, 11, Z + 1, 1, 1, 3, dark);
+        g.box(X, 9, Z + 3, 1, 2, 1, v ? P.LAMP_WHITE : P.LAMP);
+        g.meta.head = [X + 0.5, 9, Z + 3.5];
+        g.light(X + 0.5, 9, Z + 3.5, v ? [0.85, 0.92, 1] : [1, 0.78, 0.45], 1.2);
         return crop(g);
       },
     });
@@ -173,27 +177,28 @@ function defineFallbacks() {
     const ON = [P.NEON_RED, P.NEON_YELLOW, P.NEON_GREEN], OFF = [P.BRICK_D, P.WOOD_D, P.GRASS_D];
     const RGB = [[1, 0.2, 0.15], [1, 0.6, 0.1], [0.3, 1, 0.4]];
     VC.models.define('traffic_light', {
+      lod: false,
       variants: 3,
       scale: 0.5,
       gen(rng, v) {
-        const g = new VC.VoxelGrid(9, 18, 17);
+        const g = new VC.VoxelGrid(9, 14, 17);
         const X = 4, Z = 8, litX = [0, 2, 1][v % 3], litZ = litX === 0 ? 2 : 0;
         g.box(3, 0, 7, 3, 1, 3, P.CONCRETE_D);
-        g.box(X, 1, Z, 1, 15, 1, P.METAL_D);
-        g.box(X, 15, Z + 1, 1, 1, 8, P.METAL_D);
+        g.box(X, 1, Z, 1, 12, 1, P.METAL_D);
+        g.box(X, 12, Z + 1, 1, 1, 8, P.METAL_D);
         const hz = Z + 6;
-        g.box(X, 10, hz - 1, 1, 5, 3, P.BLACK);
+        g.box(X, 8, hz - 1, 1, 4, 3, P.BLACK);
         for (let k = 0; k < 3; k++) {
-          g.set(X, 13 - k, hz, k === litX ? ON[k] : OFF[k]);
+          g.set(X, 10 - k, hz, k === litX ? ON[k] : OFF[k]);
           if (k === litX) {
-            g.light(X - 0.2, 13.5 - k, hz + 0.5, RGB[k], 0.5, true);
-            g.light(X + 1.2, 13.5 - k, hz + 0.5, RGB[k], 0.5, true);
+            g.light(X - 0.2, 10.5 - k, hz + 0.5, RGB[k], 0.5, true);
+            g.light(X + 1.2, 10.5 - k, hz + 0.5, RGB[k], 0.5, true);
           }
         }
-        g.box(X + 1, 7, Z, 2, 5, 1, P.BLACK);
+        g.box(X + 1, 5, Z, 2, 5, 1, P.BLACK);
         for (let k = 0; k < 3; k++) {
-          g.set(X + 1, 10 - k, Z, k === litZ ? ON[k] : OFF[k]);
-          if (k === litZ) g.light(X + 1.5, 10.5 - k, Z + 1.2, RGB[k], 0.45, true);
+          g.set(X + 1, 8 - k, Z, k === litZ ? ON[k] : OFF[k]);
+          if (k === litZ) g.light(X + 1.5, 8.5 - k, Z + 1.2, RGB[k], 0.45, true);
         }
         return crop(g);
       },

@@ -28,7 +28,12 @@
  *   shaderlib's shadowAt(). Slope-scaled polygon offset goes through VC.gfx.shadowBias (applied by core).
  *
  * EXTRA API: VC.shadows.stats (cascades, half sizes, last pass ms), VC.shadows.viewProj[c] (light VP of
- *   cascade c, valid after render), VC.shadows.maxHeight() (tallest receiver Y, from the height grid).
+ *   cascade c, valid after render), VC.shadows.maxHeight() (tallest receiver Y, from the height grid),
+ *   VC.shadows.gridStats (full / block recomputes).
+ * HEIGHT GRID: per 8x8-tile block ground min / receiver max, updated INCREMENTALLY: world 'dirty' rects and
+ *   building add/remove/change events mark blocks; only those are recomputed (throttled to 4 per second),
+ *   plus a once-per-second scan for buildings whose height changed without an event (construction finished).
+ * Context restore: registered with VC.gfx.onRestore (the atlas is re-created on the next render).
  */
 const M = VC.M;
 const BIAS = [1.2, 2.0]; // polygon offset factor, units
@@ -49,7 +54,25 @@ const SH = (VC.shadows = {
   cache: { valid: false, n: 0, moon: false, size: 0, frame: -1, L: [0, 0, 0] },
   _err: false,
 
-  init() {},
+  gridStats: { full: 0, blocks: 0, passes: 0, ms: 0, lastMs: 0 },
+  init() {
+    const G = VC.gfx;
+    VC.bus.on('dirty', (d) => markRect(d.x0, d.z0, d.x1, d.z1));
+    const onB = (b) => b && markRect(b.x, b.z, b.x + (b.w || 1) - 1, b.z + (b.d || 1) - 1);
+    VC.bus.on('bldAdd', onB);
+    VC.bus.on('bldRemove', onB);
+    VC.bus.on('bldChange', onB);
+    if (G.onRestore) G.onRestore(() => SH.restore());
+  },
+  /** WebGL context restored: the atlas is gone; it is re-created on the next render. */
+  restore() {
+    SH.tex = SH.fbo = null;
+    SH.size = SH.atlasW = SH.atlasH = 0;
+    SH._failedAt = 0;
+    SH._err = false;
+    slot.near.half = slot.far.half = 0;
+    SH.cache.valid = false;
+  },
   /** Frees the shadow atlas after shadows have been off (quality 'low' / settings) for a few seconds. */
   update(dt, rdt) {
     const G = VC.gfx;
@@ -67,6 +90,7 @@ const SH = (VC.shadows = {
   reset() {
     slot.near.half = slot.far.half = 0;
     grid.S = null;
+    grid.hgt.clear();
     SH.cache.valid = false;
   },
   /** Tallest receiver world Y on the map (terrain + buildings + trees). */
@@ -231,45 +255,99 @@ function ensureTarget(gl, size, two) {
 /* ------------------------------------------------------------------ */
 /* Coarse height grid (8x8-tile blocks): ground min / receiver max Y     */
 /* ------------------------------------------------------------------ */
-const grid = { S: null, bs: 8, gw: 0, gh: 0, lo: null, hi: null, verT: -1, verB: -1, verTr: -1, t: -1e9, minY: 0, maxY: 0 };
+const grid = { S: null, bs: 8, gw: 0, gh: 0, lo: null, hi: null, dirty: null, anyDirty: false, t: -1e9, scanT: -1e9, minY: 0, maxY: 0, hgt: new Map() };
+/** Marks the blocks covering tile rect [x0,x1]x[z0,z1] for recomputation. */
+function markRect(x0, z0, x1, z1) {
+  if (!grid.dirty) return;
+  const bs = grid.bs;
+  const bx0 = M.clamp(Math.floor(x0 / bs), 0, grid.gw - 1), bx1 = M.clamp(Math.floor(x1 / bs), 0, grid.gw - 1);
+  const bz0 = M.clamp(Math.floor(z0 / bs), 0, grid.gh - 1), bz1 = M.clamp(Math.floor(z1 / bs), 0, grid.gh - 1);
+  for (let bz = bz0; bz <= bz1; bz++) for (let bx = bx0; bx <= bx1; bx++) grid.dirty[bz * grid.gw + bx] = 1;
+  grid.anyDirty = true;
+}
+/** Receiver top of building b (at least 3 units: construction sites grow). */
+const bldTop = (S, b, C) => Math.max(S.height[b.z * S.W + b.x] * C.STEP, C.SEA_Y) + Math.max(b.hgt || 0, 3) + 0.5;
+/** Recomputes block k (ground min, receiver max) from its tiles and the buildings standing on them. */
+function computeBlock(S, k, C) {
+  const bs = grid.bs, gw = grid.gw;
+  const x0 = (k % gw) * bs, z0 = ((k / gw) | 0) * bs;
+  const x1 = Math.min(S.W, x0 + bs), z1 = Math.min(S.H, z0 + bs);
+  let lo = 1e9, hi = -1e9, lastId = 0;
+  for (let z = z0; z < z1; z++)
+    for (let x = x0, i = z * S.W + x0; x < x1; x++, i++) {
+      const y = Math.max(S.height[i] * C.STEP, C.SEA_Y);
+      if (y < lo) lo = y;
+      const top = y + (S.trees[i] ? 1.7 : 0.3);
+      if (top > hi) hi = top;
+      const id = S.bld[i];
+      if (id && id !== lastId) {
+        lastId = id;
+        const b = S.buildings.get(id);
+        if (b) {
+          const t = bldTop(S, b, C);
+          if (t > hi) hi = t;
+        }
+      }
+    }
+  grid.lo[k] = lo;
+  grid.hi[k] = hi;
+}
 function updateGrid(S, time) {
-  const v = S.ver || {};
-  if (grid.S === S && v.terrain === grid.verT && v.trees === grid.verTr && (v.bld === grid.verB || time - grid.t < 0.5)) return;
-  grid.S = S;
-  grid.verT = v.terrain;
-  grid.verB = v.bld;
-  grid.verTr = v.trees;
-  grid.t = time;
+  const t0 = performance.now();
+  if (gridUpdate(S, time)) {
+    const st = SH.gridStats;
+    st.lastMs = performance.now() - t0;
+    st.ms += st.lastMs;
+  }
+}
+/** Returns true if anything was recomputed. */
+function gridUpdate(S, time) {
   const C = VC.C, bs = grid.bs;
   const gw = Math.ceil(S.W / bs), gh = Math.ceil(S.H / bs);
-  if (!grid.lo || grid.gw !== gw || grid.gh !== gh) {
-    grid.lo = new Float32Array(gw * gh);
-    grid.hi = new Float32Array(gw * gh);
+  let full = grid.S !== S || !grid.lo || grid.gw !== gw || grid.gh !== gh;
+  if (full) {
+    grid.S = S;
     grid.gw = gw;
     grid.gh = gh;
-  }
-  const lo = grid.lo.fill(1e9), hi = grid.hi.fill(-1e9);
-  for (let z = 0; z < S.H; z++) {
-    const row = ((z / bs) | 0) * gw;
-    for (let x = 0; x < S.W; x++) {
-      const i = z * S.W + x;
-      const y = Math.max(S.height[i] * C.STEP, C.SEA_Y);
-      const b = row + ((x / bs) | 0);
-      if (y < lo[b]) lo[b] = y;
-      const top = y + (S.trees[i] ? 1.7 : 0.3);
-      if (top > hi[b]) hi[b] = top;
+    grid.lo = new Float32Array(gw * gh);
+    grid.hi = new Float32Array(gw * gh);
+    grid.dirty = new Uint8Array(gw * gh);
+    grid.hgt.clear();
+    for (const b of S.buildings.values()) grid.hgt.set(b.id, b.hgt || 0);
+    for (let k = 0; k < gw * gh; k++) computeBlock(S, k, C);
+    grid.anyDirty = false;
+    grid.t = grid.scanT = time;
+    SH.gridStats.full++;
+  } else {
+    // buildings whose height changed without an event (construction finished, model swaps): once a second
+    if (time - grid.scanT >= 1) {
+      grid.scanT = time;
+      const H = grid.hgt;
+      for (const b of S.buildings.values()) {
+        const h = b.hgt || 0;
+        if (H.get(b.id) !== h) {
+          H.set(b.id, h);
+          markRect(b.x, b.z, b.x + (b.w || 1) - 1, b.z + (b.d || 1) - 1);
+        }
+      }
+      if (H.size > S.buildings.size + 256) for (const id of H.keys()) if (!S.buildings.has(id)) H.delete(id);
     }
+    // edits: recompute only the marked blocks, at most 4 times a second (painting zones / growth bursts)
+    if (!grid.anyDirty || time - grid.t < 0.25) return false;
+    grid.t = time;
+    grid.anyDirty = false;
+    const D = grid.dirty;
+    let n = 0;
+    for (let k = 0; k < D.length; k++) if (D[k]) { D[k] = 0; computeBlock(S, k, C); n++; }
+    SH.gridStats.blocks += n;
   }
-  for (const b of S.buildings.values()) {
-    const y = Math.max(S.height[b.z * S.W + b.x] * C.STEP, C.SEA_Y) + Math.max(b.hgt || 0, 3) + 0.5;
-    const bx0 = (b.x / bs) | 0, bx1 = ((b.x + (b.w || 1) - 1) / bs) | 0;
-    const bz0 = (b.z / bs) | 0, bz1 = ((b.z + (b.d || 1) - 1) / bs) | 0;
-    for (let bz = bz0; bz <= bz1 && bz < gh; bz++) for (let bx = bx0; bx <= bx1 && bx < gw; bx++) if (y > hi[bz * gw + bx]) hi[bz * gw + bx] = y;
-  }
+  SH.gridStats.passes++;
+  const lo = grid.lo, hi = grid.hi;
   let mn = 1e9, mx = -1e9;
   for (let i = 0; i < lo.length; i++) { if (lo[i] < mn) mn = lo[i]; if (hi[i] > mx) mx = hi[i]; }
   grid.minY = mn;
   grid.maxY = mx;
+  return true;
 }
 /** Min ground / max receiver Y over the tile rect [x0,x1]x[z0,z1] (world units). Writes into out[0..1]. */
 function gridRange(x0, z0, x1, z1, out) {

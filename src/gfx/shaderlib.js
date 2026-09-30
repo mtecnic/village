@@ -38,6 +38,11 @@
  *
  * Output convention: fragment shaders write LINEAR HDR color to `out vec4 fragColor`
  * (tonemapping + exposure happen in post). Emissive surfaces may exceed 1.0 to bloom.
+ * Alpha: 1 for opaque surfaces; see the HDR alpha convention in gfx/core.js (overlay / water marks).
+ *
+ * #define LIB_LITE (before the body, e.g. via G.program opts.defines) selects a cheaper lighting path for
+ *   distant / LOD geometry: 4-tap PCF without cascade blending, a single-fetch cloud shadow and no wet
+ *   sky reflection in shade(). Visually equivalent at a few pixels per voxel.
  */
 VC.shaderlib = {};
 
@@ -131,6 +136,9 @@ float _libPcf(vec3 q, float far, float cw, float radius, vec2 cs, vec2 texel, ve
   float s = 0.0;
   // the reference is clamped to 1: an empty (cleared) texel must read as lit even for receivers beyond the far plane
   for (int i = 8; i < 12; i++) { vec2 o = (R * _LIB_DISK[i]) * texel; s += texture(uShadowMap, vec3(base + o, min(q.z + dot(grad, o), 1.0))); }
+#ifdef LIB_LITE
+  return s * 0.25;
+#endif
   if (s < 0.002 || s > 3.998) return s * 0.25;
   for (int i = 0; i < 8; i++) { vec2 o = (R * _LIB_DISK[i]) * texel; s += texture(uShadowMap, vec3(base + o, min(q.z + dot(grad, o), 1.0))); }
   return s * (1.0 / 12.0);
@@ -163,6 +171,9 @@ float shadowAt(vec3 wp, vec3 n){
   vec2 cs = vec2(cos(ang), sin(ang));
   float soft = 1.35 + NIGHT * 1.4 + uWind.w * 0.9;     // PCF radius (texels): softer at night / overcast
   float s0 = 1.0, s1 = 1.0;
+#ifdef LIB_LITE
+  blend = step(0.44, e0);   // one cascade only (no double PCF in the transition band)
+#endif
   if (blend < 1.0) {
     vec3 q = _libShadowLocal(wp + n * (wpt * nOff), 0.0, cw);
     q.z -= zpw * wpt * 0.3;
@@ -184,7 +195,11 @@ float cloudShadow(vec3 wp){
   if (cover < 0.03) return 1.0;
   vec2 drift = uWind.xy * TIME * (0.0012 + 0.0022 * uWind.z);
   vec2 p = wp.xz * 0.0045 + drift;
+#ifdef LIB_LITE
+  float n = tnoise(p).r * 0.62 + 0.19;
+#else
   float n = tnoise(p).r * 0.62 + tnoise(p * 2.7 + drift * 0.8 + 0.37).g * 0.28 + tnoise(p * 6.3 - drift).b * 0.1;
+#endif
   float th = 0.8 - cover * 0.58;
   float c = smoothstep(th, th + 0.16, n);
   return 1.0 - c * (0.42 + 0.3 * cover);
@@ -193,9 +208,10 @@ float cloudShadow(vec3 wp){
 /* ---------------------------------------------------------------- sky + fog */
 // Zenith color for sun elevation h (linear HDR): night, blue hour, dusk, golden, day.
 vec3 _libSkyZenith(float h){
-  vec3 c = mix(vec3(0.0035, 0.006, 0.02), vec3(0.018, 0.036, 0.12), smoothstep(-0.32, -0.14, h));
-  c = mix(c, vec3(0.07, 0.07, 0.2), smoothstep(-0.14, -0.04, h));
-  c = mix(c, vec3(0.13, 0.22, 0.48), smoothstep(-0.04, 0.12, h));
+  vec3 c = mix(vec3(0.0035, 0.006, 0.02), vec3(0.02, 0.042, 0.15), smoothstep(-0.36, -0.2, h));
+  c = mix(c, vec3(0.045, 0.085, 0.27), smoothstep(-0.2, -0.1, h));     // blue hour: deep saturated blue
+  c = mix(c, vec3(0.11, 0.1, 0.27), smoothstep(-0.1, -0.02, h));       // violet twilight
+  c = mix(c, vec3(0.14, 0.2, 0.46), smoothstep(-0.02, 0.12, h));
   c = mix(c, vec3(0.1, 0.29, 0.74), smoothstep(0.12, 0.45, h));
   return c;
 }
@@ -287,9 +303,10 @@ vec3 shade(vec3 albedo, vec3 n, vec3 wp, float ao){
   float ground = max(tileData(wp.xz).r * 63.75, SEA_Y);
   float occ = mix(0.68, 1.0, smoothstep(0.0, 2.8, wp.y - ground));
   amb *= mix(occ, 1.0, abs(n.y));
+  amb *= mix(vec3(1.0), vec3(0.92, 0.97, 1.08), SNOW);   // snow light is cool (keeps winter from bleaching)
   vec3 col = albedo * (amb * ao + direct * mix(1.0, ao, 0.3));
-  // lightning flash
-  col += albedo * vec3(0.8, 0.85, 1.0) * (uMisc.z * 2.0 * ao);
+  // lightning: a flash from the sky lights roofs and open ground more than walls in the street canyons
+  col += albedo * vec3(0.8, 0.85, 1.0) * (uMisc.z * (1.1 + 1.3 * up) * mix(occ, 1.0, up) * ao);
   vec3 v = normalize(uCamPos.xyz - wp);
   float nv = max(dot(n, v), 0.0);
   // golden rim on sun-facing-away silhouettes at low sun (backlight)
@@ -299,7 +316,11 @@ vec3 shade(vec3 albedo, vec3 n, vec3 wp, float ao){
   // wet surfaces mirror the sky
   if (wetTop > 0.0) {
     float fr = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+#ifdef LIB_LITE
+    col += uFog.rgb * (fr * wetTop * 0.7);
+#else
     col += skyColor(reflect(-v, n)) * (fr * wetTop * 0.7);
+#endif
   }
   return col;
 }
@@ -318,11 +339,15 @@ vec3 specular(vec3 n, vec3 wp, float gloss, float strength){
   return uSunColor.rgb * (s * uSunDir.w * sh);
 }
 
-/** Overlay color ramp. v 0..1. kind: 0 good, 1 bad, 2 value, 3 net. */
+/**
+ * Overlay color ramp (sRGB). v 0..1. kind: 0 good, 1 bad, 2 value, 3 net.
+ * 'bad' at ~0 (none of it) is a calm pale green-grey, not a saturated green: clean countryside must not
+ * shout over the data. The 'value' low end is a muted purple (navy read as water next to real rivers).
+ */
 vec3 overlayRamp(float v, float kind){
   if (kind < 0.5) return mix(mix(vec3(0.9, 0.15, 0.1), vec3(1.0, 0.85, 0.1), smoothstep(0.0, 0.5, v)), vec3(0.15, 0.9, 0.35), smoothstep(0.5, 1.0, v));
-  if (kind < 1.5) return v < 0.02 ? vec3(0.2, 0.7, 0.35) : mix(mix(vec3(1.0, 0.9, 0.2), vec3(1.0, 0.35, 0.1), smoothstep(0.0, 0.5, v)), vec3(0.6, 0.05, 0.4), smoothstep(0.5, 1.0, v));
-  if (kind < 2.5) return mix(mix(vec3(0.1, 0.1, 0.45), vec3(0.1, 0.75, 0.9), smoothstep(0.0, 0.5, v)), vec3(1.0, 0.8, 0.2), smoothstep(0.5, 1.0, v));
+  if (kind < 1.5) return mix(vec3(0.5, 0.62, 0.5), mix(mix(vec3(1.0, 0.9, 0.2), vec3(1.0, 0.35, 0.1), smoothstep(0.0, 0.5, v)), vec3(0.6, 0.05, 0.4), smoothstep(0.5, 1.0, v)), smoothstep(0.0, 0.04, v));
+  if (kind < 2.5) return mix(mix(vec3(0.35, 0.2, 0.45), vec3(0.1, 0.75, 0.9), smoothstep(0.0, 0.5, v)), vec3(1.0, 0.8, 0.2), smoothstep(0.5, 1.0, v));
   return v > 0.5 ? vec3(0.2, 0.85, 1.0) : vec3(0.95, 0.2, 0.15);
 }
 `;

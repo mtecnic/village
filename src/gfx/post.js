@@ -18,7 +18,12 @@
  *                     fit), lift/gamma/gain, contrast, saturation, vignette, subtle edge chromatic aberration.
  *   7. FXAA 3.11      (quality) luma-in-alpha, with animated film grain, upscaling to the canvas.
  * 'low' quality = exposure + tonemap + grade + vignette only. Render targets live in a small pool keyed by
- * name and are (re)allocated only when their size changes (i.e. on resize).
+ * name and are (re)allocated only when their size changes (i.e. on resize). A target that cannot be allocated
+ * is not retried (and nothing leaks) until the next resize; core then falls back to its basic tonemap.
+ * HDR ALPHA (see core.js): alpha < 0.4 = water surface; 0.4..1 marks "data" pixels (overlay) that skip the
+ * night grade. Pixels whose depth lies below the sea surface inside the map are water too (no SSAO there,
+ * tilt-shift focus uses the sea plane).
+ * Context restore: registered with VC.gfx.onRestore (targets and programs are rebuilt).
  *
  * EXTRA API: VC.post.stats (active features, ms), VC.post.debugView = null | 'ao' | 'bloom' | 'dof' | 'coc' |
  *   'rays' | 'lum' (shows an intermediate buffer), VC.post.readExposure() -> {avgLum, exposure} (test only;
@@ -71,16 +76,32 @@ const PP = (VC.post = {
     PP._tilt = new Float32Array(4);
     PP._focus = new Float32Array(2);
     PP._raysCol = new Float32Array(3);
+    PP._levelW = new Float32Array(LEVEL_W.length);
     PP.ok = true;
+    if (!PP._restoreReg && G.onRestore) {
+      PP._restoreReg = true;
+      G.onRestore(() => PP.restore());
+    }
+  },
+
+  /** WebGL context restored: every GL object is gone; rebuild the pool and the programs' sampler setup. */
+  restore() {
+    for (const k in RT) delete RT[k];
+    for (const k in RT_FAIL) delete RT_FAIL[k];
+    PP.ok = false;
+    PP.adaptTex = PP.adaptRT = null;
+    PP.init();
   },
 
   /** Internal render size changed: size-dependent targets are re-created lazily on next use. */
   resize() {
     PP.adaptFresh = true;
+    for (const k in RT_FAIL) delete RT_FAIL[k]; // a new size may allocate fine
   },
 
   render(ctx) {
     if (!PP.ok) throw new Error('post not initialized');
+    if (VC.gfx.lost) return;
     const G = VC.gfx, gl = G.gl, env = ctx.env, cam = ctx.cam;
     const t0 = performance.now();
     const hdr = G.hdr, rw = hdr.w, rh = hdr.h;
@@ -121,7 +142,8 @@ const PP = (VC.post = {
     PP.adaptRT = aNext;
     const n = env.night || 0;
     const expo = PP._expo, T = PP.tune;
-    expo[0] = env.exposure || 1;
+    const ovOn = !!G.overlay && G.overlay !== 'none';
+    expo[0] = (env.exposure || 1) * (ovOn ? 1 + n * 0.35 : 1); // data overlay at night: a brighter map
     expo[1] = T.autoStrength; // auto-exposure strength (0 = off, 1 = full)
     expo[2] = M.lerp(T.keyDay, T.keyNight, n); // target key (exposed average luminance)
     expo[3] = T.autoRange; // max correction factor either way
@@ -134,7 +156,7 @@ const PP = (VC.post = {
       const Pa = qk === 'ultra' ? P.ssao12 : P.ssao8;
       u = pass(Pa, a0);
       tex(Pa, 'uDepth', hdr.depth);
-      gl.uniform4f(u.uAOP, R, 1.35, R * 0.04, cam.far * 0.5);
+      gl.uniform4f(u.uAOP, R, 1.35, R * 0.04, Math.min(cam.far * 0.5, cam.dist * 3 + 60));
       G.fullscreen();
       u = pass(P.aoblur, a1);
       tex(P.aoblur, 'uSrc', a0.tex);
@@ -146,19 +168,24 @@ const PP = (VC.post = {
 
     /* ---- 3. bloom ---- */
     let bloomTex = PP.black, bloomNorm = 1;
+    // Zoomed out, lit windows are tiny and dense: the same screen-space glow would merge into a haze over
+    // the whole city, so intensity, threshold and the widest levels scale with the camera distance.
     const far = M.sat((cam.dist - 30) / 120);
-    const bloomI = 0.2 + n * (0.7 + far * 0.5) + (env.blueHour || 0) * 0.15 + (env.lightning || 0) * 0.3;
+    const bloomI = 0.2 + n * (0.75 - far * 0.3) + (env.blueHour || 0) * 0.15 + (env.lightning || 0) * 0.3;
+    const LW = PP._levelW;
+    for (let i = 0; i < LEVEL_W.length; i++) LW[i] = LEVEL_W[i] * (i >= 4 ? (1 - n * 0.35) * (1 - far * 0.5) : i === 3 ? 1 - far * 0.25 : 1);
     if (f.bloom) {
       let w = hw, h = hh;
       const downs = PP._downs;
       downs.length = 0;
       const d0 = rt('bd0', w, h, fl);
-      const th = M.lerp(1.05, 0.62, n);
+      const th = M.lerp(1.05, 0.62, n) + n * far * 0.25;
       u = pass(P.bright, d0);
       tex(P.bright, 'uSrc', hdr.color);
       tex(P.bright, 'uAdapt', PP.adaptTex);
       gl.uniform2f(u.uTexel, 1 / rw, 1 / rh);
-      gl.uniform3f(u.uThresh, th, th * 0.6, fl ? 60 : 1);
+      // clamp: isolated specular fireflies (sea glints) must not blow up into wide bokeh-like halos
+      gl.uniform3f(u.uThresh, th, th * 0.6, fl ? 32 : 1);
       gl.uniform4fv(u.uExpo, expo);
       G.fullscreen();
       downs.push(d0);
@@ -176,15 +203,15 @@ const PP = (VC.post = {
       }
       // upsample: up_i = tent(up_{i+1}) + down_i * w_i ; bloom = up_0 / sum(w)
       const nl = downs.length;
-      let src = downs[nl - 1], wsum = LEVEL_W[nl - 1];
+      let src = downs[nl - 1], wsum = LW[nl - 1];
       for (let i = nl - 2; i >= 0; i--) {
         const d = downs[i], out = rt(BU_NAMES[i], d.w, d.h, fl);
-        wsum += LEVEL_W[i];
+        wsum += LW[i];
         u = pass(P.up, out);
         tex(P.up, 'uSrc', src.tex);
         tex(P.up, 'uBase', d.tex);
         gl.uniform2f(u.uTexel, 1 / src.w, 1 / src.h);
-        gl.uniform1f(u.uBaseW, LEVEL_W[i]);
+        gl.uniform1f(u.uBaseW, LW[i]);
         G.fullscreen();
         src = out;
       }
@@ -196,13 +223,18 @@ const PP = (VC.post = {
     let dofTex = PP.black;
     const tilt = PP._tilt, focus = PP._focus;
     {
-      const z = M.sat((cam.dist - 10) / 140);
-      const maxCocFull = M.lerp(4.5, 12, z) * (rh / 1080) * (cam.cinematic ? 1.25 : 1);
+      // Strongest at the diorama distances (~40-70); an overview is for reading the whole map, so the blur
+      // fades there (and the sharp band widens). Near-top-down views have no miniature perspective to fake,
+      // and low street-level views get a milder, photographic amount.
+      const d = cam.dist, pitch = cam.pitch;
+      const amt = M.lerp(4.5, 7.5, M.smoothstep(10, 60, d)) * M.lerp(1, 0.4, M.smoothstep(70, 140, d));
+      const tiltK = M.smoothstep(1.35, 1.0, pitch) * M.lerp(0.6, 1, M.smoothstep(0.12, 0.5, pitch));
+      const maxCocFull = amt * tiltK * (rh / 1080) * (cam.cinematic ? 1.25 : 1);
       tilt[0] = 0.45; // focus band center (uv.y, 0 = bottom): slightly below the screen center
-      tilt[1] = M.lerp(0.19, 0.1, z); // sharp half-width
-      tilt[2] = M.lerp(0.5, 0.36, z); // falloff to full blur
+      tilt[1] = M.lerp(0.17, 0.22, M.smoothstep(60, 160, d)); // sharp half-width
+      tilt[2] = 0.48; // falloff to full blur
       tilt[3] = maxCocFull * 0.5; // max CoC in half-res px
-      focus[0] = cam.dist;
+      focus[0] = d;
       focus[1] = 0.65; // depth awareness
     }
     if (f.tilt && tilt[3] >= 0.75) {
@@ -264,7 +296,7 @@ const PP = (VC.post = {
     }
 
     /* ---- 6. composite ---- */
-    const gp = grade(env);
+    const gp = grade(env, ovOn);
     const toScreen = !f.fxaa;
     const ldr = toScreen ? null : rt('ldr', rw, rh, false);
     const grain = low ? 0 : 0.024;
@@ -282,6 +314,7 @@ const PP = (VC.post = {
     gl.uniform2f(u.uBloomP, f.bloom ? bloomI * bloomNorm : 0, 0);
     gl.uniform3fv(u.uRaysCol, raysCol);
     gl.uniform3fv(u.uTint, gp.tint);
+    gl.uniform3fv(u.uTintData, gp.tintData);
     gl.uniform3fv(u.uLift, gp.lift);
     gl.uniform3fv(u.uGamma, gp.gamma);
     gl.uniform3fv(u.uGain, gp.gain);
@@ -291,7 +324,8 @@ const PP = (VC.post = {
     gl.uniform2fv(u.uFocusZ, focus);
     gl.uniform1f(u.uAoStr, 0.75);
     gl.uniform1f(u.uAoBilateral, fl ? 1 : 0);
-    gl.uniform1f(u.uScotopic, M.smoothstep(0.3, 1.0, n) * 0.65);
+    // (with a data overlay on, the moonlit shift is mostly skipped everywhere: the map must stay readable)
+    gl.uniform1f(u.uScotopic, M.smoothstep(0.3, 1.0, n) * 0.65 * (ovOn ? 0.35 : 1));
     gl.uniform1f(u.uKeepHue, 0.3 + n * 0.25);
     G.fullscreen();
 
@@ -360,19 +394,27 @@ const UNBIND = [0, 1, 2, 3, 4, 8, 9, 10, 11, 12];
 /* Render target pool                                                   */
 /* ------------------------------------------------------------------ */
 const RT = {};
+const RT_FAIL = {}; // targets that could not be allocated at this size (not retried until resize / restore)
 /** Named render target of size w x h; hdr = half-float when supported. Re-created only on size change. */
 function rt(name, w, h, hdr, nearest) {
   const G = VC.gfx, gl = G.gl;
   const float = !!(hdr && PP.float);
   let t = RT[name];
   if (t && t.w === w && t.h === h && t.float === float) { t.used = PP.frame; return t; }
+  const key = name + ':' + w + 'x' + h + (float ? 'f' : '');
+  if (RT_FAIL[key]) throw new Error('post: render target ' + name + ' unavailable');
   if (t) {
     gl.deleteFramebuffer(t.fbo);
     gl.deleteTexture(t.tex);
+    delete RT[name];
   }
   const tex = G.texture({ w, h, internal: float ? gl.RGBA16F : gl.RGBA8, format: gl.RGBA, type: float ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE, filter: nearest ? gl.NEAREST : gl.LINEAR });
   const fbo = G.framebuffer(tex);
-  if (!fbo) throw new Error('post: render target ' + name + ' incomplete');
+  if (!fbo) {
+    gl.deleteTexture(tex); // never leak the texture of a failed target
+    RT_FAIL[key] = 1;
+    throw new Error('post: render target ' + name + ' incomplete');
+  }
   t = RT[name] = { tex, fbo, w, h, float, used: PP.frame };
   return t;
 }
@@ -422,28 +464,31 @@ function debugShow(view, texs) {
 /* ------------------------------------------------------------------ */
 /* Color grading from the lighting environment                          */
 /* ------------------------------------------------------------------ */
-const GP = { tint: new Float32Array(3), lift: new Float32Array(3), gamma: new Float32Array(3), gain: new Float32Array(3), sat: 1, contrast: 1, vignette: 0.3 };
-const WB_GOLD = [1.07, 1.0, 0.88], WB_DUSK = [1.03, 0.97, 0.99], WB_BLUE = [0.9, 0.96, 1.14], WB_NIGHT = [0.84, 0.95, 1.16], WB_WET = [0.96, 0.99, 1.04];
+const GP = { tint: new Float32Array(3), tintData: new Float32Array(3), lift: new Float32Array(3), gamma: new Float32Array(3), gain: new Float32Array(3), sat: 1, contrast: 1, vignette: 0.3 };
+const WB_GOLD = [1.14, 1.0, 0.8], WB_DUSK = [1.08, 0.95, 1.02], WB_BLUE = [0.9, 0.96, 1.14], WB_NIGHT = [0.84, 0.95, 1.16], WB_WET = [0.96, 0.99, 1.04];
 function mix3(o, c, t) {
   o[0] += (c[0] - o[0]) * t; o[1] += (c[1] - o[1]) * t; o[2] += (c[2] - o[2]) * t;
 }
-function grade(env) {
+function grade(env, ovOn) {
   const n = env.night || 0, g = env.golden || 0, bh = env.blueHour || 0, dk = env.dusk || 0;
   const cl = env.cloud || 0, wet = env.wet || 0, snow = env.snow || 0;
-  const t = GP.tint, lift = GP.lift, gam = GP.gamma, gain = GP.gain;
-  // white balance: warm golden hour, pink dusk, blue hour + moonlit night cool
+  const t = GP.tint, td = GP.tintData, lift = GP.lift, gam = GP.gamma, gain = GP.gain;
+  // white balance: warm golden hour, pink dusk, blue hour + moonlit night cool. The golden weight is strong:
+  // flat ground at low sun is lit mostly by the sky dome, so the light alone cannot carry the warmth.
   t[0] = 1; t[1] = 1; t[2] = 1;
-  mix3(t, WB_GOLD, g * 0.85);
-  mix3(t, WB_DUSK, dk * (1 - g) * 0.6);
-  mix3(t, WB_BLUE, bh * 0.6);
-  mix3(t, WB_NIGHT, n * 0.12); // (the scotopic shift in the shader cools the darks; lights stay warm)
+  mix3(t, WB_GOLD, g * (1 - cl * 0.6));
+  mix3(t, WB_DUSK, dk * (1 - g) * 0.7 * (1 - cl * 0.6));
   mix3(t, WB_WET, wet * 0.6 + snow * 0.25);
+  td[0] = t[0]; td[1] = t[1]; td[2] = t[2]; // data pixels (overlays): no blue-hour / night cast
+  mix3(t, WB_BLUE, bh * 0.6);
+  mix3(t, WB_NIGHT, n * 0.12 * (ovOn ? 0.3 : 1)); // (the scotopic shift in the shader cools the darks; lights stay warm)
   // lift (shadow tint), gamma, gain (highlight tint)
   lift[0] = 0.004 - n * 0.002; lift[1] = 0.004 + n * 0.004; lift[2] = 0.006 + n * 0.016 + bh * 0.01;
   gam[0] = gam[1] = gam[2] = 1 / (1.0 + n * 0.04);
-  gain[0] = 1 + g * 0.03; gain[1] = 1; gain[2] = 1 - g * 0.04 + n * 0.02;
-  GP.sat = 1.12 + g * 0.08 + dk * 0.03 - n * 0.06 - cl * 0.2 - wet * 0.12;
-  GP.contrast = 1.05 + g * 0.04 - cl * 0.06 - wet * 0.02;
+  gain[0] = 1 + g * 0.06; gain[1] = 1; gain[2] = 1 - g * 0.05 + n * 0.02;
+  // saturation: moderate base (above ~1.1 lush grass reads lime and dark evergreens read black)
+  GP.sat = 1.05 + g * 0.08 + dk * 0.05 - n * 0.06 - cl * 0.2 - wet * 0.12;
+  GP.contrast = 1.04 + g * 0.04 + snow * 0.06 * (1 - n) - cl * 0.06 - wet * 0.02; // (snow: keep definition)
   GP.vignette = 0.32 + n * 0.14;
   return GP;
 }
@@ -459,18 +504,34 @@ out vec4 fragColor;
 const DEPTH_FN = `
 float linZ(float d){ return uProj[3][2] / ((d * 2.0 - 1.0) + uProj[2][2]); }
 vec3 viewPos(vec2 uv, float d){ float z = linZ(d); vec2 ndc = uv * 2.0 - 1.0; return vec3(ndc.x * z / uProj[0][0], ndc.y * z / uProj[1][1], -z); }
+// Water surface at this pixel? Returns the linear view depth of the sea surface (every water body lies at
+// SEA_Y) when the visible surface is water, else 0: HDR alpha < 0.4 (water layer mark), or geometry seen
+// below the sea plane where the ray crosses it inside the map (the depth buffer holds the seabed there,
+// since water writes no depth). The diorama skirts outside the map are excluded by the map test.
+float waterZ(vec2 uv, float d, float hdrA){
+  vec3 wd = transpose(mat3(uView)) * vec3((uv.x * 2.0 - 1.0) / uProj[0][0], (uv.y * 2.0 - 1.0) / uProj[1][1], -1.0);
+  if (wd.y > -1e-4) return 0.0;
+  float zs = (SEA_Y - uCamPos.y) / wd.y;
+  if (zs <= 0.0) return 0.0;
+  if (hdrA < 0.4) return zs;
+  if (d >= 0.99999 || linZ(d) <= zs + 0.02) return 0.0;
+  vec2 p = uCamPos.xz + wd.xz * zs;
+  if (p.x < 0.05 || p.y < 0.05 || p.x > uMap.x - 0.05 || p.y > uMap.y - 0.05) return 0.0;
+  return zs;
+}
 `;
 
 // Tilt-shift circle of confusion 0..1 (screen-y band, relaxed near the focus depth).
 const TILT_FN = `
 uniform vec4 uTilt;   // x focus y, y sharp half-width, z falloff, w max coc (half-res px)
 uniform vec2 uFocusZ; // x focus distance, y depth awareness 0..1
-float tiltCoc(vec2 uv, float d){
+float tiltCocZ(vec2 uv, float z, float sky){
   float s = smoothstep(uTilt.y, uTilt.y + uTilt.z, abs(uv.y - uTilt.x));
-  if (d >= 0.99999) return s;
-  float dz = abs(linZ(d) - uFocusZ.x) / uFocusZ.x;
+  if (sky > 0.5) return s;
+  float dz = abs(z - uFocusZ.x) / uFocusZ.x;
   return s * mix(1.0, smoothstep(0.03, 0.3, dz), uFocusZ.y);
 }
+float tiltCoc(vec2 uv, float d){ return tiltCocZ(uv, linZ(d), d >= 0.99999 ? 1.0 : 0.0); }
 `;
 
 // Exposure: env exposure * gentle auto correction toward a key value (adapted log-luminance in uAdapt).
@@ -559,15 +620,22 @@ const vec3 KERNEL[12] = vec3[12](vec3(-0.0725, 0.0575, 0.0667), vec3(0.0850, 0.0
   vec3(-0.2656, 0.0711, 0.2983), vec3(-0.2097, -0.2429, 0.5177), vec3(0.0200, -0.4513, 0.2737), vec3(-0.4182, -0.2347, 0.5131),
   vec3(-0.0743, 0.6401, 0.5600));
 void main(){
-  float d = texture(uDepth, vUv).r;
+  // This pass runs at half resolution: its pixel centres fall exactly on full-res texel corners, where a
+  // nearest-filtered fetch picks either neighbour depending on rounding (row by row), so a "neighbour" could
+  // be the centre texel itself -> zero-length tangent -> garbage normal -> horizontal occlusion bands.
+  // Work on explicit full-res texels instead.
+  ivec2 dsz = textureSize(uDepth, 0), mx = dsz - 1;
+  ivec2 c = clamp(ivec2(vUv * vec2(dsz)), ivec2(1), mx - 1);
+  vec2 ts = 1.0 / vec2(dsz);
+  vec2 uv0 = (vec2(c) + 0.5) * ts;
+  float d = texelFetch(uDepth, c, 0).r;
   if (d >= 0.99999) { fragColor = vec4(1.0); return; }
-  vec3 P = viewPos(vUv, d);
+  vec3 P = viewPos(uv0, d);
   if (-P.z > uAOP.w) { fragColor = vec4(1.0); return; }
-  vec2 ts = 1.0 / vec2(textureSize(uDepth, 0));
-  vec3 pr = viewPos(vUv + vec2(ts.x, 0.0), texture(uDepth, vUv + vec2(ts.x, 0.0)).r);
-  vec3 pl = viewPos(vUv - vec2(ts.x, 0.0), texture(uDepth, vUv - vec2(ts.x, 0.0)).r);
-  vec3 pu = viewPos(vUv + vec2(0.0, ts.y), texture(uDepth, vUv + vec2(0.0, ts.y)).r);
-  vec3 pd = viewPos(vUv - vec2(0.0, ts.y), texture(uDepth, vUv - vec2(0.0, ts.y)).r);
+  vec3 pr = viewPos(uv0 + vec2(ts.x, 0.0), texelFetch(uDepth, c + ivec2(1, 0), 0).r);
+  vec3 pl = viewPos(uv0 - vec2(ts.x, 0.0), texelFetch(uDepth, c - ivec2(1, 0), 0).r);
+  vec3 pu = viewPos(uv0 + vec2(0.0, ts.y), texelFetch(uDepth, c + ivec2(0, 1), 0).r);
+  vec3 pd = viewPos(uv0 - vec2(0.0, ts.y), texelFetch(uDepth, c - ivec2(0, 1), 0).r);
   vec3 dx = abs(pr.z - P.z) < abs(P.z - pl.z) ? pr - P : P - pl;
   vec3 dy = abs(pu.z - P.z) < abs(P.z - pd.z) ? pu - P : P - pd;
   vec3 N = normalize(cross(dx, dy));
@@ -576,13 +644,16 @@ void main(){
   vec3 T = normalize(rv - N * dot(rv, N));
   mat3 TBN = mat3(T, cross(N, T), N);
   float R = uAOP.x, occ = 0.0;
+  // depth precision drops with distance (24-bit depth, reconstructed normals): a bias that grows with the
+  // view depth keeps flat distant ground from self-occluding in screen-space bands
+  float bias = uAOP.z - P.z * 0.0025;
   for (int i = 0; i < AO_SAMPLES; i++) {
     vec3 s = P + TBN * (KERNEL[i] * R);
     vec4 c = uProj * vec4(s, 1.0);
     vec2 suv = c.xy / c.w * 0.5 + 0.5;
     float sz = linZ(texture(uDepth, suv).r);
     float range = smoothstep(0.0, 1.0, R / max(abs(-P.z - sz), 1e-4));
-    occ += (sz < -s.z - uAOP.z ? 1.0 : 0.0) * range;
+    occ += (sz < -s.z - bias ? 1.0 : 0.0) * range;
   }
   float ao = pow(clamp(1.0 - occ / float(AO_SAMPLES), 0.0, 1.0), uAOP.y);
   ao = mix(ao, 1.0, smoothstep(uAOP.w * 0.7, uAOP.w, -P.z));
@@ -607,9 +678,10 @@ void main(){
 const FS_DOFPREP = `
 uniform sampler2D uSrc; uniform sampler2D uDepth;
 void main(){
-  vec3 c = texture(uSrc, vUv).rgb;
+  vec4 c = texture(uSrc, vUv);
   float d = texture(uDepth, vUv).r;
-  fragColor = vec4(c, tiltCoc(vUv, d));
+  float zw = waterZ(vUv, d, c.a);
+  fragColor = vec4(c.rgb, zw > 0.0 ? tiltCocZ(vUv, zw, 0.0) : tiltCoc(vUv, d));
 }`;
 
 const DISK24 =
@@ -677,7 +749,7 @@ uniform sampler2D uSrc; uniform sampler2D uDepth; uniform sampler2D uBloom; unif
 uniform vec4 uOn;      // x bloom, y dof, z ao, w rays
 uniform vec2 uBloomP;  // x intensity (already normalized by level weights)
 uniform vec3 uRaysCol;
-uniform vec3 uTint; uniform vec3 uLift; uniform vec3 uGamma; uniform vec3 uGain;
+uniform vec3 uTint; uniform vec3 uTintData; uniform vec3 uLift; uniform vec3 uGamma; uniform vec3 uGain;
 uniform vec4 uGradeP;  // x saturation, y contrast, z vignette, w chromatic aberration
 uniform vec4 uFx;      // x grain, y time, z lightning flash, w writes to canvas (grain here)
 uniform float uAoStr;
@@ -718,28 +790,38 @@ vec3 toSrgb(vec3 c){ return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.0
 void main(){
   vec2 uv = vUv;
   vec2 dc = uv - 0.5;
-  vec3 col;
+  vec4 c0 = texture(uSrc, uv);
+  vec3 col = c0.rgb;
   if (uGradeP.w > 0.0) {
     vec2 off = dc * dot(dc, dc) * uGradeP.w;
-    col = vec3(texture(uSrc, uv + off).r, texture(uSrc, uv).g, texture(uSrc, uv - off).b);
-  } else col = texture(uSrc, uv).rgb;
+    col.r = texture(uSrc, uv + off).r;
+    col.b = texture(uSrc, uv - off).b;
+  }
   float d = texture(uDepth, uv).r;
-  if (uOn.z > 0.5) {
-    float ao = uAoBilateral > 0.5 && d < 0.99999 ? aoUpsample(uv, linZ(d)) : texture(uAO, uv).r;
+  float zw = waterZ(uv, d, c0.a);
+  float sky = d >= 0.99999 && zw == 0.0 ? 1.0 : 0.0;
+  float z = zw > 0.0 ? zw : linZ(d);
+  float ovm = c0.a >= 0.4 ? clamp((1.0 - c0.a) * 4.0, 0.0, 1.0) : 0.0;   // data (overlay) pixel mark
+  // aerial perspective (same start as libFogAmount: just before the view target)
+  float fogK = sky > 0.5 ? 1.0 : 1.0 - exp(-max(z - uFocusZ.x * 0.8, 0.0) * uFog.w * 1.5);
+  if (uOn.z > 0.5 && zw == 0.0 && sky < 0.5) {   // no SSAO on the water surface (it was computed from the seabed)
+    float ao = uAoBilateral > 0.5 ? aoUpsample(uv, z) : texture(uAO, uv).r;
+    ao = mix(ao, 1.0, fogK);                    // fog hides contact shadows
     col *= mix(1.0, ao, uAoStr * (1.0 - smoothstep(0.8, 3.0, libLuma(col))));
   }
   if (uOn.y > 0.5) {
-    float cocPx = tiltCoc(uv, d) * uTilt.w * 2.0;
+    float cocPx = tiltCocZ(uv, z, sky) * uTilt.w * 2.0;
     col = mix(col, texture(uDof, uv).rgb, smoothstep(0.35, 1.6, cocPx));
   }
   col *= postExposure();
   if (uOn.x > 0.5) col += texture(uBloom, uv).rgb * uBloomP.x;
   if (uOn.w > 0.5) col += texture(uRays, uv).rgb * uRaysCol;
-  col *= uTint;
+  col *= mix(uTint, uTintData, ovm);
   // night vision: dark areas shift toward desaturated moonlit blue, bright lights keep their color
   float sl = libLuma(col);
-  col = mix(col, sl * vec3(0.62, 0.78, 1.18), uScotopic * (1.0 - smoothstep(0.06, 0.6, sl)));
-  col += vec3(0.5, 0.56, 0.75) * (uFx.z * 0.45);        // lightning flash
+  col = mix(col, sl * vec3(0.62, 0.78, 1.18), uScotopic * (1.0 - ovm) * (1.0 - smoothstep(0.06, 0.6, sl)));
+  // lightning: the geometry is lit in shade(); here only the sky and the rain haze flash
+  col += vec3(0.5, 0.56, 0.75) * (uFx.z * 0.35 * max(fogK, 0.12));
   col = toSrgb(tonemap(max(col, vec3(0.0)), uKeepHue));
   // lift / gamma / gain, contrast, saturation (display space)
   col = col * uGain + uLift * (1.0 - col);

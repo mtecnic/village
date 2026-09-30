@@ -2,7 +2,8 @@
  * VOXELPOLIS — Advisors ('advisors') and Milestones ('milestones') panels.
  * advisors: portrait cards for VC.ADVISORS with live advice (VC.advisors.advice) and unread badges;
  *   clicking a portrait filters the inbox. Inbox from VC.advisors.messages(): unread bold, severity
- *   colour, date, click to expand + markRead, "mark all read".
+ *   colour, date, click to expand + markRead, "mark all read". A nag repeated in place shows "×N"; a
+ *   message whose problem went away shows "✔ Resolved" (m.repeat / m.resolved from VC.advisors).
  * milestones: current rank badge + progress to the next population milestone, the full milestone
  *   ladder with rewards and everything each one unlocks (derived from catalog/roads/zoning/policy
  *   unlock values), and the achievements grid (VC.advisors.achievements()).
@@ -36,7 +37,7 @@ function markRead(m) {
 
 P.defs.advisors = {
   title: 'City Advisors',
-  icon: '🧑‍💼',
+  icon: '💼',
   width: 660,
   place: 'center',
   build(p) {
@@ -76,6 +77,8 @@ P.defs.advisors = {
     const msgEl = (m) => {
       const a = VC.ADVISORS[m.advisor] || { icon: m.icon || '📨', name: m.name || 'City Hall', role: m.role, color: m.color || '#5ad1ff' };
       const title = h('div', { class: 'pn-msg-title' });
+      const rep = U.pill('', 'muted');
+      const res = U.pill('✔ Resolved', 'good');
       const date = h('span', { class: 'pn-msg-date' });
       const text = h('div', { class: 'pn-msg-text' });
       // optional follow-ups carried by the message: open a panel, look at a spot, show an overlay
@@ -93,12 +96,16 @@ P.defs.advisors = {
         el.classList.toggle('open');
         markRead(el._m);
         upd(true);
-      } }, h('div', { class: 'pn-msg-por' }, a.icon), h('div', { class: 'pn-msg-body' }, h('div', { class: 'pn-msg-top' }, title, date), h('div', { class: 'pn-msg-from' }, a.name + (a.role ? ' · ' + a.role : '')), text, acts.children.length ? acts : null));
+      } }, h('div', { class: 'pn-msg-por' }, a.icon), h('div', { class: 'pn-msg-body' }, h('div', { class: 'pn-msg-top' }, title, rep, res, h('span', { class: 'pn-grow' }), date), h('div', { class: 'pn-msg-from' }, a.name + (a.role ? ' · ' + a.role : '')), text, acts.children.length ? acts : null));
       el.style.setProperty('--c', a.color || '#5ad1ff');
       el.set = (mm) => {
         el._m = mm;
         U.txt(title, (SEV[mm.severity] || '') + ' ' + (mm.title || 'Message'));
         U.txt(date, mm.day != null ? VC.fmt.fullDate(mm.day) : '');
+        rep.set(mm.repeat > 1 ? '×' + mm.repeat : '', 'muted');
+        U.show(rep, mm.repeat > 1);
+        U.attr(rep, 'data-tip', mm.repeat > 1 ? `Reported ${mm.repeat} times — the latest is shown` : null);
+        U.show(res, mm.resolved != null);
         U.txt(text, mm.text || '');
         U.cls(el, 'unread', !mm.read);
         U.cls(el, 'sev-' + (mm.severity || 'info'), true);
@@ -176,7 +183,7 @@ function unlocksFor(i) {
   out.sort((a, b) => a.unlock - b.unlock);
   return out;
 }
-const RANK_ICONS = ['🛖', '🏘️', '🏡', '🏙️', '🌆', '🌃', '🏙️', '🌐', '🚀', '🪐'];
+const RANK_ICONS = ['⛺', '🏘️', '🏡', '🏙️', '🌆', '🌃', '🏙️', '🌐', '🚀', '🪐'];
 
 function msLadder(c) {
   const MS = VC.MILESTONES;

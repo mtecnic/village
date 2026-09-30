@@ -180,7 +180,7 @@ function agg() {
 function popOverview(c) {
   const kRes = U.kpi('Residents', { icon: '👥' });
   const kJobs = U.kpi('Jobs', { icon: '💼', tip: 'Commercial + industrial jobs' });
-  const kWork = U.kpi('Workers', { icon: '👷', tip: 'Residents with a job' });
+  const kWork = U.kpi('Workers', { icon: '👷', tip: 'Residents of working age (the labour force)' });
   const kUn = U.kpi('Jobless', { icon: '📉', tip: 'Unemployment rate' });
   c.appendChild(h('div', { class: 'pn-kpis cols4' }, kRes, kJobs, kWork, kUn));
   const labor = h('div', { class: 'pn-banner' });
@@ -208,13 +208,15 @@ function popOverview(c) {
     kJobs.set(U.int(jobs), 'C ' + U.short(st.jobsC) + ' · I ' + U.short(st.jobsI));
     kWork.set(U.int(workers), pop > 0 ? U.pct(workers / pop) + ' of residents' : '—');
     const un = U.n01(st.unemployment);
+    // one source of truth for the KPI and the note: the sim's labour force (st.workers = working-age residents)
+    const avail = Math.max(0, workers || pop * 0.5);
+    const short = pop > 0 && jobs > avail * 1.15, idle = pop > 0 && jobs < avail * 0.85;
     if (!pop) kUn.set('—', 'no residents yet', '');
-    else kUn.set(U.pct(un, 1), un > 0.12 ? 'jobs needed!' : un < 0.03 ? 'labor shortage' : 'healthy', un > 0.12 ? 'bad' : un > 0.07 ? 'warn' : 'good');
-    const avail = Math.max(0, pop * 0.6);
+    else kUn.set(U.pct(un, 1), un > 0.12 ? 'jobs needed!' : short ? 'labor shortage' : 'healthy', un > 0.12 ? 'bad' : un > 0.07 ? 'warn' : 'good');
     let msg, tone;
     if (!pop) { msg = '🏗️ Zone residential areas to attract your first citizens.'; tone = 'info'; }
-    else if (jobs > avail * 1.15) { msg = `💼 ${U.int(jobs - avail)} more jobs than available workers — zone more housing.`; tone = 'warn'; }
-    else if (jobs < avail * 0.85) { msg = `🏭 About ${U.int(avail - jobs)} residents are looking for work — zone commercial or industry.`; tone = 'warn'; }
+    else if (short) { msg = `💼 ${U.int(jobs - avail)} more jobs than workers — zone more housing (commuters fill some of the gap).`; tone = 'warn'; }
+    else if (idle) { msg = `🏭 About ${U.int(avail - jobs)} residents are looking for work — zone commercial or industry.`; tone = 'warn'; }
     else { msg = '⚖️ Jobs and workers are well balanced.'; tone = 'good'; }
     U.txt(labor, msg);
     U.tone(labor, tone);

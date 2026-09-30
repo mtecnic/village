@@ -14,7 +14,17 @@
  *   buildRoad(tiles, type)             -> {ok, cost, reason, count}
  *   canZone / zone(x0,z0,x1,z1, code)  code 0 = dezone (removes growables, demolish fee); any other code must be
  *                                      a VC.ZONE_TOOLS code (undefined / junk is rejected, never a silent dezone)
- *   canPlace(key,x,z,rot)              -> {ok, reason, cost, w, d, flattenCost, level, warn}
+ *   canPlace(key,x,z,rot)              -> {ok, reason, cost, w, d, flattenCost, level, warn, good?, link?}
+ *                                      producers (power / water) carry link = gridLink(…) and either
+ *                                      good 'Connected to grid ✔' or a warn saying how to connect them
+ *   gridLink(x,z,w,d, skipId)          -> {power, water ('road'|'pline'|'building'|''), energized, piped}: what
+ *                                      conducts into a footprint (same rules as sim/sim_net.js)
+ *   gridReach(x,z,w,d, kind, skipId)   -> {tiles, zoned, zonedAcc, consumers, sources}: flood fill of the
+ *                                      power (kind 0) / water (1) network a footprint joins
+ *   zoneSupply(kind)                   -> {blocked, waiting, ex, examples:[tile index], byType:[_,R,C,I]}: empty zoned
+ *                                      lots without power (0) / water (1) the network cannot reach at all vs.
+ *                                      ones that will get it as their street-side neighbours are built
+ *   policyOn(key)                      policy active (numeric levels > 0; VC.econ.isPolicyOn when present)
  *   placeBuilding(key,x,z,rot)         -> {ok, reason, cost, b}
  *   canBulldoze / bulldoze(x0,z0,x1,z1, opts {buildings, roads, trees, plines, zones, ids})
  *                                      ids (array | Set of building ids): only those buildings are demolished
@@ -352,6 +362,200 @@ function bridgeCheck(S, tiles, status, markBad) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Utility links (same conduction rules as sim/sim_net.js)               */
+/* ------------------------------------------------------------------ */
+/** Policy on? (numeric policy levels: > 0; old saves / missing econ helper: truthy). */
+function policyOn(key) {
+  const E = VC.econ;
+  if (E && E.isPolicyOn) {
+    try { return !!E.isPolicyOn(key); } catch (e) { /* fall through */ }
+  }
+  const S = VC.state, v = S && S.policies ? S.policies[key] : 0;
+  return v === true || v > 0;
+}
+/**
+ * Conductor bits of tile i: 1 = carries power, 2 = carries water. Roads (any type, bridges too) carry both,
+ * power lines only power, building footprints (not rubble) both. Zoned-but-empty land carries nothing.
+ */
+function conductBits(S, i, skipId) {
+  let c = S.road[i] ? 3 : 0;
+  if (S.pline[i]) c |= 1;
+  const id = S.bld[i];
+  if (id && id !== skipId) {
+    const b = S.buildings.get(id);
+    if (b && !isRubble(b)) c = 3;
+  }
+  return c;
+}
+/**
+ * What touches a footprint's 4-neighbour ring (conduction is 4-neighbour): {power: 'road'|'pline'|'building'|'',
+ * water: 'road'|'building'|'', energized (a touching conductor is powered now), piped (… has water now)}.
+ * skipId: ignore this building (the one whose ring is tested).
+ */
+function gridLink(x, z, w, d, skipId) {
+  const S = VC.state;
+  const o = { power: '', water: '', energized: false, piped: false };
+  if (!S) return o;
+  const F = VC.F;
+  const test = (xx, zz) => {
+    if (xx < 0 || zz < 0 || xx >= S.W || zz >= S.H) return;
+    const i = zz * S.W + xx;
+    const c = conductBits(S, i, skipId);
+    if (!c) return;
+    const via = S.road[i] ? 'road' : S.bld[i] && S.bld[i] !== skipId ? 'building' : 'pline';
+    if (c & 1) {
+      if (!o.power || via === 'road') o.power = via;
+      if (S.flags[i] & F.POWER) o.energized = true;
+    }
+    if (c & 2) {
+      if (!o.water || via === 'road') o.water = via === 'pline' ? 'road' : via;
+      if (S.flags[i] & F.WATER) o.piped = true;
+    }
+  };
+  for (let xx = x; xx < x + w; xx++) { test(xx, z - 1); test(xx, z + d); }
+  for (let zz = z; zz < z + d; zz++) { test(x - 1, zz); test(x + w, zz); }
+  return o;
+}
+/* scratch for gridReach (reused: no per-call allocation of N-sized arrays) */
+let GR = { n: 0, mark: null, q: null, ep: 0 };
+/**
+ * Flood fill over conductors (kind 0 power, 1 water) starting at a footprint (its tiles and the conductors
+ * touching it) — the network a plant / pump there would feed. Returns {tiles, zoned (empty zoned tiles the
+ * network reaches: conductors energize the land right beside them), zonedAcc (… of them with road access),
+ * consumers (buildings on it that need the utility), sources (other producers on it)}. skipId: the building
+ * standing on the footprint (not counted). maxTiles caps the work (default: whole map).
+ */
+function gridReach(x, z, w, d, kind, skipId, maxTiles) {
+  const S = VC.state;
+  const out = { tiles: 0, zoned: 0, zonedAcc: 0, consumers: 0, sources: 0 };
+  if (!S) return out;
+  const N = S.N || S.W * S.H, SW = S.W, SH = S.H;
+  if (GR.n !== N) GR = { n: N, mark: new Uint32Array(N), q: new Int32Array(N), ep: 0 };
+  const mark = GR.mark, q = GR.q, bit = kind ? 2 : 1, ACC = VC.F.ACCESS;
+  if (++GR.ep >= 0xfffffff0) { mark.fill(0); GR.ep = 1; }
+  const ep = GR.ep;
+  const cap = maxTiles || N;
+  let qt = 0, qh = 0;
+  const seenB = new Set();
+  // the footprint itself (a planned or existing building conducts)
+  for (let zz = Math.max(0, z); zz < Math.min(SH, z + d); zz++)
+    for (let xx = Math.max(0, x); xx < Math.min(SW, x + w); xx++) {
+      const i = zz * SW + xx;
+      if (mark[i] !== ep) { mark[i] = ep; q[qt++] = i; }
+    }
+  const zoneSeen = (i) => {
+    if (mark[i] === ep) return;
+    mark[i] = ep; // counted once; zoned tiles never conduct, so they are never expanded
+    if (S.zone[i] && !S.bld[i]) {
+      out.zoned++;
+      if (S.flags[i] & ACC) out.zonedAcc++;
+    }
+  };
+  while (qh < qt && qh < cap) {
+    const i = q[qh++];
+    out.tiles++;
+    const id = S.bld[i];
+    if (id && id !== skipId && !seenB.has(id)) {
+      seenB.add(id);
+      const b = S.buildings.get(id);
+      const def = b && VC.BLD[b.key];
+      if (b && b.key === 'grow') out.consumers++;
+      else if (def) {
+        if (kind ? def.water > 0 : def.power > 0) out.sources++;
+        else if ((def.jobs || 0) > 0 || (def.housing || 0) > 0) out.consumers++;
+      }
+    }
+    const xx = i % SW;
+    const nb = (j) => {
+      if (mark[j] === ep) return;
+      if (conductBits(S, j, 0) & bit) { mark[j] = ep; q[qt++] = j; }
+      else if (S.height[j] >= C.SEA) zoneSeen(j);
+    };
+    if (xx > 0) nb(i - 1);
+    if (xx < SW - 1) nb(i + 1);
+    if (i >= SW) nb(i - SW);
+    if (i < N - SW) nb(i + SW);
+  }
+  return out;
+}
+
+/*
+ * Zone supply: empty zoned lots (with road access) lacking power (kind 0) or water (kind 1: medium / high
+ * density lots that already have power) are split into WAITING — a 4-connected run of zoned land links them to a
+ * lot that is supplied, and the sim energizes lots from the street inward as their neighbours get built — and
+ * BLOCKED: nothing zoned around them is supplied, the network does not reach that block at all (the real
+ * "why isn't it growing"). Cached until the network flags, the buildings or any tile change.
+ */
+let dirtyN = 0;
+const ZS = { key: '', n: 0, mark: null, q: null, out: [null, null] };
+function zoneSupply(kind) {
+  kind = kind ? 1 : 0;
+  const S = VC.state;
+  if (!S || !S.flags) return { blocked: 0, waiting: 0, ex: -1, examples: [], byType: [0, 0, 0, 0] };
+  const key = S.ver.flags + ':' + S.ver.bld + ':' + dirtyN + ':' + S.N;
+  if (ZS.key !== key) { ZS.key = key; ZS.out[0] = ZS.out[1] = null; }
+  if (ZS.out[kind]) return ZS.out[kind];
+  const N = S.N || S.W * S.H, SW = S.W;
+  if (ZS.n !== N) { ZS.n = N; ZS.mark = new Uint8Array(N); ZS.q = new Int32Array(N); }
+  const mark = ZS.mark, q = ZS.q, zone = S.zone, fl = S.flags, bld = S.bld;
+  const F = VC.F, BIT = kind ? F.WATER : F.POWER, ACC = F.ACCESS, POW = F.POWER;
+  mark.fill(0);
+  let qt = 0, qh = 0;
+  for (let i = 0; i < N; i++) if (zone[i] && (fl[i] & BIT)) { mark[i] = 1; q[qt++] = i; }
+  while (qh < qt) {
+    const i = q[qh++], x = i % SW;
+    if (x > 0 && !mark[i - 1] && zone[i - 1]) { mark[i - 1] = 1; q[qt++] = i - 1; }
+    if (x < SW - 1 && !mark[i + 1] && zone[i + 1]) { mark[i + 1] = 1; q[qt++] = i + 1; }
+    if (i >= SW && !mark[i - SW] && zone[i - SW]) { mark[i - SW] = 1; q[qt++] = i - SW; }
+    if (i < N - SW && !mark[i + SW] && zone[i + SW]) { mark[i + SW] = 1; q[qt++] = i + SW; }
+  }
+  const o = { blocked: 0, waiting: 0, ex: -1, examples: [], byType: [0, 0, 0, 0] };
+  for (let i = 0; i < N; i++) {
+    const c = zone[i];
+    if (!c || bld[i]) continue;
+    const f = fl[i];
+    if (!(f & ACC) || (f & BIT)) continue;
+    if (kind && ((c & 3) < 2 || !(f & POW))) continue; // water: only medium / high lots that already have power
+    if (mark[i]) { o.waiting++; continue; }
+    if (o.blocked % 9 === 0 && o.examples.length < 48) o.examples.push(i);
+    o.blocked++;
+    o.byType[c >> 2]++;
+  }
+  o.ex = o.examples.length ? o.examples[0] : -1;
+  ZS.out[kind] = o;
+  return o;
+}
+
+/**
+ * Placement feedback for producers (canPlace): res.link = gridLink(), res.good = 'Connected to grid ✔' when
+ * the output can flow, else res.warn explains how to connect it (a disconnected plant is legal, just useless).
+ */
+function utilityNote(S, def, res, link) {
+  res.link = link;
+  const noRoad = res.warn; // 'No road access' (staffed plants work at reduced output without a street)
+  if (def.power > 0) {
+    if (!link.power) { res.warn = 'Not connected — link it with roads or power lines'; return; }
+    res.good = 'Connected to grid ✔';
+  } else {
+    // water: pipes run under roads and through buildings (not power lines), and pumps need electricity
+    if (!link.water && !link.power) { res.warn = 'Not connected — link it with roads or power lines'; return; }
+    if (!link.water) { res.warn = 'No pipes here — water flows along roads: place it beside one'; return; }
+    const st = S.stats || {};
+    if (!link.energized && !(st.powerSupply > 0) && !anyPlant(S)) { res.warn = 'Connected ✔ — but it needs power to pump: build a power plant'; return; }
+    res.good = 'Connected to grid ✔';
+  }
+  if (noRoad) res.warn = noRoad + ' — works at reduced output';
+}
+/** Any power plant in the city (built or under construction)? */
+function anyPlant(S) {
+  for (const b of S.buildings.values()) {
+    const d = VC.BLD[b.key];
+    if (d && d.power > 0) return true;
+  }
+  return false;
+}
+
+/* ------------------------------------------------------------------ */
 /* Actions                                                               */
 /* ------------------------------------------------------------------ */
 const A = (VC.actions = {
@@ -359,14 +563,21 @@ const A = (VC.actions = {
   MAX_BRIDGE,
   DECK_LVL,
 
-  init() {},
+  init() {
+    VC.bus.on('dirty', () => { dirtyN++; });
+  },
   reset() {
     history.length = 0;
     J = null;
     groupDepth = 0;
+    ZS.key = '';
   },
 
   brushTiles,
+  gridLink,
+  gridReach,
+  zoneSupply,
+  policyOn,
 
   /* ================= ROADS ================= */
   /**
@@ -608,7 +819,7 @@ const A = (VC.actions = {
     res.cost = def.cost * m;
     // hard gates first (they explain the red ghost best)
     if (!W.isUnlocked(key)) { res.reason = lockReason(def.unlock); return res; }
-    if (def.requiresPolicy && !(S.policies && S.policies[def.requiresPolicy])) {
+    if (def.requiresPolicy && !policyOn(def.requiresPolicy)) {
       const pol = VC.POLICY[def.requiresPolicy];
       res.reason = 'Requires policy: ' + (pol ? pol.name : def.requiresPolicy);
       return res;
@@ -646,6 +857,7 @@ const A = (VC.actions = {
     res.cost += res.flattenCost;
     const needsRoad = VC.sim && VC.sim.needsRoadAccess ? VC.sim.needsRoadAccess(key) : true;
     if (needsRoad && !W.roadAdjacent(x, z, w, d)) res.warn = 'No road access';
+    if (def.power > 0 || def.water > 0) utilityNote(S, def, res, gridLink(x, z, w, d, 0));
     if (!affordable(res.cost)) { res.reason = 'Not enough money'; res.money = true; return res; }
     res.ok = true;
     return res;

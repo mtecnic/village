@@ -4,6 +4,9 @@
  *   residential buildings), building count, funding, overlay toggle and advice; crime/fire/emergency list.
  * utilities: power and water supply vs demand (VC.sim.powerInfo / waterInfo, fallback S.stats + catalog),
  *   producers grouped by type with share bars and focus buttons, garbage coverage, contextual tips.
+ *   Every producer is listed at what it ACTUALLY delivers: ones the sim reports nothing for show 0 with a tag
+ *   ("building…", "no power" for pumps / towers, "not connected" when nothing conducts into the footprint),
+ *   and the notes count zoned lots the grid does not reach (VC.sim.issues, sampled every 2 s).
  */
 const P = VC.panels, U = P.util, h = VC.h, M = VC.M;
 
@@ -120,8 +123,8 @@ P.defs.services = {
       kCrime.set(U.pct(crime), crime > 0.4 ? 'crime wave!' : crime > 0.2 ? 'elevated' : 'low', crime > 0.4 ? 'bad' : crime > 0.2 ? 'warn' : 'good');
       kFire.set(String(sc.fires.length), sc.fires.length ? 'burning now' : 'none', sc.fires.length ? 'bad' : 'good');
       const he = U.n01(st.health), ed = U.n01(st.education);
-      kHealth.set(U.pct(he), 'average', he < 0.4 ? 'bad' : he < 0.6 ? 'warn' : 'good');
-      kEdu.set(U.pct(ed), 'average', ed < 0.4 ? 'bad' : ed < 0.6 ? 'warn' : 'good');
+      kHealth.set(U.pct(he), 'city avg', he < 0.4 ? 'bad' : he < 0.6 ? 'warn' : 'good');
+      kEdu.set(U.pct(ed), 'city avg', ed < 0.4 ? 'bad' : ed < 0.6 ? 'warn' : 'good');
       for (const r of rows) {
         const s = svc(r.sv.key, sst, sc);
         r.meter.set(s.coverage);
@@ -153,7 +156,20 @@ P.defs.services = {
 /* ================================================================== */
 /* UTILITIES                                                            */
 /* ================================================================== */
-/** Normalized network info: {supply, demand, groups:[{key, def, list:[b], output}]} */
+/** Nothing that carries this utility touches the building's footprint (VC.actions.gridLink). */
+function isolated(b, kind) {
+  const A = VC.actions;
+  if (!A || !A.gridLink) return false;
+  const l = A.gridLink(b.x, b.z, b.w, b.d, b.id);
+  return kind === 'power' ? !l.power : !l.water;
+}
+/** "2 no power · 1 building…" for a producer group ('' when all run). */
+function tagText(g) {
+  const parts = [];
+  for (const t in g.tags) parts.push((g.list.length > 1 ? g.tags[t] + ' ' : '') + t);
+  return parts.join(' · ');
+}
+/** Normalized network info: {supply, demand, groups:[{key, def, list:[b], output, tags}]} */
 function netInfo(kind) {
   const S = VC.state;
   const info = U.api('sim', kind === 'power' ? 'powerInfo' : 'waterInfo', [], null) || {};
@@ -161,24 +177,34 @@ function netInfo(kind) {
   let supply = U.num(info.supply), demand = U.num(info.demand);
   if (!supply) supply = U.num(kind === 'power' ? S.stats.powerSupply : S.stats.waterSupply);
   if (!demand) demand = U.num(kind === 'power' ? S.stats.powerDemand : S.stats.waterDemand);
-  let items = kind === 'power' ? info.plants : info.sources;
-  if (!Array.isArray(items) || !items.length) {
-    // fallback: catalog producers at nominal output
-    items = [];
-    for (const b of S.buildings.values()) {
-      const d = VC.BLD[b.key];
-      const out = d && (kind === 'power' ? d.power : d.water);
-      if (out > 0) items.push({ b, output: b.built >= 1 ? out : 0 });
-    }
+  const live = kind === 'power' ? info.plants : info.sources;
+  const items = [];
+  const seen = new Set();
+  const simKnows = Array.isArray(live);
+  // (a plant nothing conducts into still "produces" for its own one-building network: say so)
+  if (simKnows) for (const it of live) if (it && it.b) { items.push(isolated(it.b, kind) ? { b: it.b, output: it.output, tag: 'not connected' } : it); seen.add(it.b.id); }
+  // every other producer: what it really delivers (0 when unbuilt / unpowered / cut off), with the reason
+  for (const b of S.buildings.values()) {
+    if (seen.has(b.id)) continue;
+    const d = VC.BLD[b.key];
+    const out = d && (kind === 'power' ? d.power : d.water);
+    if (!(out > 0)) continue;
+    let tag = '', output = 0;
+    if (b.built < 1) tag = 'building…';
+    else if (isolated(b, kind)) tag = 'not connected';
+    else if (kind === 'water' && b.powered === false) tag = 'no power';
+    else if (!simKnows) output = out; // no sim numbers at all: nominal output
+    items.push({ b, output, tag });
   }
   const unserved = kind === 'power' ? info.unpowered : info.unwatered;
   const groups = new Map();
   for (const it of items) {
     if (!it || !it.b) continue;
     let g = groups.get(it.b.key);
-    if (!g) groups.set(it.b.key, (g = { key: it.b.key, def: VC.BLD[it.b.key] || { name: it.b.key, icon: '🏭' }, list: [], output: 0 }));
+    if (!g) groups.set(it.b.key, (g = { key: it.b.key, def: VC.BLD[it.b.key] || { name: it.b.key, icon: '🏭' }, list: [], output: 0, tags: {} }));
     g.list.push(it.b);
     g.output += U.num(it.output);
+    if (it.tag) g.tags[it.tag] = (g.tags[it.tag] || 0) + 1;
   }
   const gl = [...groups.values()].sort((a, b) => b.output - a.output);
   return { supply, demand, groups: gl, unserved: typeof unserved === 'number' ? unserved : null, networks: U.num(info.networks), shortage: !!info.shortage };
@@ -197,6 +223,7 @@ function netSection(kind) {
   const row = () => {
     const ic = h('span', { class: 'pn-net-ric' });
     const nm = h('span', { class: 'pn-net-rname' });
+    const tag = U.pill('', 'bad');
     const out = h('span', { class: 'pn-net-rout' });
     const fill = h('i');
     const btn = VC.ui.button('', () => {
@@ -205,11 +232,14 @@ function netSection(kind) {
       const k = (cycle[g.key] = ((cycle[g.key] || 0) + 1) % g.list.length);
       U.focus(g.list[k]);
     }, { icon: '📍', cls: 'small', tip: 'Focus camera (click again for the next one)' });
-    const el = h('div', { class: 'pn-net-row' }, ic, h('div', { class: 'pn-net-rmid' }, h('div', { class: 'pn-net-rtop' }, nm, out), h('div', { class: 'pn-net-rbar' }, fill)), btn);
+    const el = h('div', { class: 'pn-net-row' }, ic, h('div', { class: 'pn-net-rmid' }, h('div', { class: 'pn-net-rtop' }, nm, tag, h('span', { class: 'pn-grow' }), out), h('div', { class: 'pn-net-rbar' }, fill)), btn);
     el.set = (g, total) => {
       el._g = g;
       U.txt(ic, g.def.icon || '🏭');
       U.txt(nm, g.def.name + (g.list.length > 1 ? ' ×' + g.list.length : ''));
+      const tt = tagText(g);
+      tag.set(tt, /building/.test(tt) && !/power|connected/.test(tt) ? 'muted' : 'bad');
+      U.show(tag, !!tt);
       U.txt(out, U.int(g.output) + unit);
       U.css(fill, 'width', (total > 0 ? (g.output / total) * 100 : 0).toFixed(1) + '%');
     };
@@ -221,8 +251,9 @@ function netSection(kind) {
     const diff = n.supply - n.demand;
     big.set(Math.min(1, use), U.int(n.demand) + ' / ' + U.int(n.supply) + unit, use > 1 ? '#ff5a6a' : use > 0.9 ? '#ffc83d' : isP ? '#ffd166' : '#4cc9f0');
     if (!n.supply && !n.demand) pill.set('Idle', 'muted');
+    else if (!n.supply) pill.set(isP ? 'No power plants' : 'No water supply', 'bad');
     else if (diff >= 0) pill.set('Surplus +' + U.int(diff) + unit, use > 0.9 ? 'warn' : 'good');
-    else pill.set('Shortage −' + U.int(-diff) + unit, 'bad');
+    else pill.set('Shortage −' + U.int(Math.max(1, -diff)) + unit, 'bad');
     U.cls(card, 'short', diff < 0);
     let tot = 0;
     for (const g of n.groups) tot += g.output;
@@ -250,8 +281,16 @@ P.defs.utilities = {
     const tips = h('div', { class: 'pn-tips' });
     p.body.appendChild(U.sec('Engineer’s notes', tips));
     const tipEl = (t) => h('div', { class: 'pn-tip' }, t.text);
+    let iss = null, issAt = -1e9;
     return () => {
       const a = pw.upd(), b = wt.upd();
+      // blocked zoned lots (one tile scan; sampled every 2 s, not at the panel's 4 Hz)
+      if (performance.now() - issAt > 2000) {
+        issAt = performance.now();
+        const zs = VC.actions && VC.actions.zoneSupply;
+        // lots the grid cannot reach at all (inner lots that get power once the street side is built don't count)
+        iss = zs ? { zonedNoPower: zs(0).blocked, zonedNoWater: zs(1).blocked } : U.api('sim', 'issues', [], null);
+      }
       const sc = scan();
       const sst = U.api('sim', 'serviceStats', [], null) || {};
       const g = svc('garbage', sst, sc);
@@ -267,6 +306,13 @@ P.defs.utilities = {
       const noP = a.n.unserved != null ? a.n.unserved : sc.noPower, noW = b.n.unserved != null ? b.n.unserved : sc.noWater;
       if (noP) T.push({ k: 'p3', text: `🔌 ${U.int(noP)} building${noP === 1 ? ' has' : 's have'} no electricity. ${a.diff < 0 ? 'Add generating capacity.' : 'Connect them to the grid with power lines.'}`, tone: 'warn' });
       if (noW) T.push({ k: 'w3', text: `🚱 ${U.int(noW)} building${noW === 1 ? ' lacks' : 's lack'} water service. ${b.diff < 0 ? 'Add pumping capacity.' : 'Water flows along roads from pumps and towers.'}`, tone: 'warn' });
+      if (iss && iss.zonedNoPower >= 3 && a.diff >= 0) T.push({ k: 'p5', text: `🔌 ${U.int(iss.zonedNoPower)} zoned lots aren't reached by the grid, so nothing grows there. Power flows along roads, power lines and buildings — not through empty zones.`, tone: 'warn' });
+      if (iss && iss.zonedNoWater >= 3 && b.diff >= 0) T.push({ k: 'w5', text: `🚱 ${U.int(iss.zonedNoWater)} medium / high density lots have no water yet — run a road from a powered pump or tower.`, tone: 'warn' });
+      for (const g of a.n.groups.concat(b.n.groups)) {
+        if (!g.tags['not connected']) continue;
+        T.push({ k: 'iso' + g.key, text: `🧩 ${g.def.icon || ''} ${g.def.name}${g.tags['not connected'] > 1 ? ' ×' + g.tags['not connected'] : ''} isn't connected: nothing touching it carries ${g.def.power ? 'power (roads, power lines, buildings)' : 'water (roads, buildings)'}.`, tone: 'bad' });
+      }
+      if (b.n.groups.some((g) => g.tags['no power'])) T.push({ k: 'w6', text: '🚰 Some pumps / towers have no electricity and pump nothing. Connect them to the powered grid.', tone: 'bad' });
       if (a.n.networks > 1) T.push({ k: 'p4', text: `🧩 Your power grid is split into ${a.n.networks} separate networks. Link them so surplus power can flow where it is needed.`, tone: 'info' });
       if (sc.resPop && g.coverage < 0.5) T.push({ k: 'g1', text: '🗑️ Garbage is piling up — build a landfill or incinerator near your neighbourhoods.', tone: 'warn' });
       if (a.n.groups.some((x) => x.key === 'coal_plant')) T.push({ k: 'c1', text: '🏭 Coal plants pollute heavily. Switch to cleaner energy once it unlocks.', tone: 'info' });

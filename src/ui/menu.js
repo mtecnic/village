@@ -11,6 +11,7 @@
  *   TRANSITIONS   fade(fn, text): full-screen fade with a spinning voxel cube while fn() runs.
  *   KEYBOARD      while the title screen or pause menu is up, game hotkeys are blocked (capture phase);
  *                 Esc closes the top window, then backs out of sub-panels / resumes.
+ *   CONTINUE      loadGame(slot) resumes the tutorial of a city that was saved mid-tutorial (VC.hud.resumeTutorial).
  * API: active, show(), hide(), pause(), resume(), isPaused(), startGame(opts), loadGame(slot), fade(fn, text),
  *      saves() -> Promise<[normalised save info]>, resumeSpeed() -> speed the game resumes at while the pause
  *      menu is open (null otherwise; a save taken from the pause menu should store this, not 0)
@@ -128,7 +129,14 @@ function saveInfo(s) {
     auto: !!(s.auto || s.autosave || /auto/i.test(String(slot))),
     milestone: s.milestone,
     demo: !!s.demo,
+    cityId: s.cityId || null,
   };
+}
+/** Distinct cities among the saves (a city's autosave and its manual saves count once). */
+function cityCount(list) {
+  const ids = new Set();
+  for (const x of list) ids.add(x.cityId ? 'c:' + x.cityId : 's:' + x.slot);
+  return ids.size;
 }
 function saves() {
   let r;
@@ -183,7 +191,8 @@ function renderButtons(list) {
     add(menuBtn('▶️', 'Continue', sub, () => loadGame(latest.slot), 'primary'), i++);
   }
   add(menuBtn('🏗️', 'New City', 'Found a brand-new metropolis', () => menu.newCity && menu.newCity(), latest ? '' : 'primary'), i++);
-  add(menuBtn('📂', 'Load City', list && list.length ? `${list.length} saved ${list.length === 1 ? 'city' : 'cities'}` : 'Open a saved city or file', openLoad), i++);
+  const nc = list && list.length ? cityCount(list) : 0;
+  add(menuBtn('📂', 'Load City', nc ? `${nc} saved ${nc === 1 ? 'city' : 'cities'}` + (list.length > nc ? ` · ${list.length} saves` : '') : 'Open a saved city or file', openLoad), i++);
   add(menuBtn('⚙️', 'Settings', 'Graphics, audio, controls', () => VC.hud.openSettings('graphics')), i++);
   add(menuBtn('❓', 'How to Play', 'Controls and a quick guide', () => VC.hud.openHelp('guide')), i++);
   add(menuBtn('🎬', 'Credits', 'The people (and cubes) behind it', openCredits), i++);
@@ -347,6 +356,9 @@ function loadGame(slot) {
     try { r = VC.save && VC.save.load ? VC.save.load(slot) : false; } catch (e) { console.error('[menu] load', e); r = false; }
     // success = a real (non-demo) state is now running, whatever load() returned
     Promise.resolve(r).catch(() => false).then(() => {
+      // a city saved mid-tutorial picks the tutorial up again (hud_tutorial also listens to bus 'loaded';
+      // resumeTutorial is a no-op when it already runs, finished, or the player turned it off)
+      if (VC.state && !VC.state.demo && VC.hud.resumeTutorial) setTimeout(() => VC.hud.resumeTutorial(), 1000);
       if (!VC.state || VC.state.demo) {
         // stay on (or return to) the title screen
         menu.active = true;

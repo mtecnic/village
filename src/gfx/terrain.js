@@ -5,19 +5,32 @@
  * data in a chunk (+3 tile margin) actually changed; nearest-first per-frame time budget; frustum culled
  * per pass — the shadow pass culls against the light matrix found in the Frame UBO):
  *   - tile tops at level * STEP (seabed for water tiles), road ramps as sloped tops
- *   - cliff sides toward lower neighbours; map edges get skirts down to SKIRT_Y (the diorama slab)
- *     standing on a wooden plinth ring
+ *   - cliff sides toward lower neighbours; map edges get skirts. EDGE LOOK follows VC.water.ocean:
+ *     ocean (default) = the map is an island in open sea: skirts stop a little below the sea surface and
+ *     there is no plinth; diorama (ocean = false) = skirts down to SKIRT_Y standing on a wooden plinth ring
  *   - roads: raised sidewalks + kerbs (street/avenue), green median (straight avenues), jersey
- *     barriers (highway), bridges on water tiles (deck at DECK_Y, fascia, railings, piers)
+ *     barriers (highway), bridges on water tiles (closed deck at DECK_Y so it casts shadows, fascia,
+ *     railings, piers)
  * SURFACES are procedural in the fragment shader on a world-space 1/8 voxel grid: grass/meadow/sand/
  * dirt/rock/snow, strata on sides, road markings, crosswalks, storm drains, zone lots, lot bases under
- * buildings, seasons (autumn tint, snow), rain (darkening, puddles with ripples), shoreline wash,
- * underwater caustics, night lamp pools, build grid, hover glow and a smooth (bilinear) data overlay.
+ * buildings, seasons (patchy autumn, off-white sparkling snow), rain (darkening, puddles with ripples),
+ * shoreline wash, underwater caustics, night lamp pools, build grid, hover glow and a smooth (bilinear)
+ * data overlay.
  *
- * DRAW GROUPS + VARIANTS: each chunk VBO holds four face groups — 0 land tops, 1 road surfaces (road,
+ * DATA OVERLAY: shown at full strength only where it matters — on developed tiles (road / building / zoned)
+ * with a soft ~3 tile falloff (CPU relevance texture, see overlayInfo()); elsewhere the ground is only
+ * desaturated with a faint tint. 'bad' maps also show wherever their value is high (plumes over the
+ * countryside); happiness treats 0 as "no data"; traffic is drawn on roads only. Overlay colours get an
+ * emissive floor at night so they stay readable. The water renderer shares the same code (OVERLAY_GLSL).
+ *
+ * DRAW GROUPS + VARIANTS: each chunk mesh holds four face groups — 0 land tops, 1 road surfaces (road,
  * sidewalk, kerb, median), 2 structures (barriers, rails, fascia, piers, plinth), 3 cliff sides + seabed —
  * each drawn with a shader specialised for it (#define GROUP). Overlay / snow / rain code is compiled only
- * while active (#define F_OVERLAY / F_SNOW / F_WET); variants compile lazily (see warmup()).
+ * while active (#define F_OVERLAY / F_SNOW / F_WET); variants compile lazily, and the likely ones are
+ * pre-compiled one per frame in idle time (see warmup()).
+ * ARENA: all chunk meshes live in ONE vertex buffer + VAO (sub-allocated slots with slack, compacted when
+ * it grows), so a pass is one multi-draw per group (WEBGL_multi_draw; plain draws without rebinding
+ * otherwise) instead of a VAO bind + draw per chunk and group. The shadow pass is ONE depth-only multi-draw.
  *
  * VERTEX FORMAT (12 bytes):
  *   loc 0 aP  int16 x4  x, y, z, w in 1/64 world units (float attrib). w = top-edge Y of side faces
@@ -36,9 +49,14 @@
  * Night light pools sit at sidewalk mid-points of non-connected edges on tiles with (x + z) even —
  * see lampSpots(x, z) (props should put their street lamps there).
  *
- * API (VC.terrain): SKIRT_Y, DECK_Y, CURB, markDirty(x0,z0,x1,z1), rebuildAll(), warmup(all), stats,
- *   roadY(wx, wz) road surface height (ramps/bridge decks) or null, surfaceY(wx, wz) walkable top,
+ * Night light pools are centred under the lamp HEAD, LAMP_REACH toward the road from the pole.
+ *
+ * API (VC.terrain): SKIRT_Y, DECK_Y, CURB, LAMP_REACH, markDirty(x0,z0,x1,z1), rebuildAll(), warmup(all),
+ *   stats, roadY(wx, wz) road surface height (ramps/bridge decks) or null, surfaceY(wx, wz) walkable top,
  *   roadInfo(x, z) -> {type, mask, inter, bridge, ramp:{dir, up}|null, y}, lampSpots(x, z) -> [{x, z, dir}]
+ *   (pole positions), OVERLAY_GLSL + overlayInfo() -> {tex, cfg} (shared overlay code for other layers:
+ *   bind tex to the sampler uOvRel, cfg to the vec4 uOvCfg), restore() (re-creates every GL object after a
+ *   WebGL context restore, then rebuilds).
  */
 const C = VC.C, M = VC.M;
 const STEP = C.STEP, SEA = C.SEA, CH = C.CHUNK;
@@ -53,6 +71,8 @@ const BAR_W = 3 / 64, BAR_H = 5 / 64; // highway jersey barrier
 const RAIL_H = 6 / 64, POST = 1.5 / 64; // bridge railing
 const MED_HW = 2 / 64; // half width of the raised avenue median
 const PLINTH = 0.4; // plinth ring width
+const OCEAN_SKIRT = C.SEA_Y - 1.2; // skirt bottom in ocean mode (hidden under the opaque sea)
+const LAMP_REACH = 0.22; // street-lamp head overhang toward the road (nature_props lamp: head 0.22 from the pole)
 const DX = [1, -1, 0, 0], DZ = [0, 0, 1, -1], OPP = [1, 0, 3, 2];
 const K = { TOP: 0, ROAD: 1, SIDE: 2, WALK: 3, CURB: 4, MEDIAN: 5, BARRIER: 6, RAIL: 7, DECKSIDE: 8, PILLAR: 9, PLINTH: 10, SEABED: 11 };
 const POP = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4]; // popcount of a 4-bit mask
@@ -60,49 +80,63 @@ const POP = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4]; // popcount of a 4
 const T = (VC.terrain = {
   name: 'terrain',
   order: 0,
-  SKIRT_Y, DECK_Y, CURB,
+  SKIRT_Y, DECK_Y, CURB, LAMP_REACH,
   chunks: [],
   cw: 0, ch: 0,
   full: true,
-  stats: { chunks: 0, quads: 0, drawn: 0, rebuilt: 0, skipped: 0, lastMs: 0, fullMs: 0, maxChunkMs: 0 },
+  stats: { chunks: 0, quads: 0, drawn: 0, draws: 0, rebuilt: 0, skipped: 0, lastMs: 0, fullMs: 0, maxChunkMs: 0, arenaQuads: 0, arenaUsed: 0, grows: 0, variants: 0 },
   budgetMs: 4, // incremental rebuild budget per frame
 
   init() {
     T.variants = new Map();
-    T.progs = [0, 1, 2, 3].map((g) => program(g, 0));
-    // bilinear sampling from one mip level for the noise texture (half the texel reads of trilinear)
-    const gl = VC.gfx.gl;
-    T.sampler = gl.createSampler();
-    gl.samplerParameteri(T.sampler, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
-    gl.samplerParameteri(T.sampler, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.samplerParameteri(T.sampler, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.samplerParameteri(T.sampler, gl.TEXTURE_WRAP_T, gl.REPEAT);
-    T.progShadow = VC.gfx.program('terrain_shadow', VS_SHADOW, FS_SHADOW);
+    initGL();
     VC.gfx.addLayer(T);
-    VC.bus.on('dirty', (d) => T.markDirty(d.x0, d.z0, d.x1, d.z1));
+    VC.bus.on('dirty', (d) => { T.markDirty(d.x0, d.z0, d.x1, d.z1); OV.dirty = true; });
+    for (const ev of ['flagsUpdated', 'mapsUpdated', 'overlay', 'newGame']) VC.bus.on(ev, () => (OV.dirty = true));
   },
 
   reset(S) {
-    const gl = VC.gfx.gl;
-    for (const c of T.chunks) if (c.vao) { gl.deleteVertexArray(c.vao); gl.deleteBuffer(c.vbo); }
     T.chunks = [];
     T.dirty = [];
     T.cw = Math.ceil(S.W / CH);
     T.ch = Math.ceil(S.H / CH);
+    arenaClear();
+    arenaReserve(Math.ceil(S.W * S.H * 1.9)); // typical terrain: ~1.5 quads per tile + slot slack
     for (let cz = 0; cz < T.ch; cz++)
       for (let cx = 0; cx < T.cw; cx++) {
-        const c = { cx, cz, x0: cx * CH, z0: cz * CH, x1: Math.min(S.W, cx * CH + CH), z1: Math.min(S.H, cz * CH + CH), dirty: false, vao: null, vbo: null, quads: 0, q: [0, 0, 0, 0], hash: -1, minY: 0, maxY: 1, dist: 0 };
+        const c = { cx, cz, x0: cx * CH, z0: cz * CH, x1: Math.min(S.W, cx * CH + CH), z1: Math.min(S.H, cz * CH + CH), dirty: false, base: -1, cap: 0, quads: 0, q: [0, 0, 0, 0], hash: -1, minY: 0, maxY: 1, dist: 0 };
         T.chunks.push(c);
         setDirty(c);
       }
     T.full = true;
     T.stats.chunks = T.chunks.length;
     T.stats.quads = 0;
+    T._ocean = oceanMode();
     buildPlinth(S);
+    OV.dirty = true;
+  },
+
+  /** Re-creates every GL object after a WebGL context restore (programs, sampler, arena, textures), then rebuilds. */
+  restore() {
+    T.variants = new Map();
+    T._feat = -1;
+    A.vbo = A.vao = null;
+    OV.tex = null;
+    OV.dirty = true;
+    initGL();
+    if (VC.state && T.chunks.length) T.reset(VC.state);
   },
 
   update() {
-    // meshing happens lazily at draw time (after VC.world.flush), so edits show up the same frame
+    // meshing happens lazily at draw time (after VC.world.flush), so edits show up the same frame.
+    // Idle-time shader warmup: compile ONE likely variant per frame (after the first few seconds), so the
+    // first rain / snow / overlay toggle never stalls on a synchronous compile.
+    const G = VC.gfx;
+    if (T._warmIdx < WARM.length * NG && G.frameCount > 120 && G.frameCount % 6 === 0 && VC.state) {
+      const i = T._warmIdx++;
+      program(i % NG, WARM[(i / NG) | 0]);
+      T.stats.variants = T.variants.size;
+    }
   },
 
   /** Marks chunks overlapping the inclusive tile rect (+ margin for road/ramp context) for rebuild. */
@@ -128,7 +162,18 @@ const T = (VC.terrain = {
   warmup(all) {
     const sets = all ? [0, 1, 2, 3, 4, 5, 6, 7] : [0, F_OVERLAY, F_SNOW, F_WET, F_SNOW | F_WET];
     for (const f of sets) for (let g = 0; g < NG; g++) program(g, f);
+    if (T.progShadow) T.stats.variants = T.variants.size;
     return T.variants.size;
+  },
+  /**
+   * Shared overlay state for other layers (water): {tex (R8 relevance, LINEAR, tile res), cfg Float32Array(4)}
+   * — updated lazily; null while no overlay is shown.
+   */
+  overlayInfo() {
+    const S = VC.state;
+    if (!S || !VC.gfx.overlay || VC.gfx.overlay === 'none') return null;
+    updateOverlay(S);
+    return OV;
   },
   /** Debug/benchmark: rebuilds one chunk synchronously. */
   _build(c) {
@@ -143,6 +188,7 @@ const T = (VC.terrain = {
     draw(ctx, true);
   },
   opaque(ctx) {
+    checkOcean();
     process();
     draw(ctx, false);
   },
@@ -196,6 +242,7 @@ const T = (VC.terrain = {
       if (m === 3 || m === 12) out.push({ x: x + 0.5, z: z + 0.5, dir: m === 3 ? 0 : 2 });
       return out;
     }
+    // (the light pool itself sits LAMP_REACH toward the road, under the lamp head)
     const h = SW[rt] * 0.5;
     if (!(m & 1)) out.push({ x: x + 1 - h, z: z + 0.5, dir: 0 });
     if (!(m & 2)) out.push({ x: x + h, z: z + 0.5, dir: 1 });
@@ -211,6 +258,7 @@ const T = (VC.terrain = {
  * shaders. Variants compile lazily on first use and are cached.
  */
 const F_OVERLAY = 1, F_SNOW = 2, F_WET = 4;
+const WARM = [F_OVERLAY, F_WET, F_SNOW, F_SNOW | F_WET, F_OVERLAY | F_WET, F_OVERLAY | F_SNOW, 7]; // idle warmup order
 function program(g, f) {
   const key = g * 8 + f;
   let p = T.variants.get(key);
@@ -220,8 +268,42 @@ function program(g, f) {
   if (f & F_SNOW) defs += '#define F_SNOW 1\n';
   if (f & F_WET) defs += '#define F_WET 1\n';
   p = VC.gfx.program('terrain_g' + g + '_f' + f, VS, FS, { defines: defs });
+  if (p.u.uOvRel) {
+    const gl = VC.gfx.gl;
+    gl.useProgram(p.prog);
+    gl.uniform1i(p.u.uOvRel, OV_UNIT);
+  }
   T.variants.set(key, p);
   return p;
+}
+/** (Re)creates the GL objects owned by the terrain: base programs, noise sampler, depth program, arena. */
+function initGL() {
+  const G = VC.gfx, gl = G.gl;
+  T.progs = [0, 1, 2, 3].map((g) => program(g, 0));
+  T._feat = 0;
+  T._warmIdx = 0;
+  // bilinear sampling from one mip level for the noise texture (half the texel reads of trilinear)
+  T.sampler = gl.createSampler();
+  gl.samplerParameteri(T.sampler, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+  gl.samplerParameteri(T.sampler, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.samplerParameteri(T.sampler, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.samplerParameteri(T.sampler, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  // shadow casters: position only, empty fragment shader (the shadow map has more pixels than the screen)
+  T.progShadow = G.depthProgram ? G.depthProgram('terrain_shadow', VS_SHADOW) : G.program('terrain_shadow', VS_SHADOW, 'void main(){}');
+  arenaInit(gl);
+}
+/** Edge look follows the water renderer: open ocean (default) or the diorama with walls + plinth. */
+function oceanMode() {
+  return !(VC.water && VC.water.ocean === false);
+}
+/** Rebuilds the map-edge chunks + plinth when the edge look changes at runtime. */
+function checkOcean() {
+  const o = oceanMode();
+  if (o === T._ocean || !VC.state) return;
+  T._ocean = o;
+  const S = VC.state;
+  for (const c of T.chunks) if (c.x0 === 0 || c.z0 === 0 || c.x1 === S.W || c.z1 === S.H) { c.hash = -1; setDirty(c); }
+  buildPlinth(S);
 }
 function features(env) {
   let f = 0;
@@ -229,6 +311,85 @@ function features(env) {
   if (env && env.snow > 0.004) f |= F_SNOW;
   if (env && env.wet > 0.01) f |= F_WET;
   return f;
+}
+
+/* ------------------------------------------------------------------ */
+/* Data overlay relevance (CPU -> R8 texture, shared with the water)    */
+/* ------------------------------------------------------------------ */
+const OV_UNIT = 4; // texture unit of uOvRel (units 0-4 are free per layer)
+const OV = { tex: null, w: 0, h: 0, dirty: true, key: '', cfg: new Float32Array(4), dist: null, bytes: null };
+/**
+ * Per overlay [mode, floor, reveal]. mode 0 = weighted by relevance (developed tiles + ~3 tile falloff),
+ * 1 = a value of 0 means "no data" (masked average; transparent where there is none), 2 = roads only.
+ * floor = strength away from development; reveal = a 'bad' map also shows wherever it exceeds this.
+ * Overlay defs may override with def.nodata0 / def.roadsOnly / def.ovFloor.
+ */
+const OV_BY_RAMP = { good: [0, 0.12, 0], bad: [0, 0.12, 0.07], value: [0, 0.22, 0], net: [0, 1, 0] };
+const OV_BY_KEY = { happiness: [1, 0, 0], traffic: [2, 0, 0] };
+function overlayCfg(key) {
+  const def = VC.OVERLAYS.find((o) => o.key === key) || {};
+  const base = OV_BY_KEY[key] || OV_BY_RAMP[def.ramp] || OV_BY_RAMP.good;
+  const mode = def.roadsOnly ? 2 : def.nodata0 ? 1 : base[0];
+  return [mode, def.ovFloor != null ? def.ovFloor : base[1], base[2]];
+}
+/** Rebuilds the relevance texture when the overlay, the map or the tile flags changed (overlay on only). */
+function updateOverlay(S) {
+  const gl = VC.gfx.gl, key = VC.gfx.overlay;
+  if (!OV.tex || OV.w !== S.W || OV.h !== S.H) {
+    if (OV.tex) gl.deleteTexture(OV.tex);
+    OV.w = S.W;
+    OV.h = S.H;
+    OV.tex = VC.gfx.texture({ w: S.W, h: S.H, internal: gl.R8, format: gl.RED, filter: gl.LINEAR });
+    OV.dist = new Float32Array(S.W * S.H);
+    OV.bytes = new Uint8Array(S.W * S.H);
+    OV.dirty = true;
+  }
+  if (key !== OV.key) {
+    OV.key = key;
+    const c = overlayCfg(key);
+    OV.cfg[0] = c[0]; OV.cfg[1] = c[1]; OV.cfg[2] = c[2]; OV.cfg[3] = 0;
+    OV.dirty = true;
+  }
+  if (!OV.dirty) return;
+  OV.dirty = false;
+  // two-pass chamfer distance (tiles, capped) to the nearest road / building / zoned tile
+  const Wd = S.W, Hd = S.H, N = Wd * Hd, d = OV.dist, rd = S.road, bd = S.bld, zn = S.zone, D2 = 1.4142;
+  for (let i = 0; i < N; i++) d[i] = rd[i] || bd[i] || zn[i] ? 0 : 9;
+  for (let z = 0; z < Hd; z++)
+    for (let x = 0, i = z * Wd; x < Wd; x++, i++) {
+      let v = d[i];
+      if (!v) continue;
+      if (x > 0 && d[i - 1] + 1 < v) v = d[i - 1] + 1;
+      if (z > 0) {
+        const j = i - Wd;
+        if (d[j] + 1 < v) v = d[j] + 1;
+        if (x > 0 && d[j - 1] + D2 < v) v = d[j - 1] + D2;
+        if (x < Wd - 1 && d[j + 1] + D2 < v) v = d[j + 1] + D2;
+      }
+      d[i] = v;
+    }
+  for (let z = Hd - 1; z >= 0; z--)
+    for (let x = Wd - 1, i = z * Wd + x; x >= 0; x--, i--) {
+      let v = d[i];
+      if (!v) continue;
+      if (x < Wd - 1 && d[i + 1] + 1 < v) v = d[i + 1] + 1;
+      if (z < Hd - 1) {
+        const j = i + Wd;
+        if (d[j] + 1 < v) v = d[j] + 1;
+        if (x < Wd - 1 && d[j + 1] + D2 < v) v = d[j + 1] + D2;
+        if (x > 0 && d[j - 1] + D2 < v) v = d[j - 1] + D2;
+      }
+      d[i] = v;
+    }
+  // relevance: 1 up to one tile from development, smooth falloff to 0 at four tiles
+  const out = OV.bytes;
+  for (let i = 0; i < N; i++) {
+    const t = M.clamp((4 - d[i]) / 3, 0, 1);
+    out[i] = Math.round(t * t * (3 - 2 * t) * 255);
+  }
+  gl.bindTexture(gl.TEXTURE_2D, OV.tex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, Wd, Hd, gl.RED, gl.UNSIGNED_BYTE, out);
 }
 
 function setDirty(c) {
@@ -337,9 +498,10 @@ function cRC(x, z) {
   const i = x - cx0, j = z - cz0;
   return i < 0 || j < 0 || i >= CM || j >= CM ? rampOf(x, z) : cacheRC[j * CM + i];
 }
-/** Top height of tile (x, z) at its local corner (u, v); SKIRT_Y off the map. */
+let SKB = SKIRT_Y; // skirt bottom of the chunk being built (OCEAN_SKIRT in ocean mode)
+/** Top height of tile (x, z) at its local corner (u, v); the skirt bottom off the map. */
 function cornerY(x, z, u, v) {
-  if (x < 0 || z < 0 || x >= W || z >= H) return SKIRT_Y;
+  if (x < 0 || z < 0 || x >= W || z >= H) return SKB;
   const i = z * W + x, lv = S.height[i];
   return rampY(lv, S.road[i] && lv >= SEA ? cRC(x, z) : 0, u, v);
 }
@@ -480,7 +642,8 @@ function nbInter(x, z, fm) {
 function sideFace(x, z, d, tA, tB, bA, bB) {
   if (tA <= bA + 1e-4 && tB <= bB + 1e-4) return;
   const b0 = Math.min(bA, tA), b1 = Math.min(bB, tB);
-  aD = bA <= SKIRT_Y + 1e-3 ? 255 : M.clamp(Math.round(Math.min(b0, b1) / STEP), 0, 254);
+  const nx = x + DX[d], nz = z + DZ[d], skirt = nx < 0 || nz < 0 || nx >= W || nz >= H;
+  aD = skirt ? 255 : M.clamp(Math.round(Math.min(b0, b1) / STEP), 0, 254);
   if (d === 0) sideX(x + 1, z, z + 1, b0, b1, tA, tB, true);
   else if (d === 1) sideX(x, z, z + 1, b0, b1, tA, tB, false);
   else if (d === 2) sideZ(z + 1, x, x + 1, b0, b1, tA, tB, true);
@@ -530,6 +693,12 @@ function roadExtras(x, z, rt, fm, nbi, bridge, lv, rc, terr) {
     if (!(fm & 2)) sideX(x, z, z + 1, yb, yb, DECK_Y, DECK_Y, false);
     if (!(fm & 4)) sideZ(z + 1, x, x + 1, yb, yb, DECK_Y, DECK_Y, true);
     if (!(fm & 8)) sideZ(z, x, x + 1, yb, yb, DECK_Y, DECK_Y, false);
+    // underside: closes the deck, so it is the back-face caster of the (front-culled) shadow pass
+    ensure(1);
+    V(x, yb, z, DECK_Y, 3);
+    V(x + 1, yb, z, DECK_Y, 3);
+    V(x + 1, yb, z + 1, DECK_Y, 3);
+    V(x, yb, z + 1, DECK_Y, 3);
     piers(x, z, fm, lv);
   }
   if (rt === 3) {
@@ -625,11 +794,11 @@ function chunkHash(c) {
 }
 
 function buildChunk(c) {
-  const gl = VC.gfx.gl;
   c.dirty = false;
   const hsh = chunkHash(c);
-  if (c.vao && hsh === c.hash) { T.stats.skipped++; return false; }
+  if (c.base >= 0 && hsh === c.hash) { T.stats.skipped++; return false; }
   c.hash = hsh;
+  SKB = T._ocean ? OCEAN_SKIRT : SKIRT_Y;
   prepCache(c.x0, c.z0);
   resetGroups();
   let minY = 1e9, maxY = -1e9;
@@ -642,29 +811,12 @@ function buildChunk(c) {
       const top = S.road[i] && lv < SEA ? DECK_Y : y;
       if (top > maxY) maxY = top;
     }
-  if (c.x0 === 0 || c.z0 === 0 || c.x1 === W || c.z1 === H) minY = SKIRT_Y;
+  if (c.x0 === 0 || c.z0 === 0 || c.x1 === W || c.z1 === H) minY = Math.min(minY, SKB);
   c.minY = minY - 0.05;
   c.maxY = maxY + 0.3;
   const bytes = packGroups(c.q);
-  const quads = bytes / 48;
-  const ib = VC.gfx.quadIndexBuffer(quads); // (unbinds VAOs) — call before binding ours
-  if (!c.vao) {
-    c.vao = gl.createVertexArray();
-    c.vbo = gl.createBuffer();
-    gl.bindVertexArray(c.vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 4, gl.SHORT, false, 12, 0);
-    gl.enableVertexAttribArray(1);
-    gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 12, 8);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
-  } else {
-    gl.bindVertexArray(c.vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
-  }
-  gl.bufferData(gl.ARRAY_BUFFER, UP.subarray(0, bytes), gl.STATIC_DRAW);
-  gl.bindVertexArray(null);
+  const quads = bytes / QB;
+  arenaUpload(c, quads, bytes);
   T.stats.quads += quads - c.quads;
   c.quads = quads;
   T.stats.rebuilt++;
@@ -704,10 +856,127 @@ function process() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Diorama plinth (wooden base ring around the slab)                   */
+/* Vertex arena: every chunk mesh lives in ONE vertex buffer + VAO      */
+/* ------------------------------------------------------------------ */
+// A chunk owns the slot [base, base + cap) (in quads) with some slack, so most edits rewrite in place.
+// Freed slots are reused first-fit (merged with free neighbours); when the arena is full it grows and is
+// compacted on the GPU (one copyBufferSubData per live slot). Draws index the shared quad index buffer at
+// the slot offset, so no base-vertex support is needed.
+const QB = 48; // bytes per quad (4 vertices x 12 bytes)
+const A = { vbo: null, vao: null, cap: 0, top: 0, free: [], md: null, slots: [] };
+function arenaInit(gl) {
+  A.md = gl.getExtension('WEBGL_multi_draw');
+  A.vao = gl.createVertexArray();
+  A.vbo = gl.createBuffer();
+  A.cap = 1 << 15;
+  gl.bindBuffer(gl.ARRAY_BUFFER, A.vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, A.cap * QB, gl.STATIC_DRAW);
+  arenaBind(gl);
+  arenaClear();
+}
+/** Points the arena VAO at the current vertex buffer + the shared quad index buffer (sized to the arena). */
+function arenaBind(gl) {
+  const ib = VC.gfx.quadIndexBuffer(A.cap); // (unbinds VAOs) — call before binding ours
+  gl.bindVertexArray(A.vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, A.vbo);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 4, gl.SHORT, false, 12, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 12, 8);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  gl.bindVertexArray(null);
+}
+function arenaClear() {
+  A.top = 0;
+  A.free.length = 0;
+  A.slots.length = 0;
+  if (T.plinth) { T.plinth.base = -1; T.plinth.cap = 0; T.plinth.quads = 0; }
+}
+/** Makes the (empty) arena hold at least `quads` quads without growing during the first full build. */
+function arenaReserve(quads) {
+  if (A.cap >= quads || A.top) return;
+  const gl = VC.gfx.gl;
+  A.cap = quads;
+  gl.bindBuffer(gl.ARRAY_BUFFER, A.vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, A.cap * QB, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  arenaBind(gl);
+}
+/** Returns slot [base, cap) to the free list (sorted, merged; trims the top). */
+function arenaFree(base, cap) {
+  const f = A.free;
+  let i = 0;
+  while (i < f.length && f[i] < base) i += 2;
+  f.splice(i, 0, base, cap);
+  if (i + 2 < f.length && f[i] + f[i + 1] === f[i + 2]) { f[i + 1] += f[i + 3]; f.splice(i + 2, 2); }
+  if (i > 0 && f[i - 2] + f[i - 1] === f[i]) { f[i - 1] += f[i + 1]; f.splice(i, 2); i -= 2; }
+  if (f[i] + f[i + 1] === A.top) { A.top = f[i]; f.splice(i, 2); }
+}
+/** Grows the arena to hold `extra` more quads, compacting live slots into the new buffer. */
+function arenaGrow(gl, extra) {
+  let used = 0;
+  for (const s of A.slots) used += s.cap;
+  const cap = Math.max(A.cap, Math.ceil((used + extra) * 1.4) + 4096);
+  const nb = gl.createBuffer();
+  gl.bindBuffer(gl.COPY_WRITE_BUFFER, nb);
+  gl.bufferData(gl.COPY_WRITE_BUFFER, cap * QB, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.COPY_READ_BUFFER, A.vbo);
+  let top = 0;
+  for (const s of A.slots) {
+    if (s.quads) gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER, s.base * QB, top * QB, s.quads * QB);
+    s.base = top;
+    top += s.cap;
+  }
+  gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+  gl.bindBuffer(gl.COPY_WRITE_BUFFER, null);
+  gl.deleteBuffer(A.vbo);
+  A.vbo = nb;
+  A.cap = cap;
+  A.top = top;
+  A.free.length = 0;
+  arenaBind(gl);
+  T.stats.grows++;
+}
+/** Stores `quads` quads (UP[0..bytes)) for slot owner s ({base, cap, quads}), moving it if it outgrew its slot. */
+function arenaUpload(s, quads, bytes) {
+  const gl = VC.gfx.gl;
+  if (s.base < 0 || s.cap < quads) {
+    if (s.base >= 0) {
+      arenaFree(s.base, s.cap);
+      A.slots.splice(A.slots.indexOf(s), 1);
+    }
+    s.base = -1;
+    const need = quads + (quads >> 3) + 32; // slack for small edits
+    const f = A.free;
+    for (let i = 0; i < f.length; i += 2)
+      if (f[i + 1] >= need) {
+        s.base = f[i];
+        if (f[i + 1] - need < 64) { s.cap = f[i + 1]; f.splice(i, 2); }
+        else { s.cap = need; f[i] += need; f[i + 1] -= need; }
+        break;
+      }
+    if (s.base < 0) {
+      if (A.top + need > A.cap) arenaGrow(gl, need);
+      s.base = A.top;
+      s.cap = need;
+      A.top += need;
+    }
+    A.slots.push(s);
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, A.vbo);
+  if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, s.base * QB, UP, 0, bytes);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  T.stats.arenaQuads = A.cap;
+  T.stats.arenaUsed = A.top;
+}
+
+/* ------------------------------------------------------------------ */
+/* Diorama plinth (wooden base ring around the slab; diorama mode only) */
 /* ------------------------------------------------------------------ */
 function buildPlinth(st) {
-  const gl = VC.gfx.gl;
+  if (!T.plinth) T.plinth = { base: -1, cap: 0, quads: 0, q: [0, 0, 0, 0] };
+  const P = T.plinth;
+  if (T._ocean) { P.quads = 0; P.q[2] = 0; return; } // hidden under the sea: not built, not drawn
   const w = st.W, h = st.H, p = PLINTH, yb = SKIRT_Y - 0.32, th = 0.44;
   resetGroups();
   aB = 0; aC = 0; aD = 0;
@@ -716,22 +985,10 @@ function buildPlinth(st) {
   ring(-p, h, w + p, h + p, 1 | 2 | 4);
   ring(-p, 0, 0, h, 2);
   ring(w, 0, w + p, h, 1);
-  if (!T.plinth) {
-    T.plinth = { vao: gl.createVertexArray(), vbo: gl.createBuffer(), quads: 0 };
-  }
-  const bytes = packGroups([0, 0, 0, 0]);
-  const quads = bytes / 48;
-  const ib = VC.gfx.quadIndexBuffer(quads);
-  gl.bindVertexArray(T.plinth.vao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, T.plinth.vbo);
-  gl.bufferData(gl.ARRAY_BUFFER, UP.slice(0, bytes), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 4, gl.SHORT, false, 12, 0);
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 12, 8);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
-  gl.bindVertexArray(null);
-  T.plinth.quads = quads;
+  const bytes = packGroups(P.q); // all faces are group 2
+  const quads = bytes / QB;
+  arenaUpload(P, quads, bytes);
+  P.quads = quads;
 }
 
 /* ------------------------------------------------------------------ */
@@ -757,25 +1014,48 @@ function boxVisible(x0, y0, z0, x1, y1, z1) {
   return true;
 }
 
+// multi-draw lists: counts (indices) + byte offsets into the shared quad index buffer
+let mdCount = new Int32Array(512), mdOff = new Int32Array(512), mdN = 0;
+function mdPush(firstQuad, quads) {
+  if (mdN === mdCount.length) {
+    const c = new Int32Array(mdN * 2), o = new Int32Array(mdN * 2);
+    c.set(mdCount); o.set(mdOff);
+    mdCount = c; mdOff = o;
+  }
+  mdCount[mdN] = quads * 6;
+  mdOff[mdN] = firstQuad * 24;
+  mdN++;
+}
+function mdFlush(gl) {
+  if (!mdN) return;
+  if (A.md) A.md.multiDrawElementsWEBGL(gl.TRIANGLES, mdCount, 0, gl.UNSIGNED_INT, mdOff, 0, mdN);
+  else for (let i = 0; i < mdN; i++) gl.drawElements(gl.TRIANGLES, mdCount[i], gl.UNSIGNED_INT, mdOff[i]);
+  T.stats.draws += A.md ? 1 : mdN;
+  mdN = 0;
+}
+
 function draw(ctx, shadow) {
   const gl = ctx.gl;
-  if (!T.chunks.length) return;
+  if (!T.chunks.length || !A.vao) return;
+  if (T._statF !== VC.gfx.frameCount) { T._statF = VC.gfx.frameCount; T.stats.draws = 0; }
   // uViewProj of the current pass (the light's matrix during the shadow pass) lives in frameData[0..15]
   extractPlanes(VC.gfx.frameData);
   visible.length = 0;
   const cp = ctx.cam.pos;
   for (const c of T.chunks) {
-    if (!c.quads || !c.vao) continue;
+    if (!c.quads || c.base < 0) continue;
     if (!boxVisible(c.x0, c.minY, c.z0, c.x1, c.maxY, c.z1)) continue;
     c.dist = (c.x0 + CH * 0.5 - cp[0]) ** 2 + (c.z0 + CH * 0.5 - cp[2]) ** 2;
     visible.push(c);
   }
+  const pl = T.plinth && T.plinth.quads && T.plinth.base >= 0 && !T._ocean ? T.plinth : null;
+  gl.bindVertexArray(A.vao);
   if (shadow) {
+    // one depth-only multi-draw for every visible chunk (all groups are contiguous in a slot)
     T.progShadow.use();
-    for (const c of visible) {
-      gl.bindVertexArray(c.vao);
-      gl.drawElements(gl.TRIANGLES, c.quads * 6, gl.UNSIGNED_INT, 0);
-    }
+    for (const c of visible) mdPush(c.base, c.quads);
+    if (pl) mdPush(pl.base, pl.quads);
+    mdFlush(gl);
     gl.bindVertexArray(null);
     return;
   }
@@ -787,21 +1067,26 @@ function draw(ctx, shadow) {
     T._feat = f;
     T.progs = [0, 1, 2, 3].map((g) => program(g, f));
   }
+  const ov = f & F_OVERLAY ? T.overlayInfo() : null;
+  if (ov) {
+    gl.activeTexture(gl.TEXTURE0 + OV_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, ov.tex);
+    gl.activeTexture(gl.TEXTURE0);
+  }
   gl.bindSampler(VC.gfx.UNIT.NOISE, T.sampler);
   for (let g = 0; g < NG; g++) {
-    T.progs[g].use();
+    const P = T.progs[g];
+    P.use();
+    if (ov && P.u.uOvCfg) gl.uniform4fv(P.u.uOvCfg, ov.cfg);
     for (const c of visible) {
       const n = c.q[g];
       if (!n || (g === 2 && c.dist > far2)) continue;
-      let q0 = 0;
+      let q0 = c.base;
       for (let k = 0; k < g; k++) q0 += c.q[k];
-      gl.bindVertexArray(c.vao);
-      gl.drawElements(gl.TRIANGLES, n * 6, gl.UNSIGNED_INT, q0 * 24);
+      mdPush(q0, n);
     }
-    if (g === 2 && T.plinth && T.plinth.quads) {
-      gl.bindVertexArray(T.plinth.vao);
-      gl.drawElements(gl.TRIANGLES, T.plinth.quads * 6, gl.UNSIGNED_INT, 0);
-    }
+    if (g === 2 && pl) mdPush(pl.base, pl.quads);
+    mdFlush(gl);
   }
   gl.bindSampler(VC.gfx.UNIT.NOISE, null);
   T.stats.drawn = visible.length;
@@ -825,13 +1110,67 @@ const VS_SHADOW = `
 layout(location=0) in vec4 aP;
 void main(){ gl_Position = uViewProj * vec4(aP.xyz * (1.0 / 64.0), 1.0); }`;
 
-const FS_SHADOW = `
-out vec4 fragColor;
-void main(){ fragColor = vec4(1.0); }`;
+/**
+ * Shared data-overlay GLSL (terrain F_OVERLAY variants + the water). Needs uOvRel bound to unit OV_UNIT
+ * and uOvCfg = overlayInfo().cfg. Fragment shaders only.
+ */
+const OVERLAY_GLSL = `
+uniform sampler2D uOvRel;   // relevance: 1 on / next to developed tiles, soft falloff (LINEAR, tile res)
+uniform vec4 uOvCfg;        // x mode (0 weighted, 1 zero = no data, 2 roads only), y floor, z reveal threshold
+/** Overlay at world xz: x = value 0..1, y = strength 0..1 (0 = nothing to show here). */
+vec2 ovSample(vec2 xz){
+  vec2 q = clamp(xz, vec2(0.0), uMap.xy - 0.001);
+  if (uHover.w > 2.5) { float g = texelFetch(uTileTex, ivec2(q), 0).g; return vec2(g, g > 0.0 ? 1.0 : 0.0); }
+  // smooth (smoothstep-weighted bilinear) value between tile centres
+  vec2 p = q - 0.5, i0 = floor(p), f = p - i0;
+  f = f * f * (3.0 - 2.0 * f);
+  ivec2 mx = ivec2(uMap.xy) - 1, a = clamp(ivec2(i0), ivec2(0), mx), b = clamp(ivec2(i0) + 1, ivec2(0), mx);
+  vec4 t00 = texelFetch(uTileTex, a, 0), t10 = texelFetch(uTileTex, ivec2(b.x, a.y), 0);
+  vec4 t01 = texelFetch(uTileTex, ivec2(a.x, b.y), 0), t11 = texelFetch(uTileTex, b, 0);
+  vec4 g = vec4(t00.g, t10.g, t01.g, t11.g);
+  vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+  if (uOvCfg.x < 0.5) {
+    float v = dot(w, g);
+    float rel = texture(uOvRel, q / uMap.xy).r;
+    if (uOvCfg.z > 0.0) rel = max(rel, smoothstep(uOvCfg.z, uOvCfg.z * 2.5, v));   // plumes over open land
+    return vec2(v, mix(uOvCfg.y, 1.0, rel));
+  }
+  // masked average: only texels that carry data (value > 0, or road tiles) take part
+  vec4 m;
+  if (uOvCfg.x < 1.5) m = step(0.5 / 255.0, g);
+  else m = vec4((uvec4(vec4(t00.b, t10.b, t01.b, t11.b) * 255.0 + 0.5) >> 2u) & 1u);
+  float cov = dot(w, m);
+  float v = cov > 1e-4 ? dot(w * m, g) / cov : 0.0;
+  if (uOvCfg.x < 1.5) return vec2(v, smoothstep(0.05, 0.5, cov));
+  uint ob = uint(texelFetch(uTileTex, ivec2(q), 0).b * 255.0 + 0.5);
+  return vec2(v, float((ob >> 2u) & 1u));
+}
+/** Overlay mode base look: the scene goes mostly grey so the data colours read (keeps light & shadow). */
+vec3 ovBase(vec3 c){
+  return mix(c, vec3(dot(c, vec3(0.3, 0.55, 0.15))), 0.7 * uMap.w / 0.75);
+}
+/** Blends the overlay colour at world xz into c (n: surface normal for the light level; strength 0..1). */
+vec3 ovTint(vec3 c, vec2 xz, vec3 n, float strength){
+  vec2 o = ovSample(xz);
+  float a = clamp(uMap.w * strength * o.y * 1.15, 0.0, 1.0);
+  if (a <= 0.001) return c;
+  float kindR = uHover.w;
+  vec3 oc = srgb2lin(overlayRamp(o.x, kindR));
+  // follow the scene exposure by day; an emissive floor keeps it readable at night
+  vec3 amb = mix(uGroundAmb.rgb, uSkyAmb.rgb, 0.5 + 0.5 * n.y);
+  float lum = dot(amb + uSunColor.rgb * max(dot(n, uSunDir.xyz), 0.0) * uSunDir.w * 0.75, vec3(0.3, 0.55, 0.15));
+  float line = kindR > 2.5 ? 0.0 : 1.0 - smoothstep(0.0, 0.06, 0.5 - abs(fract(o.x * 10.0) - 0.5));
+  vec3 ocol = oc * (max(lum, 0.55) * 0.8 + NIGHT * 0.65) * (1.0 - line * 0.3);
+  return mix(c, ocol, a);
+}
+`;
 
 const FS = `
 in vec3 vWp; in float vTop; flat in uvec4 vI;
 out vec4 fragColor;
+#ifdef F_OVERLAY
+${OVERLAY_GLSL}
+#endif
 
 const vec3 NRM[10] = vec3[10](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1),
   vec3(-0.2425,0.9701,0.0), vec3(0.2425,0.9701,0.0), vec3(0.0,0.9701,-0.2425), vec3(0.0,0.9701,0.2425));
@@ -858,7 +1197,12 @@ float bnd(float x, float a, float b, float w){ return smoothstep(a - w, a + w, x
 float seasonF(){ return mod(uMisc.y, 4.0); }
 vec3 seasonGrass(){
   float s = seasonF();
-  vec3 sp = vec3(0.42, 0.66, 0.26), su = vec3(0.36, 0.58, 0.22), au = vec3(0.54, 0.55, 0.25), wi = vec3(0.5, 0.5, 0.35);
+  vec3 sp = vec3(0.40, 0.60, 0.26), su = vec3(0.34, 0.52, 0.22), wi = vec3(0.5, 0.5, 0.35);
+  // autumn is patchy, not one flat mustard: broad meadow noise keeps about half the ground a late-summer
+  // green-brown, the rest turns straw with a few russet swathes (the trees carry the season's colour)
+  float pa = smoothstep(0.38, 0.62, gN1.a);
+  vec3 au = mix(vec3(0.37, 0.48, 0.21), vec3(0.5, 0.47, 0.23), pa);
+  au = mix(au, vec3(0.53, 0.38, 0.2), smoothstep(0.62, 0.8, gN1.b) * pa * 0.7);
   return s < 1.0 ? mix(sp, su, s) : s < 2.0 ? mix(su, au, s - 1.0) : s < 3.0 ? mix(au, wi, s - 2.0) : mix(wi, sp, s - 3.0);
 }
 float autumnAmt(){ float s = seasonF(); return smoothstep(1.3, 2.0, s) * (1.0 - smoothstep(2.7, 3.2, s)); }
@@ -894,7 +1238,8 @@ vec3 rockCol(float fade){
   r *= 1.0 - (1.0 - smoothstep(0.0, 0.03, abs(gN1.g - 0.5))) * 0.45 * fade; // cracks
   return mix(r, vec3(0.46, 0.53, 0.33), smoothstep(0.6, 0.72, gN1.a) * 0.45); // lichen
 }
-vec3 snowCol(float fade){ return vec3(0.9, 0.93, 0.98) * (0.93 + 0.07 * gN1.b) * (0.96 + 0.06 * gH1 * fade); }
+// off-white (not paper white): keeps winter scenes from washing out; wind-drift ripples + per-voxel grain
+vec3 snowCol(float fade){ return vec3(0.8, 0.84, 0.9) * (0.92 + 0.08 * gN1.b) * (0.96 + 0.06 * gH1 * fade); }
 float sparkle(vec2 cell, vec3 V, float fade){ return step(0.992, hash13(vec3(cell, floor(dot(V, vec3(23.0, 17.0, 29.0)))))) * fade; }
 vec3 terrainTop(uint terr, vec2 cell, float fade){
   if (terr == 1u) return sandCol(cell, fade);
@@ -932,8 +1277,12 @@ vec3 seabed(uint terr, vec2 cell, float depth, float fade){
   s = mix(s, vec3(0.2, 0.38, 0.2), smoothstep(0.55, 0.75, gN1.b) * 0.7 * step(0.3, gH2)); // weed beds
   return s * mix(0.95, 0.55, smoothstep(0.1, 1.2, depth)) * vec3(0.84, 0.97, 0.92);
 }
-/** Stratified soil / rock on vertical faces: bands every 2 voxels, darker toward the slab bottom. */
-vec3 sideCol(vec3 wp, float topY, uint terr, uint road, vec2 cell, float fade){
+/**
+ * Stratified soil / rock on vertical faces: bands every 2 voxels, darker toward the slab bottom.
+ * stepH = height of the whole face: one-level terrace risers are wrapped in the top material entirely
+ * (a dark soil band on every 0.25 step reads as black scratches all over flat maps).
+ */
+vec3 sideCol(vec3 wp, float topY, float stepH, uint terr, uint road, vec2 cell, float fade){
   float below = topY - wp.y;
   float band = floor(wp.y * 4.0 + 0.001);
   float bh = hash11(band * 0.618 + 3.1);
@@ -944,7 +1293,7 @@ vec3 sideCol(vec3 wp, float topY, uint terr, uint road, vec2 cell, float fade){
   vec3 col = mix(soil, stone, rocky);
   if (terr == 1u) col = mix(col, vec3(0.8, 0.71, 0.5), smoothstep(0.75, 0.1, below) * (1.0 - rocky));
   float soilTop = (terr == 0u || terr == 5u || terr == 2u) ? 1.0 : 0.0;
-  col = mix(col, vec3(0.34, 0.24, 0.16), smoothstep(0.42, 0.18, below) * (1.0 - rocky) * soilTop);
+  col = mix(col, vec3(0.42, 0.31, 0.2), smoothstep(0.42, 0.18, below) * (1.0 - rocky) * soilTop);
   col *= 1.0 + (gH0 - 0.5) * 0.16 * fade;
   col = mix(col, stone * 1.08, step(0.955, gH1) * fade * (1.0 - rocky));
   col *= 1.0 - 0.13 * (1.0 - smoothstep(0.0, 0.14, fract(wp.y * 4.0))) * fade;
@@ -952,9 +1301,8 @@ vec3 sideCol(vec3 wp, float topY, uint terr, uint road, vec2 cell, float fade){
   if (road > 0u) {
     if (below < 0.07) col = vec3(0.21, 0.215, 0.23);
     else if (below < 0.16) col = vec3(0.5, 0.48, 0.45) * (0.9 + 0.2 * gH0);
-  } else if (below < 0.125 * (1.0 + step(0.62, ih(vec2(cell.x, 5.0)))) + SNOW * 0.07) { // top material wraps the edge
-    col = terr == 0u || terr == 5u ? seasonGrass() * (0.9 + 0.2 * gH2 * fade) : terrainTop(terr, cell, fade);
-    if (SNOW > 0.2 && terr != 1u) col = mix(col, snowCol(fade), smoothstep(0.2, 0.6, SNOW));
+  } else if (below < (stepH < 0.3 && topY > SEA_Y ? 0.3 : 0.125 * (1.0 + step(0.62, ih(vec2(cell.x, 5.0)))) + SNOW * 0.07)) { // top material wraps the edge
+    col = terr == 0u || terr == 5u ? seasonGrass() * (0.9 + 0.2 * gH2 * fade) : terrainTop(terr, cell, fade);    if (SNOW > 0.2 && terr != 1u) col = mix(col, snowCol(fade), smoothstep(0.2, 0.6, SNOW));
   }
   return col;
 }
@@ -998,7 +1346,8 @@ float lampPool(vec2 uv, uint mask, uint road, vec2 tile){
     vec2 d = (uv - 0.5) * (mask == 3u ? vec2(0.7, 1.4) : vec2(1.4, 0.7));
     return exp(-dot(d, d) * 9.0);
   }
-  float h = (road == 1u ? SW_ST : SW_AV) * 0.5, p = 0.0;
+  // centred under the lamp head, which overhangs the road by LAMP_REACH from the pole on the sidewalk
+  float h = (road == 1u ? SW_ST : SW_AV) * 0.5 + ${LAMP_REACH.toFixed(3)}, p = 0.0;
   vec2 d;
   if ((mask & 1u) == 0u) { d = uv - vec2(1.0 - h, 0.5); p += exp(-dot(d, d) * 14.0); }
   if ((mask & 2u) == 0u) { d = uv - vec2(h, 0.5); p += exp(-dot(d, d) * 14.0); }
@@ -1101,9 +1450,13 @@ void main(){
     alb = seabed(terr, cell, SEA_Y - wp.y, fade);
     ao = topAO(uv, vI.w);
   } else { // ---------------- cliffs, seabed steps, diorama skirt
-    alb = sideCol(wp, vTop, terr, road, cell, fade);
     float by = vI.w == 255u ? ${SKIRT_Y.toFixed(1)} : float(vI.w) * 0.25;
-    ao = mix(0.55, 1.0, smoothstep(0.0, 0.32, wp.y - by));
+    float stepH = vTop - by;
+    alb = sideCol(wp, vTop, stepH, terr, road, cell, fade);
+    ao = mix(stepH < 0.3 ? 0.72 : 0.55, 1.0, smoothstep(0.0, 0.32, wp.y - by));
+    // one-level turf risers are lit like a steep grassy bank (bevelled normal), not a sheer wall: in the
+    // sun's shadow a vertical 0.25 face only sees the weak side ambient and reads as a black scratch
+    if (stepH < 0.3 && vTop > SEA_Y && road == 0u && terr != 3u) n = normalize(n + vec3(0.0, 0.85, 0.0));
     if (under) alb *= vec3(0.8, 0.93, 0.88) * mix(0.9, 0.6, smoothstep(0.0, 1.2, SEA_Y - wp.y));
   }
 #elif GROUP == 1
@@ -1264,7 +1617,11 @@ void main(){
 #if GROUP == 1
   if (pool > 0.0) c += albL * vec3(1.0, 0.72, 0.42) * pool * NIGHT * (kind == 3u ? 1.4 : 2.0);
 #endif
-  if (snowAmt > 0.2) c += uSunColor.rgb * uSunDir.w * sparkle(cellT, V, fade) * snowAmt * 2.5;
+  if (snowAmt > 0.2) {
+    // glinting ice crystals: only where the sun actually reaches (specular() reuses shade()'s shadow term)
+    float sp = sparkle(cellT, V, fade);
+    if (sp > 0.0) c += specular(n, wp, 3.0, 4.0) * (sp * snowAmt);
+  }
 #if GROUP == 2
   if (metal > 0.0) c += specular(n, wp, 60.0, 0.8 * metal);
 #endif
@@ -1287,32 +1644,18 @@ void main(){
   c += emis;
 
 #if GROUP <= 1 && defined(F_OVERLAY)
-  // ---------------- data overlay: smooth heatmap between tile centres ----------------
+  // ---------------- data overlay: smooth heatmap where it matters (see OVERLAY_GLSL) ----------------
   if (uMap.w > 0.0 && ovA > 0.0) {
-    float kindR = uHover.w, v;
-    bool show = true;
-    if (kindR > 2.5) { v = td.g; show = v > 0.0; }
-    else {
-      vec2 p = wp.xz - 0.5, i0 = floor(p), f = p - i0;
-      f = f * f * (3.0 - 2.0 * f);
-      vec2 lo = clamp(i0, vec2(0.0), uMap.xy - 1.0), hi = clamp(i0 + 1.0, vec2(0.0), uMap.xy - 1.0);
-      float v00 = texelFetch(uTileTex, ivec2(lo), 0).g, v10 = texelFetch(uTileTex, ivec2(hi.x, lo.y), 0).g;
-      float v01 = texelFetch(uTileTex, ivec2(lo.x, hi.y), 0).g, v11 = texelFetch(uTileTex, ivec2(hi), 0).g;
-      v = mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
-    }
-    if (show) {
-      vec3 oc = srgb2lin(overlayRamp(v, kindR));
-      // follow scene exposure by day, stay readable at night
-      vec3 amb = mix(uGroundAmb.rgb, uSkyAmb.rgb, 0.5 + 0.5 * n.y);
-      float lum = dot(amb + uSunColor.rgb * max(dot(n, uSunDir.xyz), 0.0) * uSunDir.w * 0.75, vec3(0.3, 0.55, 0.15));
-      float line = kindR > 2.5 ? 0.0 : 1.0 - smoothstep(0.0, 0.06, 0.5 - abs(fract(v * 10.0) - 0.5));
-      vec3 ocol = oc * max(lum, 0.55) * 0.8 * (1.0 - line * 0.3);
-      float base = dot(c, vec3(0.3, 0.55, 0.15)); // keep light & shadow, drop colour noise
-      c = mix(mix(c, vec3(base), 0.7 * uMap.w / 0.75), ocol, uMap.w * ovA * 1.15);
-    }
+#if GROUP == 1
+    if (uOvCfg.x > 1.5 && kind == 1u) ovA = 1.0; // roads-only overlays (traffic) own the road surface
+#endif
+    c = ovTint(ovBase(c), wp.xz, n, ovA);
   }
 #endif
 
   c = applyFog(c, wp);
   fragColor = vec4(c, 1.0);
 }`;
+
+T.OVERLAY_GLSL = OVERLAY_GLSL;
+T.OV_UNIT = OV_UNIT;

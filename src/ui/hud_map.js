@@ -56,7 +56,7 @@ function mix(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) *
 function rampLin(v, kind) {
   if (kind === 0) return mix(mix([0.9, 0.15, 0.1], [1.0, 0.85, 0.1], sm(0, 0.5, v)), [0.15, 0.9, 0.35], sm(0.5, 1, v));
   if (kind === 1) return v < 0.02 ? [0.2, 0.7, 0.35] : mix(mix([1.0, 0.9, 0.2], [1.0, 0.35, 0.1], sm(0, 0.5, v)), [0.6, 0.05, 0.4], sm(0.5, 1, v));
-  if (kind === 2) return mix(mix([0.1, 0.1, 0.45], [0.1, 0.75, 0.9], sm(0, 0.5, v)), [1.0, 0.8, 0.2], sm(0.5, 1, v));
+  if (kind === 2) return mix(mix([0.35, 0.2, 0.45], [0.1, 0.75, 0.9], sm(0, 0.5, v)), [1.0, 0.8, 0.2], sm(0.5, 1, v));
   return v > 0.5 ? [0.2, 0.85, 1.0] : [0.95, 0.2, 0.15];
 }
 const toSrgb = (c) => c.map((x) => Math.round(255 * Math.pow(M.sat(x), 1 / 1.6)));

@@ -170,6 +170,10 @@ const B = (VC.bldgfx = {
     ghostLateFrame = VC.gfx.frameCount | 0;
     drawGhost(ctx);
   },
+  /** Core 'late' pass (after gizmos): the placement hologram. */
+  late(ctx) {
+    if (ghost) B.drawGhostLate(ctx);
+  },
 
   /** Placement preview: {key, x, z, rot, valid} or null. Draws the catalog model as a hologram. */
   setGhost(g) {

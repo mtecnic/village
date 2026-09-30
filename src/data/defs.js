@@ -288,7 +288,7 @@ VC.OVERLAYS = [
   { key: 'crime', name: 'Crime', icon: '🦹', map: 'crime', ramp: 'bad' },
   { key: 'traffic', name: 'Traffic', icon: '🚗', map: 'traffic', ramp: 'bad' },
   { key: 'noise', name: 'Noise', icon: '🔊', map: 'noise', ramp: 'bad' },
-  { key: 'happiness', name: 'Happiness', icon: '😊', map: 'happiness', ramp: 'good' },
+  { key: 'happiness', name: 'Happiness', icon: '😊', map: 'happiness', ramp: 'good', nodata0: true },
   { key: 'power', name: 'Power Grid', icon: '⚡', ramp: 'net', flag: 1 },
   { key: 'water', name: 'Water Service', icon: '💧', ramp: 'net', flag: 2 },
   { key: 'police', name: 'Police Coverage', icon: '🚓', map: 'police', ramp: 'good' },

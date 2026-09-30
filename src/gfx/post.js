@@ -32,6 +32,7 @@
 const M = VC.M;
 
 const PP = (VC.post = {
+  waterMask: true, // composite + SSAO skip water pixels (HDR alpha < 0.4), so water may write depth
   programs: {},
   stats: { features: '', ms: 0 },
   debugView: null,

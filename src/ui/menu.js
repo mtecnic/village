@@ -215,7 +215,7 @@ function startDemo() {
     MN.demoCenter = S ? [S.W / 2, S.H / 2, 32] : null;
   }
   if (!S) return;
-  S.time.tod = 0.72;
+  S.time.tod = 0.735;
   S.time.speed = 1;
   const cam = VC.camera, g = cam.goal, c = MN.demoCenter;
   cam.cinematic = true;

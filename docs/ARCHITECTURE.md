@@ -162,6 +162,14 @@ extinguished by fire coverage). API: `ignite(b)`, `extinguish(b)`, `recalcNetwor
 `waterInfo()` → `{supply, demand, sources:[{b,output}]}`, `serviceStats()` → `{police:{coverage 0..1, buildings, funding}, …}`.
 Reads `VC.econ.effectiveness(dept)`, `VC.econ.taxEffect(zone)`, `S.mods`.
 
+### VC.worldgen — `gen/worldgen.js`
+`generate(S, opts)` fills height/terr/trees for `S.mapType` from `S.seed`. `previewCanvas({seed, mapType, size}, px)` →
+HTMLCanvasElement (px×px) colored mini-map preview for the new-city dialog (fast, < 60 ms).
+
+### Rubble
+Burnt/destroyed buildings become `VC.world.addBuilding({key:'rubble', x, z, w, d, rot:0}, {instant:true})` (no catalog def;
+model 'rubble' is `sized`). Rubble has pop/cap 0, blocks growth until bulldozed or cleared by sim after ~6 months.
+
 ### VC.econ — `sim/econ.js`
 On `month`: taxes/income/upkeep/policy costs/loan payments via `VC.money`, `S.ledger.last`, `S.stats.income/expenses/net`,
 `S.history` samples (pop, money, happiness, income, expenses, demandR/C/I, crime, pollution, traffic, power, water),
@@ -208,6 +216,12 @@ ui: see `ui/ui.js` header (windows, widgets, toast, modal, tooltips via `data-ti
 openSettings, openHelp`. menu: `show, hide`. panels: `list [{key,name,icon,hotkey}]`, `open(key)`, `toggle(key)`,
 `inspect(building | {x,z})`. Panel keys: budget, policies, stats, population, services, utilities, advisors,
 milestones, disasters, loans, inspector, save.
+Hotkeys (KeyboardEvent.code; handled centrally in input.js): budget KeyM, policies KeyP, stats KeyG, population KeyU,
+services KeyV, utilities KeyY, advisors KeyN, milestones KeyJ, disasters KeyX, save KeyK. Other keys: WASD/arrows pan,
+Q/E rotate, R rotate building ghost, Space pause, Digit1..Digit0 + KeyT + KeyB tool groups (input emits bus
+`toolGroup {key}`; hud opens that palette), KeyB bulldoze, Escape cancel tool / close top window / pause menu,
+KeyH hide UI (photo mode), KeyC cinematic camera, KeyO cycle overlays, KeyL toggle grid?, F1 help, Equal/Minus zoom,
+BracketLeft/BracketRight or comma/period for speed down/up.
 
 ### VC.audio / VC.save — `audio/audio.js`, `io/save.js`
 audio: `play(name, {x,z,vol})`, listens to `sfx`, music + ambience from settings volumes. save: `serialize(S)`,

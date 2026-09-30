@@ -29,7 +29,11 @@
  *     scale: 1,                            // voxel size multiplier (0.5 for vehicles: 1/16 unit voxels)
  *     gen(rng, variant, params) { ... return grid; },   // build and return a VoxelGrid
  *     parts: [{ model:'wind_rotor', pivot:[x,y,z], partPivot:[x,y,z], axis:'x'|'y'|'z', speed: radPerSec }],
+ *     sized: false,                        // true: forBuilding passes params {fw, fd} (e.g. 'rubble')
  *   })
+ *   PARTS: an animated sub-model. pivot = attachment point in the PARENT grid (voxels);
+ *   partPivot = rotation center in the PART grid (voxels). Renderer draws the part with
+ *   world = parentTransform * T(pivot) * Rot(axis, time*speed [* wind for anim 'wind']) * T(-partPivot).
  *   VC.models.get(key, variant, params) -> Model (generated, meshed, uploaded on first use; cached)
  *   Model = { key, variant, params, sx, sy, sz, vox, height, quads, vao, vbo, lod:{quads,vao,vbo},
  *             emitters:[{x,y,z,type}], lights:[{x,y,z,color,size}], parts }
@@ -591,7 +595,11 @@ VC.models = {
       const fw = b.rot & 1 ? b.d : b.w, fd = b.rot & 1 ? b.w : b.d;
       return VC.models.get('grow_' + zk + b.den, b.variant, { fw, fd, level: b.level, wealth: b.wealth || 0 });
     }
-    if (defs[b.key]) return VC.models.get(b.key, b.variant);
+    const def = defs[b.key];
+    if (def) {
+      if (def.sized) return VC.models.get(b.key, b.variant, { fw: b.rot & 1 ? b.d : b.w, fd: b.rot & 1 ? b.w : b.d });
+      return VC.models.get(b.key, b.variant);
+    }
     return null;
   },
   /**

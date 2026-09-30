@@ -74,6 +74,7 @@ ph('tree_pine', {
 ph('tree_palm', treeDef(P.PALM, 7, 2));
 ph('rubble', {
   variants: 2,
+  sized: true,
   gen(rng, v, p) {
     const sx = (p.fw || 1) * 8, sz = (p.fd || 1) * 8;
     const g = new VC.VoxelGrid(sx, 3, sz);

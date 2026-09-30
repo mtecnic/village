@@ -221,7 +221,7 @@ function updateLaunches(S, rdt, Pt) {
       }
       if (l.t > 5) { l.phase = 'ignite'; l.t = 0; VC.fxgl.sfx('rocket', l.x, l.z, 1, 160); }
     } else if (l.phase === 'ignite') {
-      if (Pt && near) cloud(Pt, l, rdt, 45);
+      if (Pt && near) cloud(Pt, l, rdt, 22);
       if (cam.shake && near) cam.shake(0.06);
       if (l.t > 2) { l.phase = 'lift'; l.t = 0; }
     } else if (l.phase === 'lift') {
@@ -235,13 +235,13 @@ function updateLaunches(S, rdt, Pt) {
       l.y += ct * step;
       l.dist += step;
       if (Pt && near) {
-        if (l.t < 4) cloud(Pt, l.pad, rdt, 40 * (1 - l.t / 4));
+        if (l.t < 4) cloud(Pt, l.pad, rdt, 18 * (1 - l.t / 4));
         const n = Math.min(6, Math.ceil(rdt * 90));
         for (let q = 0; q < n; q++) {
           const f = rnd();
           Pt.emit('fire', l.x - Math.cos(l.h) * st * step * f, l.y - ct * step * f - 0.2, l.z - Math.sin(l.h) * st * step * f, { vx: -Math.cos(l.h) * st * 6 + (rnd() - 0.5) * 1.5, vy: -ct * 6 - rnd() * 2, vz: -Math.sin(l.h) * st * 6 + (rnd() - 0.5) * 1.5, size: 0.5 + rnd() * 0.4, life: 0.35 });
         }
-        if (l.dist < 160 && rnd() < rdt * 30) Pt.emit('steam', l.x, l.y - 1, l.z, { vx: (rnd() - 0.5) * 0.5, vy: -0.5, vz: (rnd() - 0.5) * 0.5, size: 0.9 + l.dist * 0.01, life: 9 + rnd() * 4, alpha: 0.55 });
+        if (l.dist < 160 && rnd() < rdt * 24) Pt.emit('steam', l.x, l.y - 1, l.z, { vx: (rnd() - 0.5) * 0.5, vy: -0.5, vz: (rnd() - 0.5) * 0.5, size: 0.5 + l.dist * 0.008, life: 8 + rnd() * 4, alpha: 0.45, grow: 2.4 });
       }
       if (cam.shake && l.t < 3 && near) cam.shake(0.05 * (1 - l.t / 3));
       if (l.dist > 240 || l.t > 40) launches.splice(k, 1);
@@ -252,8 +252,8 @@ function cloud(Pt, l, rdt, rate) {
   let n = rate * rdt;
   while (n > 0 && (n >= 1 || rnd() < n)) {
     n -= 1;
-    const a = rnd() * TAU, s = 2 + rnd() * 4;
-    Pt.emit(rnd() < 0.7 ? 'steam' : 'dust', l.x + Math.cos(a) * 0.8, l.y + 0.3, l.z + Math.sin(a) * 0.8, { vx: Math.cos(a) * s, vy: 0.4 + rnd() * 1.2, vz: Math.sin(a) * s, size: 0.8 + rnd() * 0.8, life: 5 + rnd() * 4, alpha: 0.65 });
+    const a = rnd() * TAU, s = 1.5 + rnd() * 3;
+    Pt.emit(rnd() < 0.7 ? 'steam' : 'dust', l.x + Math.cos(a) * 0.6, l.y + 0.2, l.z + Math.sin(a) * 0.6, { vx: Math.cos(a) * s, vy: 0.3 + rnd() * 0.8, vz: Math.sin(a) * s, size: 0.45 + rnd() * 0.45, life: 4 + rnd() * 3, alpha: 0.5, grow: 2.6 });
   }
 }
 function drawLaunch(l, B, G) {

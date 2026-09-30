@@ -495,21 +495,30 @@ function evalPos(i) {
 }
 
 /* ---------------- dispatch paths ---------------- */
-/** Exit direction toward the next tile of vehicle i's path (straight on at the end). */
+/** Exit direction toward the next tile of vehicle i's path (straight on at the end). Re-plans if the
+ *  road network changed under the route. */
 function pathDir(i, j, dIn) {
-  const p = paths[i];
-  if (!p) return dIn;
+  let p = paths[i];
+  if (!p) return chooseExit(i, j, dIn, mask[j]);
   let k = pathPos[i];
-  if (p[k] !== j) {
-    // re-sync (should not happen): find j in the path
-    k = p.indexOf(j);
-    if (k < 0) { paths[i] = null; return chooseExit(i, j, dIn, mask[j]); }
+  if (p[k] !== j) k = p.indexOf(j);
+  if (k >= 0 && k < p.length - 1) {
+    const d = dirTo(j, p[k + 1]);
+    if (mask[j] & (1 << d)) { pathPos[i] = k; return d; }
   }
-  pathPos[i] = k;
-  if (k >= p.length - 1) return (mask[j] & (1 << dIn)) || !mask[j] ? dIn : chooseExit(i, j, dIn, mask[j]);
-  const n = p[k + 1];
-  const d = n - j;
-  return d === 1 ? 0 : d === -1 ? 1 : d === W ? 2 : 3;
+  if (k === p.length - 1) {
+    pathPos[i] = k;
+    return mask[j] & (1 << dIn) || !mask[j] ? dIn : chooseExit(i, j, dIn, mask[j]);
+  }
+  // off the route or the next link is gone: find a new way to the destination
+  const np = bfs(j, p[p.length - 1]);
+  if (np && np.length > 1) {
+    paths[i] = np;
+    pathPos[i] = 0;
+    return dirTo(np[0], np[1]);
+  }
+  paths[i] = null;
+  return chooseExit(i, j, dIn, mask[j]);
 }
 
 /** BFS over the road graph from tile a to tile b. Returns Int32Array path (a..b) or null. */
@@ -678,6 +687,28 @@ function dispatchLogic(i, dt) {
   }
 }
 
+/** New exit for vehicle i on tile j after a network change (dispatched vehicles re-plan their route). */
+function reroute(i, j, isD) {
+  let d = -1;
+  const p = paths[i];
+  if (isD && p) {
+    const np = bfs(j, p[p.length - 1]);
+    if (np && np.length > 1) {
+      paths[i] = np;
+      pathPos[i] = 0;
+      d = dirTo(np[0], np[1]);
+    } else if (np) {
+      paths[i] = np; // already on the destination tile
+      pathPos[i] = 0;
+    } else paths[i] = null;
+  }
+  if (d < 0) d = chooseExit(i, j, din[i], mask[j]);
+  if (!(mask[j] & (1 << d))) {
+    for (let k = 0; k < 4; k++) if (mask[j] & (1 << k)) { d = k; break; }
+  }
+  recurve(i, d);
+}
+
 /** Rebuilds vehicle i's curve from its current position/heading to the exit edge dOut of its tile. */
 function recurve(i, dOut) {
   const j = tile[i], rt = S.road[j] || 1;
@@ -698,7 +729,6 @@ function recurve(i, dOut) {
   ys[i * 3] = y;
   ys[i * 3 + 1] = y;
   ys[i * 3 + 2] = roadY(p3x - DX[dOut] * 0.03, p3z - DZ[dOut] * 0.03);
-  din[i] = dOut === OPP[din[i]] ? din[i] : din[i];
   dout[i] = dOut;
   lo[i] = loOut;
   tt[i] = 0;
@@ -774,6 +804,11 @@ function step(dt) {
       if (fade[i] < -1.99) { free(i); continue; }
     } else if (fade[i] < 1) fade[i] = Math.min(1, fade[i] + dt * 2.5);
     const isD = role[i] === R_DISPATCH;
+    // the road network changed under us: the chosen exit is gone -> pick a new way out of this tile
+    if (!(mask[j] & (1 << dout[i]))) {
+      if (!mask[j]) { if (fade[i] >= 0) fade[i] = -0.001; }
+      else reroute(i, j, isD);
+    }
     if (isD) dispatchLogic(i, dt);
     if (!alive[i]) continue;
     // ---- desired speed ----

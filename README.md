@@ -37,7 +37,7 @@ with WebGL2 and WebAudio.
   Population, Services, Utilities, Advisors, Milestones & Achievements, Disasters, Save & Load, and a
   detailed building inspector.
 - **Mayor's Goals** (live objectives with rewards) and **Mayor's Desk** (decision events with trade-offs).
-- Seven advisors with personalities, a news ticker and ~25 achievements.
+- Seven advisors with personalities, a news ticker and 36 achievements.
 
 **Looks & feel**
 - Stable cascaded shadows, SSAO, bloom, tilt-shift miniature depth of field, god rays, filmic grading,

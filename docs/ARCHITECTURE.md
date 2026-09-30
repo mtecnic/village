@@ -269,9 +269,20 @@ full; this is the index.
   `powerInfo().deficit/shortage/unpowered`, building fields `simJobs`, `simReplay`.
 * **Econ**: `forecast()` (+ `taxDetail`, `dept`, `policies`, `venues`), `loanOptions()`, `takeLoan(amount|option, months)`,
   `debt()`, `creditLimit()`, `runway()`, `onStrike(dept)`, `effectivenessAt(f)`, `CATEGORIES`; bus `econ`.
+  Temporary modifiers: `addTempMod({id?, source, label, icon?, mods, until|days})`, `removeTempMod(id)`,
+  `tempMods()` (stored in `S.tempMods`, folded into `S.mods`). Policies carry a level 0..1 (`levels:false` = on/off).
 * **Disasters**: `trigger(type,x,z,opts)`, `info`, `setEnabled`, `nextIn`, `focus`, `clear`, `S.disasterStats`;
   active entry fields documented in `sim/disasters.js`. Buildings being abducted carry `b.disLift`.
 * **Advisors**: `adviceInfo(key)`, `milestoneInfo()`, `toastAchievements`.
+* **Mayor's Goals** (`sim/goals.js`, HUD `ui/hud_goals.js`): `VC.goals.list()`, `claim(id)`, `swap(id)`,
+  `focusOf(goal)`, `rewardText/rewardLong`, `refresh()`, `add(kind)` (debug); state `S.goals`; bus `goalDone`,
+  `goalClaimed`, `goalRotated`. Anti-farming rules are documented in the file header.
+* **Mayor's Desk** (`sim/desk.js`, HUD `ui/hud_desk.js`): `VC.desk.pending()`, `choose(i)`, `timeLeft()`,
+  `history()`, `trigger(id)` (debug); state `S.desk` (recurring deals billed by econ as `deskDeal`); bus
+  `deskEvent`, `deskResolved`. `VC.deskHud.layout()` lays out the shared left column (goals + desk).
+* **Juice** (`ui/hud_notify.js`, `gfx/fx_celebrate.js`): `VC.hud.juice.pop(x, y, z, text, cls?)` world-anchored
+  pills, month-end coin showers, milestone-progress celebrations; `VC.fxCel.fireworks/confetti/launch`.
+  Everything obeys `VC.settings.juice === false`, never toasts, and is silent in the title-screen demo (`S.demo`).
 * **Actions/tools/input**: `can*` validators, undo (`canUndo/undo`, 10 s), `beginGroup/endGroup`; `VC.tools.rotate`,
   `adjustBrush`, `cancel`, tools layer (order 990); `VC.input.KEYMAP [{group, keys, action}]`, `enabled()`.
 * **Agents/particles/fx**: `VC.agents.signal(x,z)`, `vehicles()`; extra particle types (rainsplash, contrail, fog,
@@ -281,5 +292,8 @@ full; this is the index.
   live tooltips (`el._tip`); `VC.hud` (`photoMode, openPanel, pushNews, showMilestone, startTutorial…`);
   `VC.menu` (`startGame, loadGame, newCity, pause, resume, fade`); `VC.panels.open(key, {tab})`, `close`, `isOpen`,
   `refresh`, `onSelectHook`.
+* **Boot/debug** (`main.js`): `VC.showBootError(msg, err)`, `VC.bootFailed`, `VC.errors` (deduped, capped at 200);
+  `VC.debug.newGame/cam/tod/run(days)/perf/errors/failures/sampleCity` (used by `tools/smoke.js` and `tools/shot.js`).
+  `src/index.html` carries a 20 s boot watchdog that explains a stalled start instead of showing a blank page.
 * **Audio/save**: `VC.audio.play(name, {x,z,vol,rate,delay})` + auto-handled bus events (see `audio/audio.js`);
   `VC.save.register(key, {save, load})`, `importText`, `exportBlob`, `selfTest()`; bus `saved`, `loaded`, `saveFailed`.

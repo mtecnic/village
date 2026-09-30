@@ -555,10 +555,16 @@ K.awningX = function (g, x, y, z, d, dx, c1, c2 = P.WHITE) {
  * face: 0 front (spans x), 1 right (spans z, plane x).
  */
 K.sign = function (g, x, y, z, w, h, c, bg, rng, face = 0, lightIt = true) {
+  // 1-tall signs: "words" of 2..4 lit voxels separated by single gaps
+  let word = rng ? rng.int(2, 4) : 3;
   for (let i = 0; i < w; i++) {
     const glyph = rng ? rng.int(1, 7) : 7;
+    let gap = false;
+    if (h === 1) {
+      if (word === 0) { gap = i > 0 && i < w - 1; word = rng ? rng.int(2, 4) : 3; } else word--;
+    }
     for (let j = 0; j < h; j++) {
-      const lit = h === 1 ? (i % 2 === 0 || !bg) : (glyph >> (j % 3)) & 1 || i === 0;
+      const lit = h === 1 ? !gap || !bg : (glyph >> (j % 3)) & 1 || i === 0;
       const col = lit ? c : bg;
       if (!col) continue;
       if (face === 0) g.set(x + i, y + j, z, col);
@@ -643,7 +649,7 @@ K.STYLES = {
   /** Full curtain wall: glass spandrels + window rows (lit at night), thin mullions every 4. */
   curtain(o, u, v, f, len, fh) {
     const r = v % fh;
-    if (o.mullion && u % 4 === 0) return o.mullion;
+    if (o.mullion && u % (o.mstep || 4) === 0) return o.mullion;
     return r === 0 ? o.glass : o.win;
   },
   /** Grid of mullions (trim) around 1-wide glazing. */

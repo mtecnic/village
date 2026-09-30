@@ -52,7 +52,7 @@ function setPolicy(p, on, card) {
     card.sw.setValue(isOn(p));
     return;
   }
-  if (!unlocked(p)) {
+  if (on && !unlocked(p)) {
     card.sw.setValue(false);
     VC.bus.emit('toast', { text: `<b>${p.name}</b> unlocks at ${U.int(p.unlock)} residents.`, type: 'warn', icon: '🔒' });
     return;
@@ -91,7 +91,7 @@ function makeCard(p) {
     U.cls(card, 'on', on);
     U.cls(card, 'locked', !un);
     if (!sw._drag) sw.setValue(on);
-    sw.input.disabled = !un;
+    sw.input.disabled = !un && !on; // a locked policy that is somehow active can still be repealed
     const c = cost(p);
     U.txt(costEl, c > 0 ? U.money(c) + '/mo' : 'Free');
     U.show(lock, !un);

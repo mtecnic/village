@@ -59,9 +59,16 @@ P.defs.save = {
     const loading = h('div', { class: 'pn-muted-note pn-save-loading' }, 'Loading saves…');
     const countEl = h('span', { class: 'pn-muted-note' });
     p.body.appendChild(h('div', { class: 'pn-sec' }, h('div', { class: 'pn-toolbar' }, h('span', { class: 'pn-sec-title pn-inline' }, 'Saved cities'), countEl), loading, list, empty));
-    const expBtn = VC.ui.button('Export file', () => run(() => VC.save.exportFile(), 'City exported.', 'Export failed.', false), { icon: '⬇️', cls: 'small', tip: 'Download the current city as a file you can back up or share' });
-    const impBtn = VC.ui.button('Import file', () => run(() => VC.save.importFile(), null, 'Import failed.', true), { icon: '⬆️', cls: 'small', tip: 'Load a city from a previously exported file' });
-    p.body.appendChild(h('div', { class: 'pn-save-foot' }, expBtn, impBtn, h('span', { class: 'pn-grow' }), h('span', { class: 'pn-muted-note' }, 'Autosave keeps a rolling backup.')));
+    // export/import never lock the panel: a file picker the user cancels may never settle its promise
+    const expBtn = VC.ui.button('Export file', () => U.async(() => VC.save.exportFile(), (ok, v, e) => {
+      if (e) VC.bus.emit('toast', { text: 'Export failed. ' + (e.message || ''), type: 'bad', icon: '💾' });
+    }), { icon: '⬇️', cls: 'small', tip: 'Download the current city as a file you can back up or share' });
+    const impBtn = VC.ui.button('Import file', () => U.async(() => VC.save.importFile(), (ok, v, e) => {
+      if (e) VC.bus.emit('toast', { text: 'Import failed. ' + (e.message || ''), type: 'bad', icon: '💾' });
+      refresh();
+    }), { icon: '⬆️', cls: 'small', tip: 'Load a city from a previously exported file' });
+    const autoNote = h('span', { class: 'pn-muted-note' });
+    p.body.appendChild(h('div', { class: 'pn-save-foot' }, expBtn, impBtn, h('span', { class: 'pn-grow' }), autoNote));
 
     function setBusy(b) {
       busy = b;
@@ -149,6 +156,7 @@ P.defs.save = {
       U.show(empty, loaded && !slots.length);
       U.txt(countEl, slots.length ? slots.length + ' save' + (slots.length === 1 ? '' : 's') : err === 'unavailable' ? 'save system unavailable' : '');
       saveBtn.disabled = busy || !has('save');
+      U.txt(autoNote, VC.settings && VC.settings.autosave === false ? '⏸️ Autosave is off (Settings)' : '🔄 Autosave keeps a rolling backup');
       expBtn.disabled = busy || !has('exportFile');
       impBtn.disabled = busy || !has('importFile');
     }

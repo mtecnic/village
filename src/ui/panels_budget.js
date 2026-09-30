@@ -402,7 +402,6 @@ function tabLoans(c) {
           if (!('available' in o)) VC.bus.emit('toast', { text: 'The bank declined the loan.', type: 'bad', icon: '🏦' });
         } else {
           VC.bus.emit('toast', { text: `Loan of <b>${U.money(o.amount)}</b> received.`, type: 'good', icon: '🏦' });
-          VC.bus.emit('sfx', { name: 'cash' });
         }
         P.refresh();
       }, { title: '🏦 Take a loan', yes: 'Borrow' });
@@ -488,11 +487,12 @@ function tabHistory(c) {
   const box = h('div', null, U.sec('Income vs expenses (monthly)', ch1), U.sec('Treasury', ch2));
   const empty = U.empty('📉', 'Not enough history yet', 'Charts fill in as months pass. Check back after a couple of months.');
   c.append(box, empty);
-  let lastN = -1;
+  let lastSig = '';
   function draw(force) {
     const n = Math.max(U.histLen('income'), U.histLen('money'));
-    if (!force && n === lastN) return;
-    lastN = n;
+    const sig = U.histSig('income') + '/' + U.histSig('money');
+    if (!force && sig === lastSig) return;
+    lastSig = sig;
     U.show(box, n >= 2);
     U.show(empty, n < 2);
     if (n < 2) return;

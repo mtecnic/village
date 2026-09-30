@@ -106,8 +106,13 @@ P.defs.advisors = {
       return el;
     };
 
-    function upd() {
+    let lastAdvice = -1e9;
+    function upd(force) {
       const all = messages();
+      // advice text changes slowly: re-evaluate it at most once a second (badges stay live)
+      const now = performance.now();
+      const doAdvice = force || now - lastAdvice > 1000;
+      if (doAdvice) lastAdvice = now;
       const unread = {};
       let nUnread = 0;
       for (const m of all)
@@ -117,6 +122,11 @@ P.defs.advisors = {
         }
       for (const k in cards) {
         const c = cards[k];
+        U.txt(c.badge, unread[k] ? String(unread[k]) : '');
+        U.show(c.badge, !!unread[k]);
+        U.cls(c.el, 'sel', advFilter === k);
+        U.cls(c.el, 'dim', !!advFilter && advFilter !== k);
+        if (!doAdvice) continue;
         const info = adviceOf(k);
         const adv = String(info.text || '');
         U.txt(c.text, adv || 'Nothing to report — keep up the good work.');
@@ -132,10 +142,6 @@ P.defs.advisors = {
         const issues = Array.isArray(info.issues) ? info.issues : [];
         const esc = (t) => String(t).replace(/</g, '&lt;');
         U.attr(c.el, 'data-tip', adv ? `<b>${VC.ADVISORS[k].name}</b><br>${esc(adv)}${issues.length > 1 ? '<br><br>' + issues.map((x) => '• ' + esc(x.title)).join('<br>') : ''}` : null);
-        U.txt(c.badge, unread[k] ? String(unread[k]) : '');
-        U.show(c.badge, !!unread[k]);
-        U.cls(c.el, 'sel', advFilter === k);
-        U.cls(c.el, 'dim', !!advFilter && advFilter !== k);
       }
       let shown = advFilter ? all.filter((m) => m.advisor === advFilter) : all.slice();
       shown = shown.sort(byNewest).slice(0, 80);

@@ -35,14 +35,14 @@ function chartCard(def, width) {
   const yFormat = (v) => (def.auto ? (autoPct ? pctFmt(v) : VC.fmt.short(v)) : def.fmt(v));
   const chart = VC.ui.chart({ width, height: 118, series: [], yFormat, min: def.min, max: def.max });
   const el = h('div', { class: 'pn-cc' }, h('div', { class: 'pn-cc-head' }, h('span', { class: 'pn-cc-title' }, h('span', { class: 'pn-ic' }, def.icon), def.title), cur), delta, chart);
-  let lastN = -1, lastR = -1;
+  let lastSig = '', lastR = -1;
   el.upd = (S, force) => {
     const c = def.cur(S);
     U.txt(cur, c[0]);
     U.tone(cur, c[1]);
-    const n = U.histLen(def.series[0].keys[0]) || U.histLen(def.series[0].keys[1] || '');
-    if (!force && n === lastN && lastR === statRange) return;
-    lastN = n;
+    const sig = U.histSig(def.series[0].keys[0]) + '/' + U.histLen(def.series[0].keys[1] || '');
+    if (!force && sig === lastSig && lastR === statRange) return;
+    lastSig = sig;
     lastR = statRange;
     const series = [];
     let auto01 = true;

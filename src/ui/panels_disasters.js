@@ -13,6 +13,7 @@ const FLAVOR = {
   ufo: 'Visitors from beyond, armed with a tractor beam.',
   monster: 'Cubezilla stomps through downtown. Run!',
 };
+const PHASE = { active: 'on the ground', burning: 'burning', incoming: 'incoming!', impact: 'impact', shaking: 'shaking', arrive: 'arriving', hover: 'hovering', leave: 'leaving', enter: 'arriving', rampage: 'rampaging' };
 let targetMode = 'camera'; // 'camera' | 'pick'
 let armed = null; // disaster type waiting for a map click
 
@@ -133,7 +134,8 @@ P.defs.disasters = {
         const t = typeInfo(d.type);
         U.txt(el.firstChild, d.icon || t.icon);
         const dmg = (d.destroyed || 0) + (d.abducted || 0);
-        U.txt(nm, (d.name || t.name) + (d.phase && d.phase !== 'start' ? ' · ' + d.phase : '') + (dmg ? ' · ' + dmg + ' lost' : ''));
+        const ph = d.phase && d.phase !== 'start' ? PHASE[d.phase] || d.phase : '';
+        U.txt(nm, (d.name || t.name) + (ph ? ' · ' + ph : '') + (dmg ? ' · ' + dmg + ' lost' : ''));
         U.txt(where, d.x != null ? `${Math.round(d.x)}, ${Math.round(d.z)}` : '');
       };
       return el;

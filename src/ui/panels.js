@@ -431,6 +431,8 @@ U.hist = (key, n) => {
   const arr = Array.isArray(a) ? a : Array.from(a);
   return n ? arr.slice(-n) : arr;
 };
+/** Redraw signature for history charts: sample count + current month (arrays stop growing once capped). */
+U.histSig = (key) => U.histLen(key) + ':' + (VC.state ? Math.floor(VC.state.time.day / VC.C.DAYS_PER_MONTH) : 0);
 U.histLen = (key) => {
   const S = VC.state;
   const a = S && S.history && S.history[key];
@@ -522,6 +524,9 @@ U.tabs = (p, list) => {
       tip: x.tip,
       render(c) {
         p.tabUpd = null;
+        // replay the fade-in on every tab switch (the body element is reused)
+        c.classList.remove('pn-tabbody');
+        void c.offsetWidth;
         c.classList.add('pn-tabbody');
         const r = x.render(c, p);
         p.tabUpd = typeof r === 'function' ? r : null;

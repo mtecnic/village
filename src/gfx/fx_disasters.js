@@ -13,6 +13,8 @@
  *   monster     'monster' model with its 4 walk-cycle variants, glowing eyes, stomp dust rings,
  *               wading splashes and the blue atomic breath beam
  * Per-entry visual state lives in a Map keyed by entry id and is dropped when the entry ends.
+ * restore(): re-creates the tornado mesh after a WebGL context restore (called by VC.fx.restore; the program
+ * relinks by itself; models are restored by VC.fxgl.restoreModels).
  */
 const M = VC.M, C = VC.C;
 /** Vector lengths without Math.hypot (V8's hypot allocates its argument list; these are on per-frame paths). */
@@ -58,6 +60,10 @@ const D = (VC.fxDis = {
   },
   drawTransparent(ctx) {
     drawFunnels(ctx);
+  },
+  /** WebGL context restored: new funnel mesh (VAO + buffers). */
+  restore() {
+    initMesh();
   },
 });
 
@@ -451,8 +457,12 @@ void main(){
 }`;
 const GLR = {};
 function initGL() {
-  const G = VC.gfx, gl = G.gl;
-  GLR.prog = G.program('fx_tornado', TVS, TFS);
+  GLR.prog = VC.gfx.program('fx_tornado', TVS, TFS);
+  initMesh();
+}
+/** Funnel grid mesh (init, and after a context restore). */
+function initMesh() {
+  const gl = VC.gfx.gl;
   const v = new Float32Array((NS + 1) * (NR + 1) * 2);
   let o = 0;
   for (let r = 0; r <= NR; r++) for (let s = 0; s <= NS; s++) { v[o++] = s / NS; v[o++] = r / NR; }

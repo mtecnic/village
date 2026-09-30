@@ -72,10 +72,18 @@
  *   depth pre-pass would hide the tool gizmos drawn after it, so the core may call drawGhostLate(ctx) after its
  *   gizmos; while it does, the transparent pass skips the ghost.
  *
+ * WEBGL CONTEXT LOSS: while the context is lost update() does nothing (no GL calls, no model builds: bus events
+ *   keep the CPU slot store current). restore() (layer hook of the render core; also covers 'bld_glow' and the
+ *   props' engine set) re-uploads the shared model meshes in place (VC.fxgl.restoreModels), refreshes the model
+ *   wrappers' mesh handles (1/4-res meshes are rebuilt lazily), re-creates the data texture (full upload of the
+ *   slot store), stream / sprite buffers and VAOs; programs relink by themselves and get their sampler units again
+ *   on first use. Buildings / trees / parts whose model was built while the context was lost (no GPU mesh then)
+ *   are re-resolved.
+ *
  * API (VC.bldgfx): setGhost({key, x, z, rot, valid} | null), drawGhostLate(ctx), handlesLift (true: draws
  *   b.disLift UFO lifts), warm(ms?) (build queued models + requested 1/4-res meshes now), inspect(id) (debug:
- *   render state of a building, incl. partState), stats, eng (instancing engine used by gfx/props.js, see E at
- *   the end of this file), SPECIES, FL.
+ *   render state of a building, incl. partState), restore(), stats, eng (instancing engine used by gfx/props.js,
+ *   see E at the end of this file), SPECIES, FL.
  * Also reads: VC.tools.selectedId / hoverId / hover / current, VC.disasters.active (earthquake shake,
  *   UFO lifts), VC.particles.burst('dust') when a construction site turns into its building, VC.gfx.env,
  *   VC.fx.isLaunching.
@@ -123,6 +131,34 @@ const B = (VC.bldgfx = {
     if (VC.props && VC.props.init) callSafe(VC.props.init, VC.props);
   },
 
+  /**
+   * WebGL context restored (render core layer hook): every GL object of this renderer is gone. Re-uploads the
+   * shared model meshes, refreshes the wrappers, re-creates buffers / VAOs / the data texture (full slot upload).
+   */
+  restore() {
+    gl = VC.gfx.gl;
+    if (VC.fxgl && VC.fxgl.restoreModels) VC.fxgl.restoreModels();
+    // wrapper mesh handles; a wrapper without a mesh before (its model was built while the context was lost)
+    // that has one now means buildings / parts / trees skipped that model: they are re-resolved below
+    let revived = 0;
+    for (let i = 0; i < MWS.length; i++) {
+      const had = !!MWS[i].lv[0];
+      meshLevels(MWS[i]);
+      if (!had && MWS[i].lv[0]) revived++;
+    }
+    l2Queue.length = 0;
+    B.stats.l2 = 0;
+    dataTex = null; // (dead handle: never deleted) re-created with the whole slot store by the next flushTex
+    texRealloc = true;
+    streamCap = 0;
+    initBuffers();
+    nSpr = 0; // (the new sprite buffer is empty until rebuildSprites, next update)
+    spritesDirty = true;
+    spriteT = 0;
+    if (revived && curS && curS === VC.state) relinkAfterLoss(curS);
+    B.stats.revived = revived;
+  },
+
   reset(S) {
     resetAll(S);
     if (VC.props && VC.props.reset) callSafe(VC.props.reset, VC.props, S);
@@ -131,6 +167,9 @@ const B = (VC.bldgfx = {
   update(dt, rdt) {
     const S = VC.state;
     if (!S || !gl || curS !== S) return;
+    // context lost: no GL calls and no model builds (their meshes could not be uploaded); the slot store stays
+    // current through the bus events and is uploaded as a whole after the restore
+    if (glLost()) return;
     nDyn = 0;
     try {
       frameUpdate(S, rdt || 0);
@@ -184,7 +223,8 @@ const B = (VC.bldgfx = {
     }
     let m = null;
     try {
-      m = VC.models.get(g.key, 0);
+      // (context lost: no model builds — their meshes could not be uploaded)
+      if (!glLost() || VC.models.cached().has(VC.models.cacheKey(g.key, 0, null))) m = VC.models.get(g.key, 0);
     } catch (e) {
       m = null;
     }
@@ -219,6 +259,7 @@ const B = (VC.bldgfx = {
   /** Builds queued models synchronously (up to ms milliseconds, default: all). Returns the remaining queue length. */
   warm(ms) {
     if (curS !== VC.state) return 0;
+    if (glLost()) return pendQ.length; // (no model builds / uploads while the context is lost)
     const t0 = performance.now(), lim = ms == null ? 1e9 : ms;
     processPending(lim, true);
     while (l2Queue.length && performance.now() - t0 < lim) buildL2(l2Queue.shift()); // requested 1/4-res meshes too
@@ -237,6 +278,8 @@ const GLOW = {
   transparent(ctx) {
     if (curS && curS === ctx.S) drawSprites(ctx);
   },
+  /** Context restore: the sprite buffers / VAOs are re-created by VC.bldgfx.restore() (layer 'buildings'). */
+  restore() {},
 };
 let ghostLateFrame = -100;
 
@@ -248,6 +291,8 @@ function callSafe(fn, self, a, b) {
   }
 }
 const live = () => !!gl && curS && curS === VC.state;
+/** True while the WebGL context is lost (isContextLost also covers the gap before the 'webglcontextlost' event). */
+const glLost = () => !gl || !!VC.gfx.lost || gl.isContextLost();
 
 /* ================================================================== */
 /* Engine state                                                        */
@@ -524,14 +569,11 @@ function getMW(m, kind) {
   if (arr[kind]) return arr[kind];
   const idx = MWS.length;
   ensureMwArrays(idx + 1);
-  const l0 = m.vao && m.quads ? { vao: m.vao, quads: m.quads } : null;
-  const l1 = m.lod && m.lod.vao && m.lod.quads ? { vao: m.lod.vao, quads: m.lod.quads } : l0;
-  const w = m.winter;
   const mw = {
     idx, m, kind,
-    lv: [l0, l1, null],
+    lv: [null, null, null], // mesh per LOD tier {vao, quads} (see meshLevels)
     // bare-crown meshes (trees with a hidden winter skeleton), used while bareSeason()
-    lvWinter: w && w.vao ? [{ vao: w.vao, quads: w.quads }, w.lod && w.lod.vao ? { vao: w.lod.vao, quads: w.lod.quads } : null, null] : null,
+    lvWinter: null,
     vox: m.vox || C.VOX,
     cx: m.sx / 2, cz: m.sz / 2, h: m.sy,
     height: m.height || m.sy * (m.vox || C.VOX),
@@ -543,9 +585,7 @@ function getMW(m, kind) {
   MWS.push(mw);
   arr[kind] = mw;
   mwKind[idx] = kind;
-  mwHasL2[idx] = 0;
-  mwL2State[idx] = l0 ? 0 : 3;
-  mwSameL1[idx] = l1 === l0 ? 1 : 0;
+  meshLevels(mw);
   // tiny models (bushes, hydrants) are skipped earlier
   const small = mw.height < 0.35 && mw.radius < 0.45;
   for (let k = 0; k < 3; k++) {
@@ -559,6 +599,24 @@ function getMW(m, kind) {
   for (let k = 0; k < 3; k++) if (mwSkip[k][idx] > kindSkip[k][kind]) kindSkip[k][kind] = mwSkip[k][idx];
   B.stats.models = MWS.length;
   return mw;
+}
+/**
+ * (Re)reads the mesh handles of wrapper mw from its model (at creation and after a context restore re-uploaded
+ * the model): tier 0 full mesh, tier 1 model.lod (or the full mesh), tier 2 the 1/4-res mesh built here lazily
+ * (dropped: requested again by gather), winter meshes of open-foliage trees.
+ */
+function meshLevels(mw) {
+  const m = mw.m, idx = mw.idx;
+  const l0 = m.vao && m.quads ? { vao: m.vao, quads: m.quads } : null;
+  const l1 = m.lod && m.lod.vao && m.lod.quads ? { vao: m.lod.vao, quads: m.lod.quads } : l0;
+  mw.lv[0] = l0;
+  mw.lv[1] = l1;
+  mw.lv[2] = null;
+  const w = m.winter;
+  mw.lvWinter = w && w.vao ? [{ vao: w.vao, quads: w.quads }, w.lod && w.lod.vao ? { vao: w.lod.vao, quads: w.lod.quads } : null, null] : null;
+  mwHasL2[idx] = 0;
+  mwL2State[idx] = l0 ? 0 : 3;
+  mwSameL1[idx] = l1 === l0 ? 1 : 0;
 }
 /** Overrides skip distances (in units of quality lodDist; Infinity = never skip, 0 = never draw) for a wrapper. */
 function setSkip(mw, cam, shNear, shFar) {
@@ -604,6 +662,7 @@ function downsample4(g) {
   return o;
 }
 function buildL2(mi) {
+  if (mwL2State[mi] !== 1) return; // (dropped by a context restore meanwhile, or already built)
   const mw = MWS[mi];
   const g = mw.m.grid;
   if (!g || !VC.voxel.mesh) { mwL2State[mi] = 3; return; }
@@ -985,7 +1044,7 @@ function pendingIdle() {
   pendIdle = true;
   requestIdleCallback((dl) => {
     pendIdle = false;
-    if (curS !== VC.state) return;
+    if (curS !== VC.state || glLost()) return;
     const left = dl.timeRemaining();
     if (left > 3) processPending(Math.min(12, left - 2), false);
   }, { timeout: 250 });
@@ -1006,6 +1065,7 @@ function prewarm() {
   warmIdle = true;
   requestIdleCallback((dl) => {
     warmIdle = false;
+    if (glLost()) return; // (prewarm resumes after the restore)
     while (warmList.length && dl.timeRemaining() > 4) {
       const [key, v] = warmList.shift();
       try {
@@ -1368,6 +1428,27 @@ function resetAll(S) {
   }
   B.stats.buildings = recs.size;
 }
+/**
+ * After a context restore that gave meshes to models built while the context was lost: buildings dropped for a
+ * mesh-less model get their slot again, parts are re-made (makeParts skipped mesh-less part models) and tiles
+ * whose trees were skipped are rebuilt (without the grow-in pop).
+ */
+function relinkAfterLoss(S) {
+  for (const rec of recs.values()) {
+    if (rec.removed || rec.pending) continue;
+    const pm = rec.mw && !rec.site && rec.mw.m.parts;
+    if (rec.slot > 0 && !(pm && pm.length && (!rec.parts || rec.parts.length < pm.length))) continue;
+    rec.mw = null; // resolveRec: setModel + parts again (no pop: rec.mw null)
+    resolveRec(rec, false);
+  }
+  if (!treeSlot || !treeSig) return;
+  for (let i = 0; i < S.N; i++) {
+    if (!treeSig[i]) continue;
+    const n = Math.min(3, S.trees[i]);
+    for (let k = 0; k < n; k++) if (treeSlot[i * 3 + k] < 0) { treeSig[i] = 0; break; } // (never matches: rebuilt)
+  }
+  rebuildTreesRect(S, 0, 0, S.W - 1, S.H - 1, NO_POP);
+}
 
 /* ================================================================== */
 /* Per-frame                                                           */
@@ -1637,7 +1718,22 @@ function uploadStream(data, n) {
   } else gl.bufferData(gl.ARRAY_BUFFER, streamCap, gl.STREAM_DRAW); // orphan: no stall on in-flight draws
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n);
 }
+/**
+ * Per-program constant uniforms (sampler units, window palette) of program p (in use), set once per linked
+ * WebGLProgram: a context restore relinks the programs, which resets their uniforms.
+ */
+const progSetup = new WeakMap(); // program wrapper -> WebGLProgram its constants were set on
+function setupProg(p) {
+  const pr = p.prog;
+  if (progSetup.get(p) === pr) return;
+  progSetup.set(p, pr);
+  const u = p.u;
+  if (u.uPal) gl.uniform1i(u.uPal, 0);
+  if (u.uInst) gl.uniform1i(u.uInst, 1);
+  if (u.uWinPal) gl.uniform4i(u.uWinPal, VC.P.WIN_OFFICE | 0, VC.P.WIN_SHOP | 0, VC.P.WIN_COOL | 0, 0);
+}
 function bindCommon(p) {
+  setupProg(p);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, VC.voxel.paletteTexture());
   gl.activeTexture(gl.TEXTURE1);
@@ -1892,14 +1988,19 @@ function initGL() {
   for (const p of [...PROGS[0], ...PROGS[1], ...PROGS[2], ...PROGS[3], ghostProg]) {
     if (!p) continue;
     p.use();
-    if (p.u.uPal) gl.uniform1i(p.u.uPal, 0);
-    if (p.u.uInst) gl.uniform1i(p.u.uInst, 1);
-    if (p.u.uWinPal) gl.uniform4i(p.u.uWinPal, VC.P.WIN_OFFICE | 0, VC.P.WIN_SHOP | 0, VC.P.WIN_COOL | 0, 0);
+    setupProg(p);
   }
-  streamBuf = gl.createBuffer();
-  // sprites
   sprProg = G.program('bld_sprites', VS_SPR, FS_SPR);
-  // per-vertex quad corners (divisor 0) + per-instance sprite data (divisor 1)
+  initBuffers();
+}
+/**
+ * Buffers / VAOs of the renderer (init, and after a context restore; the program wrappers stay valid: the core
+ * relinks them on first use). The data texture is (re)created by flushTex.
+ */
+function initBuffers() {
+  const G = VC.gfx;
+  streamBuf = gl.createBuffer();
+  // sprites: per-vertex quad corners (divisor 0) + per-instance sprite data (divisor 1)
   const cornerBuf = G.buffer(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]));
   const mk = (buf) => {
     const vao = gl.createVertexArray();

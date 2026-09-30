@@ -33,7 +33,12 @@
  *   signal(x, z)           traffic-light phase of an intersection tile: -1 none, 0 X-axis green,
  *                          1 X yellow, 2 Z-axis green, 3 Z yellow
  *   vehicles()             debug: array of {kind, x, z, speed, role}
+ *   restore()              WebGL context restored (layer hook; also covers 'agents_glow'): the shared model
+ *                          meshes are re-uploaded (VC.fxgl.restoreModels); the batches re-create their buffers
+ *                          on their next draw
  * Air, sea, birds and balloons live in gfx/fx_air.js (VC.fxAir), updated and drawn from here.
+ * While the WebGL context is lost update() is skipped (vehicles freeze, nothing spawns: spawning may build a
+ * model, whose mesh could not be uploaded).
  */
 const M = VC.M, C = VC.C;
 /** Vector length without Math.hypot (V8's hypot allocates its argument list; this is on per-frame paths). */
@@ -146,6 +151,7 @@ const A = (VC.agents = {
 
   update(dt, rdt) {
     if (!S || S !== VC.state) { if (VC.state) A.reset(VC.state); else return; }
+    if (VC.fxgl.lost()) return; // context lost: nothing is drawn; no spawns (model builds) until the restore
     const t0 = performance.now();
     if (dirty) rebuildRoads();
     const sp = GAME_SPEED[S.time.speed | 0] || 1;
@@ -166,12 +172,18 @@ const A = (VC.agents = {
   opaque(ctx) {
     A.batch.draw(ctx, false);
   },
+  /** WebGL context restored: shared model meshes back on the GPU; batch buffers / VAOs re-create themselves. */
+  restore() {
+    VC.fxgl.restoreModels();
+  },
   glowLayer: {
     name: 'agents_glow',
     order: 650,
     transparent(ctx) {
       A.glows.draw(ctx);
     },
+    /** (the glow batch re-creates its buffer and VAO on its next draw, see VC.fxgl) */
+    restore() {},
   },
 
   count() {

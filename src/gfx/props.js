@@ -29,9 +29,12 @@
  * Props end at their LOD-1 mesh (no 1/4-res tier) and are culled well before they shrink below a pixel
  * (VC.bldgfx skip table); lamp and signal glows are sprites and stay visible farther out.
  *
+ * WEBGL CONTEXT LOSS: tick() does nothing while the context is lost (queued rects / wires wait); restore() re-creates
+ *   the wire buffers + VAO and re-uploads the wires. Prop instances live in VC.bldgfx.eng, restored by VC.bldgfx.
+ *
  * API (VC.props): init(), reset(S), update(dt, rdt) / tick(dt, rdt) (VC.bldgfx sets props.driven and calls
- *   tick), rebuild(x0, z0, x1, z1) (queue a rect), stats, lampReach (world units the lamp head overhangs the
- *   road from the pole at a lamp spot, ~0.2: the terrain's light pools belong that far toward the road).
+ *   tick), rebuild(x0, z0, x1, z1) (queue a rect), restore(), stats, lampReach (world units the lamp head
+ *   overhangs the road from the pole at a lamp spot, ~0.2: the terrain's light pools belong that far toward the road).
  */
 const M = VC.M, C = VC.C;
 const DX = [1, -1, 0, 0], DZ = [0, 0, 1, -1];
@@ -85,6 +88,7 @@ const PR = (VC.props = {
   },
   tick(dt, rdt) {
     if (!inited || !S || S !== VC.state) return;
+    if (VC.gfx.lost || gl.isContextLost()) return; // (no GL calls / model builds: resumes after the restore)
     if (!mw.lamp) resolveModels();
     fresh = false;
     processQueue(3);
@@ -96,6 +100,18 @@ const PR = (VC.props = {
   /** Rebuilds the props of an inclusive tile rect (queued; done within the frame budget). */
   rebuild(x0, z0, x1, z1) {
     queue.push([x0, z0, x1, z1]);
+  },
+
+  /**
+   * WebGL context restored (render core layer hook): new wire buffers + VAO, wires re-uploaded on the next tick.
+   * The prop instances themselves are restored with VC.bldgfx (engine set 1); the wire program relinks by itself.
+   */
+  restore() {
+    if (!inited) return;
+    gl = VC.gfx.gl;
+    initWireBuffers();
+    wiresDirty = true;
+    nWires = 0; // (nothing to draw until the re-upload)
   },
 
   shadow(ctx) {
@@ -512,8 +528,12 @@ function pylonRecord(x, y, z, yaw, scale) {
 }
 let wireProg = null, wireVao = null, wireBuf = null, wireData = new Float32Array(8 * 256), nWires = 0;
 function initWires() {
+  wireProg = VC.gfx.program('props_wires', WIRE_VS, WIRE_FS);
+  initWireBuffers();
+}
+/** Wire segment buffer, instance buffer and VAO (init, and after a context restore). */
+function initWireBuffers() {
   const G = VC.gfx;
-  wireProg = G.program('props_wires', WIRE_VS, WIRE_FS);
   const seg = new Float32Array((SEG + 1) * 4);
   for (let i = 0; i <= SEG; i++) {
     seg[i * 4] = i / SEG; seg[i * 4 + 1] = -1;

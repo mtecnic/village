@@ -7,6 +7,7 @@
  *                       'milestone' (30 shells + confetti) and 'year' (New Year, 18 shells) over City Hall
  *                       or the population-weighted city centre.
  *   confetti(x, z, n)   confetti + sparkle bursts (above City Hall when (x, z) is omitted)
+ *   isLaunching(b)      true while b's rocket is in the air (bldgfx may hide the static pad rocket)
  *   launch(b)           space-center rocket launch: countdown venting, ignition with a huge steam cloud,
  *                       ascent with flame, exhaust glow and smoke trail, gravity turn ('sfx' rocket).
  *                       Happens automatically a few times per game year for every working space_center.
@@ -22,19 +23,29 @@ const shells = []; // rising shells
 const pops = []; // delayed crackles / flashes {t, x, y, z, kind, c}
 const launches = [];
 let sfxT = 0;
+let showSeq = 0; // incremented by every fireworks() call
+let pending = null; // deferred automatic celebration {n, confetti, seq}
 
 const Cel = (VC.fxCel = {
   init() {
-    VC.bus.on('milestone', () => celebrate(30, true));
-    VC.bus.on('year', () => celebrate(18, false));
+    // Deferred one frame: if another module already started a show for the same event (advisors call
+    // VC.fx.fireworks on milestones), only the confetti is added.
+    VC.bus.on('milestone', () => (pending = { n: 30, confetti: true, seq: showSeq }));
+    VC.bus.on('year', () => { if (!pending) pending = { n: 18, confetti: false, seq: showSeq }; });
     VC.bus.on('month', onMonth);
   },
   reset(S) {
     rnd = M.rng((S.seed ^ 0xf1e0) >>> 0);
     queue.length = shells.length = pops.length = launches.length = 0;
+    pending = null;
   },
   stats() {
     return { queued: queue.length, shells: shells.length, launches: launches.length };
+  },
+  /** True while building b (a space_center) has a rocket off its pad (renderers may hide the static one). */
+  isLaunching(b) {
+    for (const l of launches) if (l.b === b && l.phase === 'lift') return true;
+    return false;
   },
 
   fireworks(x, z, n = 20) {
@@ -42,6 +53,7 @@ const Cel = (VC.fxCel = {
     if (!S) return false;
     if (x == null || z == null) [x, z] = center(S);
     n = M.clamp(n | 0, 1, 80);
+    showSeq++;
     const D = M.clamp(n * 0.55, 4, 20);
     for (let k = 0; k < n; k++) {
       const finale = k >= n * 0.82;
@@ -89,6 +101,12 @@ const Cel = (VC.fxCel = {
   },
 
   update(dt, rdt, S, B, G) {
+    if (pending) {
+      const p = pending;
+      pending = null;
+      if (showSeq === p.seq) celebrate(p.n, false);
+      if (p.confetti) Cel.confetti();
+    }
     if (rdt <= 0) return drawOnly(B, G);
     const Pt = VC.particles;
     sfxT -= rdt;
@@ -118,7 +136,7 @@ const Cel = (VC.fxCel = {
     for (let k = pops.length - 1; k >= 0; k--) {
       const p = pops[k];
       p.t -= rdt;
-      if (p.kind === 'flash' && p.t > -0.45) continue;
+      if (p.kind === 'flash' && p.t > -0.3) continue;
       if (p.t > 0) continue;
       pops.splice(k, 1);
       if (!Pt) continue;
@@ -143,11 +161,11 @@ function burst(s) {
     Pt.burst('flash', s.x, s.y, s.z, 1, { size: 1.6, color: [c1[0] * 1.2, c1[1] * 1.2, c1[2] * 1.2] });
     switch (s.pat) {
       case 0:
-        Pt.burst('firework', s.x, s.y, s.z, 90, { color: c1, spread: 5.5 });
+        Pt.burst('firework', s.x, s.y, s.z, 120, { color: c1, spread: 5.5 });
         break;
       case 1:
-        Pt.burst('firework', s.x, s.y, s.z, 55, { color: c1, spread: 5.8 });
-        Pt.burst('firework', s.x, s.y, s.z, 45, { color: c2, spread: 3.4 });
+        Pt.burst('firework', s.x, s.y, s.z, 70, { color: c1, spread: 5.8 });
+        Pt.burst('firework', s.x, s.y, s.z, 55, { color: c2, spread: 3.4 });
         break;
       case 2: {
         // ring in a random plane
@@ -182,9 +200,9 @@ function drawOnly(B, G) {
   for (const s of shells) G.add(s.x, s.y, s.z, 0.25, 1, 0.8, 0.5, 3, 0, 0, 1, 0.6);
   for (const p of pops) {
     if (p.kind !== 'flash') continue;
-    const k = M.clamp(-p.t / 0.45, 0, 1);
+    const k = M.clamp(-p.t / 0.3, 0, 1);
     const c = FW_COLS[p.c];
-    G.add(p.x, p.y, p.z, 6 + k * 6, c[0] * 0.25, c[1] * 0.25, c[2] * 0.25, (1 - k) * 1.6, 0, 0, 1, 0.05);
+    G.add(p.x, p.y, p.z, 5 + k * 4, c[0] * 0.25, c[1] * 0.25, c[2] * 0.25, (1 - k) * (1 - k) * 0.8, 0, 0, 1, 0.05);
   }
   for (const l of launches) drawLaunch(l, B, G);
 }

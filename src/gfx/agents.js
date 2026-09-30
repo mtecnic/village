@@ -37,6 +37,7 @@ const RIGHT_OF = [2, 3, 1, 0], LEFT_OF = [3, 2, 0, 1];
 const POP = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
 const LANE = [[0.18, 0.18], [0.18, 0.18], [0.125, 0.31], [0.14, 0.34]]; // [road type][lane 0 inner, 1 outer]
 const ROAD_SPEED = [1, 1, 1.3, 2.1];
+const GAME_SPEED = [0, 1, 1.5, 2.2]; // vehicle speed multiplier per sim speed setting (visual, not 1:1)
 const CYCLE = 11, GREEN = 4.8, YELLOW = 0.7; // signal timing (agent seconds)
 
 /* vehicle kinds */
@@ -106,8 +107,8 @@ const A = (VC.agents = {
     A.glows = VC.fxgl.glowBatch(2048);
     VC.gfx.addLayer(A);
     VC.gfx.addLayer(A.glowLayer);
-    VC.bus.on('dirty', (d) => markRoads(d.x0, d.z0, d.x1, d.z1));
-    VC.bus.on('roadChange', (d) => markRoads(d.x, d.z, d.x, d.z));
+    VC.bus.on('dirty', (d) => markRoads(d.x0, d.z0, d.x1, d.z1, false));
+    VC.bus.on('roadChange', (d) => markRoads(d.x, d.z, d.x, d.z, true));
     if (VC.fxAir && VC.fxAir.init) VC.fxAir.init();
   },
 
@@ -133,7 +134,7 @@ const A = (VC.agents = {
     if (!S || S !== VC.state) { if (VC.state) A.reset(VC.state); else return; }
     const t0 = performance.now();
     if (dirty) rebuildRoads();
-    const sp = [0, 1, 1.5, 2.2][S.time.speed | 0] || 1;
+    const sp = GAME_SPEED[S.time.speed | 0] || 1;
     const gdt = dt * sp;
     A.clock += gdt;
     buildHash();
@@ -189,7 +190,8 @@ const A = (VC.agents = {
 /* ------------------------------------------------------------------ */
 /* Road graph                                                            */
 /* ------------------------------------------------------------------ */
-function markRoads(x0, z0, x1, z1) {
+/** Marks link masks in a tile rect for recomputation; roadSet = the set of road tiles changed. */
+function markRoads(x0, z0, x1, z1, roadSet) {
   if (!S) return;
   x0 = Math.max(0, x0 - 2); z0 = Math.max(0, z0 - 2);
   x1 = Math.min(W - 1, x1 + 2); z1 = Math.min(H - 1, z1 + 2);
@@ -198,7 +200,7 @@ function markRoads(x0, z0, x1, z1) {
     dirty.x0 = Math.min(dirty.x0, x0); dirty.z0 = Math.min(dirty.z0, z0);
     dirty.x1 = Math.max(dirty.x1, x1); dirty.z1 = Math.max(dirty.z1, z1);
   }
-  roadsDirty = true;
+  if (roadSet) roadsDirty = true;
 }
 
 /* mirror of the terrain renderer's road rules (used when VC.terrain.roadInfo is unavailable) */
@@ -863,6 +865,7 @@ function manage(rdt) {
   let excess = nCars - A.desired;
   for (let i = 0; i < CAP; i++) {
     if (!alive[i] || role[i] === R_DISPATCH) continue;
+    if (fade[i] < 0) { excess--; continue; } // already leaving
     const d = Math.hypot(posX[i] - cam.tx, posZ[i] - cam.tz);
     if (d > Rd && (d > Rd * 1.3 || !F.sphere(posX[i], posY[i], posZ[i], 0.6))) { free(i); excess--; continue; }
     if (excess > A.desired * 0.12 + 2 && fade[i] >= 1 && !F.sphere(posX[i], posY[i], posZ[i], 0.6)) { fade[i] = -0.001; excess--; }

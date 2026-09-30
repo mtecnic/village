@@ -403,7 +403,8 @@ void main(){
     a = exp(-r * r * 30.0) * 1.5 + (cx + cy) * 0.9;
   } else if (kind == 4) {
     float w = max(vP.w, 0.02);
-    a = exp(-pow((r - (1.0 - w)) / w, 2.0)) * step(r, 1.0);
+    float d = (r - (1.0 - w)) / w; // (never pow() a negative base: undefined in GLSL)
+    a = exp(-d * d) * step(r, 1.0);
   }
   float fogK = exp(-length(vWp - uCamPos.xyz) * uFog.w * 0.8);
   fragColor = vec4(vCol.rgb * (vCol.a * a * fogK), 0.0);

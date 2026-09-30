@@ -18,7 +18,7 @@
  * CELEBRATIONS: gfx/fx_celebrate.js (VC.fxCel): fireworks, confetti, space-center rocket launches.
  *
  * API: setWeather(type | 'auto', instant), fireworks(x, z, n), confetti(x, z, n), launchRocket(b?),
- *      weatherInfo() -> {target, forced, nextInDays}, stats
+ *      isLaunching(b), lightning(x, z), weatherInfo() -> {target, forced, nextInDays, precipKind}, stats
  */
 const M = VC.M, C = VC.C;
 const TYPES = ['clear', 'cloudy', 'rain', 'storm', 'snow', 'fog'];
@@ -159,6 +159,10 @@ const FXL = (VC.fx = {
   },
   launchRocket(b) {
     return VC.fxCel ? VC.fxCel.launch(b) : false;
+  },
+  /** True while space_center b has its rocket in flight (renderers may hide the model's static pad rocket). */
+  isLaunching(b) {
+    return VC.fxCel ? VC.fxCel.isLaunching(b) : false;
   },
   /** Triggers a lightning strike near (x, z) (debug / effects). */
   lightning(x, z) {

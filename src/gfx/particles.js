@@ -42,7 +42,7 @@ const TYPES = {
   fire: { k: K_FIRE, life: [0.45, 0.9], size: [0.22, 0.4], grow: 0.4, col: [1, 1, 1], a: 1, buoy: 1.8, drag: 1.4, wind: 0.35, spread: 0.4, vy: 0.9, jit: 0.15 },
   spark: { k: K_ADD, life: [0.5, 1.1], size: [0.035, 0.06], grow: 0.5, col: [5, 2.6, 0.8], a: 1, grav: 6, drag: 0.6, spread: 2.6, vy: 2.2, jit: 0.05 },
   ember: { k: K_ADD, life: [1.2, 2.4], size: [0.03, 0.05], grow: 0.6, col: [4, 1.3, 0.25], a: 1, buoy: 0.9, drag: 0.8, wind: 1, spread: 0.7, vy: 1.3, jit: 0.3, flicker: 1 },
-  firework: { k: K_ADD, life: [1.3, 2.3], size: [0.09, 0.13], grow: 0.35, col: [3, 3, 3], a: 1, grav: 1.1, drag: 1.5, spread: 5, jit: 0, flicker: 0.4 },
+  firework: { k: K_ADD, life: [1.4, 2.4], size: [0.13, 0.18], grow: 0.3, col: [3, 3, 3], a: 1, grav: 1.1, drag: 1.5, spread: 5, jit: 0, flicker: 0.45 },
   willow: { k: K_ADD, life: [2.4, 3.4], size: [0.07, 0.1], grow: 0.5, col: [4, 2.6, 0.9], a: 1, grav: 2.4, drag: 2.4, spread: 4.5, jit: 0, flicker: 0.7 },
   crackle: { k: K_STAR, life: [0.25, 0.5], size: [0.1, 0.16], grow: 0.4, col: [5, 4.5, 3.5], a: 1, grav: 1, drag: 2, spread: 1.2, jit: 0.8 },
   flash: { k: K_ADD, life: [0.12, 0.22], size: [1.4, 2], grow: 1.6, col: [6, 4, 2.4], a: 1, jit: 0 },
@@ -196,6 +196,8 @@ function spawn(tid, x, y, z, o, isBurst) {
   else if (tid === TYPE_ID.confetti) col = CONFETTI_COLS[Math.floor(r() * CONFETTI_COLS.length)];
   else if (tid === TYPE_ID.leaf) col = LEAF_COLS[Math.floor(r() * LEAF_COLS.length)];
   if (typeof col === 'number') col = VC.fxgl.palRGB(col, tmp3);
+  else if (typeof col === 'string') col = VC.color.toLinear(VC.color.rgb(col));
+  if (!col || col.length < 3) col = T.col;
   const jv = T.k === K_SOFT ? 0.9 + r() * 0.2 : 1;
   cr[i] = col[0] * jv; cg[i] = col[1] * jv; cb[i] = col[2] * jv;
   ca[i] = o && o.alpha != null ? o.alpha : T.a == null ? 1 : T.a;
@@ -478,7 +480,7 @@ function autoEffects(S, dt) {
     // light: ground pool + halo (strong at night)
     const L = (0.35 + night * 1.2) * f * flick;
     Pt.glows.add(cxw, gy + 0.05, czw, 1.6 + Math.max(b.w, b.d) * 1.1, 1.0, 0.42, 0.12, L * 1.3, 1, 0, 1, 0);
-    Pt.glows.add(cxw, gy + hgt * 0.7, czw, 1.0 + hgt * 0.6 + b.w * 0.4, 1.0, 0.38, 0.1, L * 0.55, 0, 0, 1, 0.1);
+    Pt.glows.add(cxw, gy + hgt * 0.7, czw, 1.0 + hgt * 0.5 + b.w * 0.4, 1.0, 0.32, 0.06, L * 0.4, 0, 0, 1, 0);
     if (nActive >= cap * 0.95) continue;
     const nFire = (6 + 10 * Math.pow(area, 0.7)) * f * lod * dt;
     for (let k = 0; k < 6 && (k < Math.floor(nFire) || r() < nFire - k); k++) {
@@ -619,8 +621,11 @@ layout(location=2) in vec4 aP2;
 out vec2 vUv; flat out vec4 vCol; flat out vec4 vP; out vec3 vWp;
 void main(){
   vec2 q = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1)) * 2.0 - 1.0;
-  float c = cos(aP2.x), s = sin(aP2.x);
+  bool flame = abs(aP2.y - 6.0) < 0.5;
+  float ang = flame ? sin(aP2.x * 3.0 + TIME * 4.0) * 0.12 : aP2.x;
+  float c = cos(ang), s = sin(ang);
   vec2 rq = vec2(c * q.x - s * q.y, s * q.x + c * q.y);
+  if (flame) rq.y = rq.y * 1.7 + 0.5;
   vec3 camR = vec3(uView[0][0], uView[1][0], uView[2][0]);
   vec3 camU = vec3(uView[0][1], uView[1][1], uView[2][1]);
   if (aP2.y > 6.5) { camR = vec3(1.0, 0.0, 0.0); camU = vec3(0.0, 0.0, 1.0); }
@@ -659,7 +664,8 @@ void main(){
     col = col * light + vec3(1.0) * pow(max(0.0, 1.0 - length(vUv - vec2(-0.35, 0.35)) * 2.2), 3.0) * (0.3 + uSunDir.w * 0.6);
   } else {
     float r = sqrt(r2);
-    a = exp(-pow((r - 0.72) / 0.16, 2.0));
+    float d = (r - 0.72) / 0.16;
+    a = exp(-d * d);
     col = col * (uSkyAmb.rgb * 1.3 + uSunColor.rgb * uSunDir.w * 0.3 + vec3(0.6) * uMisc.z);
   }
   col = applyFog(col, vWp);
@@ -671,15 +677,18 @@ out vec4 fragColor;
 void main(){
   int kind = int(vP.y + 0.5);
   float r2 = dot(vUv, vUv);
-  if (r2 > 1.0) discard;
+  if (r2 > 1.0 && kind != 6) discard;
   float a;
   if (kind == 4) {
     float cx = exp(-abs(vUv.x) * 16.0) * (1.0 - abs(vUv.y));
     float cy = exp(-abs(vUv.y) * 16.0) * (1.0 - abs(vUv.x));
     a = exp(-r2 * 22.0) * 1.4 + (cx + cy) * 0.9;
   } else if (kind == 6) {
+    // teardrop flame: wide at the base, licking to a point at the top
     float n = tnoise(vUv * 0.3 + vP.z * 5.7 + vec2(0.0, -TIME * 0.9)).r;
-    a = smoothstep(1.0, 0.0, r2 + (n - 0.5) * 0.9) * (0.7 + 0.6 * n);
+    float w = mix(1.0, 0.3, vUv.y * 0.5 + 0.5);
+    float d = length(vec2(vUv.x / w, vUv.y));
+    a = smoothstep(1.0, 0.05, d + (n - 0.5) * 0.7) * (0.7 + 0.6 * n);
   } else {
     a = exp(-r2 * 4.5) * 0.8 + exp(-r2 * 22.0) * 0.8;
   }

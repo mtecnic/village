@@ -24,10 +24,11 @@
  *   skip distance are dropped) are scanned — nearest first in the camera pass, so each bucket is ordered front
  *   to back — and each instance picks a LOD tier by camera distance (0 full mesh, 1 model.lod, 2 a
  *   1/4-resolution mesh built lazily here from model.grid; props stop at tier 1, models without a distinct
- *   LOD mesh stay in one bucket). The LOD distance is the preset's lodDist on high/ultra (moved closer only by
- *   dynamic resolution / wide FOV) and screen-space on medium/low (see lodDistance). Tiny/far things are
- *   skipped (SKIP_DEF: props end at 0.9 lodDist, their glows stay), and the visible slot indices are
- *   counting-sorted per (model, tier) into a stream buffer. Result: ONE drawElementsInstanced per visible
+ *   LOD mesh stay in one bucket, and a model's few 1/4-res instances (<= 3) join its LOD-1 bucket). The LOD
+ *   distances are the preset's lodDist on high/ultra (moved closer only by dynamic resolution / wide FOV); on
+ *   medium/low the full-mesh range is screen-space (see lodDistance). Tiny/far things are skipped (SKIP_DEF:
+ *   props end at 0.9 lodDist, their glows stay), and the visible slot indices are counting-sorted per
+ *   (model, tier) into a stream buffer. Result: ONE drawElementsInstanced per visible
  *   (model, tier) — bindVertexArray + one attribute pointer + one uniform per draw (the instance attribute's
  *   enable/divisor live in each model VAO). Shadow passes use tier >= 1 (the far cascade tier 2) and skip small
  *   casters (props, tiny buildings and distant trees in the far cascade).
@@ -258,6 +259,8 @@ let dataTex = null, texRealloc = true;
 let tmpB = null, tmpS = null, out = null;
 let bCnt = new Int32Array(0), bCur = new Int32Array(0), bStart = new Int32Array(0), used = new Int32Array(0), nUsed = 0;
 let bMin = new Float32Array(0), sortKeys = new Float64Array(0);
+let bRemap = new Int32Array(0), mergedBk = new Int32Array(0); // tier-2 -> tier-1 bucket merges (gather)
+const MERGE_L2 = 3; // 1/4-res buckets with at most this many instances draw with the model's LOD-1 bucket
 // cells
 let cw = 0, cht = 0, nCells = 0;
 const cellL = [[], []];
@@ -1459,6 +1462,8 @@ function ensureBuckets() {
   used = new Int32Array(len);
   bMin = new Float32Array(len);
   sortKeys = new Float64Array(len);
+  bRemap = new Int32Array(len).fill(-1);
+  mergedBk = new Int32Array(len);
 }
 /** Frustum planes for the pass (core's ctx.frustum, else extracted from the pass matrix). */
 function passPlanes(ctx, shadow) {
@@ -1486,19 +1491,23 @@ const TIER_F = [[1.0, 2.6], [0.42, 1.15], [0.35, 0.8], [0.9, 2.2]];
 const kindSkip = [new Float32Array(NK), new Float32Array(NK), new Float32Array(NK)];
 let cellKeys = new Float64Array(0);
 /**
- * Effective LOD distance. High / ultra use the preset's lodDist (tuned for ~1080-px renders: a voxel is ~2.4 px
- * where the full mesh hands over to LOD 1) and only move closer when the dynamic resolution drops (autoScale) or the
- * FOV widens. Medium / low are screen-space: the tiers follow the render height, so smaller targets (their render
- * scales, small windows) switch to the coarse meshes as soon as a voxel shrinks to the same pixel size.
+ * Effective LOD distances -> lodD[0] (full mesh -> LOD 1) and lodD[1] (scale of the LOD 1 -> 1/4-res switch and of
+ * the skip distances). High / ultra use the preset's lodDist for both (tuned for ~1080-px renders: a voxel is
+ * ~2.4 px where the full mesh hands over to LOD 1); they only move closer when the dynamic resolution drops
+ * (autoScale) or the FOV widens. Medium / low make the first switch screen-space: it follows the render height, so
+ * smaller targets (their render scales, small windows) use LOD 1 as soon as a voxel shrinks to that pixel size
+ * (the full meshes are 3-4x the triangles of LOD 1); the blocky 1/4-res tier keeps its preset distance.
  */
+const lodD = new Float64Array(2);
 function lodDistance() {
   const G = VC.gfx, cam = VC.camera;
   let lod = quality ? quality.lodDist : 90;
   if (G.caps && G.caps.software) lod *= 0.55; // software rasterizers (headless tests): coarser meshes sooner
   const fov = cam && cam.fov > 0.1 ? cam.fov : 0.5934;
-  let k = (0.30573 / Math.tan(fov * 0.5)) * M.clamp(G.autoScale || 1, 0.6, 1);
-  if (quality && quality.lodDist < 90) k *= (G.rh || 1080) / 1080;
-  return lod * M.clamp(k, 0.5, 1);
+  const k = M.clamp((0.30573 / Math.tan(fov * 0.5)) * M.clamp(G.autoScale || 1, 0.6, 1), 0.5, 1);
+  lodD[1] = lod * k;
+  lodD[0] = quality && quality.lodDist < 90 ? lod * M.clamp(k * ((G.rh || 1080) / 1080), 0.5, 1) : lodD[1];
+  return lodD;
 }
 /**
  * Collects the visible slots of a set into (model, tier) buckets. mode: 0 camera, 1 shadow near, 2 shadow far.
@@ -1508,14 +1517,14 @@ function lodDistance() {
 function gather(set, planes, mode) {
   ensureBuckets();
   nUsed = 0;
-  const lod = lodDistance();
-  const L2 = lod * lod;
+  const ld = lodDistance();
+  const L0 = ld[0] * ld[0], L2 = ld[1] * ld[1];
   // trees are skipped well beyond the draw distance (fog has swallowed them there)
   const dd = (quality ? quality.drawDist : 300) * (mode === 0 ? 1.7 : mode === 1 ? 0.8 : 1.1);
   const treeCap = dd * dd;
   const T0 = gather._t0 || (gather._t0 = new Float32Array(NK)), T1 = gather._t1 || (gather._t1 = new Float32Array(NK));
   for (let k = 0; k < NK; k++) {
-    T0[k] = TIER_F[k][0] * TIER_F[k][0] * L2;
+    T0[k] = TIER_F[k][0] * TIER_F[k][0] * L0;
     T1[k] = TIER_F[k][1] * TIER_F[k][1] * L2;
   }
   const minTier = mode === 0 ? 0 : mode === 1 ? 1 : 2;
@@ -1575,6 +1584,26 @@ function gather(set, planes, mode) {
       tmpS[k] = s;
       k++;
     }
+  }
+  // a model's few 1/4-res instances join its LOD-1 bucket: one draw saved for a few hundred extra triangles
+  let nMerged = 0;
+  for (let u = 0; u < nUsed; u++) {
+    const bk = used[u];
+    if (bk % 3 !== 2 || bCnt[bk] > MERGE_L2 || bCnt[bk - 1] === 0) continue;
+    bRemap[bk] = bk - 1;
+    bCnt[bk - 1] += bCnt[bk];
+    bCnt[bk] = 0;
+    mergedBk[nMerged++] = bk;
+  }
+  if (nMerged) {
+    let w = 0;
+    for (let u = 0; u < nUsed; u++) if (bCnt[used[u]] > 0) used[w++] = used[u];
+    nUsed = w;
+    for (let j = 0; j < k; j++) {
+      const r = bRemap[tmpB[j]];
+      if (r >= 0) tmpB[j] = r;
+    }
+    for (let m = 0; m < nMerged; m++) bRemap[mergedBk[m]] = -1;
   }
   let off = 0;
   for (let u = 0; u < nUsed; u++) {

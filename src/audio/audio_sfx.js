@@ -626,7 +626,7 @@ Object.assign(A.ALIAS, {
   ding: 'notify', toast: 'notify', notification: 'notify', message: 'notify', news: 'notify',
   warn: 'alert', warning: 'alert', bad: 'alert', danger: 'alert',
   fanfare: 'milestone', celebrate: 'milestone',
-  sparkle: 'achievement', unlock: 'achievement',
+  sparkle: 'achievement', unlock: 'notify', unlocked: 'notify',
   level_up: 'levelup', upgrade: 'levelup', grow: 'levelup',
   place: 'build', building: 'build', construct_done: 'build',
   street: 'road', avenue: 'road', highway: 'road',

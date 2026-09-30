@@ -4,7 +4,11 @@
  *
  * All screen coordinates are CSS pixels relative to the canvas' top-left.
  * yaw: radians around Y (0 = camera on +Z side looking toward -Z)
- * pitch: radians above horizon (clamped 0.35..1.5)
+ * pitch: radians above horizon, clamped to [minPitchAt(dist), maxPitch]. The floor depends on the zoom:
+ *   minPitchNear (0.08) at dist <= 25 .. minPitchFar (0.3) at dist >= 60, so close street-level views can
+ *   tilt up to the skyline / sunset while overviews keep a readable map angle. cam.minPitch = current floor.
+ * EYE COLLISION: the eye is kept above the terrain around it and lifted (smoothly) over buildings and
+ *   trees near it, so it never enters a tower or near-clips a wall. cam.lift = current lift (world units).
  */
 const M = VC.M, Mat4 = VC.Mat4;
 const cam = (VC.camera = {
@@ -21,8 +25,11 @@ const cam = (VC.camera = {
   far: 1500,
   minDist: 4,
   maxDist: 260,
-  minPitch: 0.3,
+  minPitch: 0.3, // current pitch floor (depends on distance, see minPitchAt)
+  minPitchNear: 0.08,
+  minPitchFar: 0.3,
   maxPitch: 1.5,
+  lift: 0, // smoothed eye lift over nearby buildings (world units)
   pos: [0, 0, 0],
   view: Mat4.create(),
   proj: Mat4.create(),
@@ -58,6 +65,7 @@ const cam = (VC.camera = {
       g.tz = M.clamp(g.tz, -8, S.H + 8);
     }
     g.dist = M.clamp(g.dist, cam.minDist, cam.maxDist);
+    cam.minPitch = cam.minPitchAt(g.dist);
     g.pitch = M.clamp(g.pitch, cam.minPitch, cam.maxPitch);
     const r = 12;
     cam.tx = M.damp(cam.tx, g.tx, r, rdt);
@@ -66,6 +74,10 @@ const cam = (VC.camera = {
     cam.pitch = M.damp(cam.pitch, g.pitch, r, rdt);
     cam.dist = Math.exp(M.damp(Math.log(cam.dist), Math.log(g.dist), r, rdt));
     if (S) cam.ty = M.damp(cam.ty, sampleGround(cam.tx, cam.tz), 4, rdt);
+    // lift the eye over buildings near it: rises fast, settles slowly (no pops while orbiting past towers)
+    const need = S ? buildingLift() : 0;
+    cam.lift = need > cam.lift ? M.damp(cam.lift, need, 14, rdt) : M.damp(cam.lift, need, 3, rdt);
+    if (!isFinite(cam.lift)) cam.lift = 0;
     if (cam.shakeAmt > 0.001) {
       const a = cam.shakeAmt;
       cam._shake = [(Math.random() - 0.5) * a, (Math.random() - 0.5) * a * 0.5, (Math.random() - 0.5) * a];
@@ -78,10 +90,13 @@ const cam = (VC.camera = {
     const sh = cam._shake;
     const t = [cam.tx + sh[0], cam.ty + sh[1], cam.tz + sh[2]];
     cam.pos = [t[0] + cam.dist * cp * Math.sin(cam.yaw), t[1] + cam.dist * sp, t[2] + cam.dist * cp * Math.cos(cam.yaw)];
-    // keep the eye above terrain
+    // keep the eye above the terrain around it (blocky cliffs next to the eye would near-clip) and above
+    // buildings near it (cam.lift, smoothed in update)
     if (VC.state) {
-      const gy = sampleGround(cam.pos[0], cam.pos[2]) + 0.6;
+      const x = cam.pos[0], z = cam.pos[2], r = 0.7;
+      const gy = Math.max(sampleGround(x, z), sampleGround(x - r, z - r), sampleGround(x + r, z - r), sampleGround(x - r, z + r), sampleGround(x + r, z + r)) + 0.6;
       if (cam.pos[1] < gy) cam.pos[1] = gy;
+      cam.pos[1] += cam.lift;
     }
     cam.near = Math.max(0.15, cam.dist * 0.02);
     cam.far = cam.dist * 6 + 500;
@@ -113,7 +128,7 @@ const cam = (VC.camera = {
   },
   orbit(dYaw, dPitch) {
     cam.goal.yaw += dYaw;
-    cam.goal.pitch = M.clamp(cam.goal.pitch + dPitch, cam.minPitch, cam.maxPitch);
+    cam.goal.pitch = M.clamp(cam.goal.pitch + dPitch, cam.minPitchAt(cam.goal.dist), cam.maxPitch);
   },
   /** Multiplies distance by f (<1 zooms in). If px/py given, zooms toward that screen point. */
   zoom(f, px, py) {
@@ -139,8 +154,18 @@ const cam = (VC.camera = {
   /** Instantly jumps (no smoothing). */
   snap() {
     const g = cam.goal;
+    g.dist = M.clamp(g.dist, cam.minDist, cam.maxDist);
+    cam.minPitch = cam.minPitchAt(g.dist);
+    g.pitch = M.clamp(g.pitch, cam.minPitch, cam.maxPitch);
     cam.tx = g.tx; cam.tz = g.tz; cam.yaw = g.yaw; cam.pitch = g.pitch; cam.dist = g.dist;
-    if (VC.state) cam.ty = sampleGround(cam.tx, cam.tz);
+    if (VC.state) {
+      cam.ty = sampleGround(cam.tx, cam.tz);
+      cam.lift = buildingLift();
+    }
+  },
+  /** Pitch floor for camera distance d: low (street level, sky visible) when close, map-like when far. */
+  minPitchAt(d) {
+    return M.lerp(cam.minPitchNear, cam.minPitchFar, M.smoothstep(25, 60, d));
   },
   shake(amount) {
     cam.shakeAmt = Math.max(cam.shakeAmt, amount);
@@ -190,6 +215,70 @@ function sampleGround(x, z) {
   if (!S) return 0;
   const xi = M.clamp(Math.floor(x), 0, S.W - 1), zi = M.clamp(Math.floor(z), 0, S.H - 1);
   return Math.max(S.height[zi * S.W + xi] * VC.C.STEP, VC.C.SEA_Y);
+}
+
+/*
+ * Eye lift over buildings: the unlifted eye (from the current smoothed target/yaw/pitch/dist) is tested
+ * against the buildings on the tiles around it and on the first stretch of the view ray toward the target.
+ * Each building whose (margin-expanded) footprint is near the eye requires eye.y >= top + margin; the
+ * requirement fades in over LIFT_D world units of horizontal distance, so the camera rises smoothly as it
+ * approaches a tower instead of popping. Returns the required lift (>= 0).
+ */
+const LIFT_M = 0.8, LIFT_FADE = 2.0;
+const _liftSeen = new Set();
+function buildingLift() {
+  const S = VC.state;
+  if (!S || !S.buildings) return 0;
+  const STEP = VC.C.STEP, SEA_Y = VC.C.SEA_Y;
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const dx = cp * Math.sin(cam.yaw), dz = cp * Math.cos(cam.yaw);
+  const ex = cam.tx + cam.dist * dx, ez = cam.tz + cam.dist * dz;
+  let ey = cam.ty + cam.dist * sp;
+  const r0 = 0.7;
+  ey = Math.max(ey, Math.max(sampleGround(ex, ez), sampleGround(ex - r0, ez - r0), sampleGround(ex + r0, ez - r0), sampleGround(ex - r0, ez + r0), sampleGround(ex + r0, ez + r0)) + 0.6);
+  if (!isFinite(ex) || !isFinite(ez) || !isFinite(ey)) return 0;
+  // the tallest buildings are ~25 units; nothing to do when the eye is well above that
+  if (ey > VC.C.MAXH * STEP + 40) return 0;
+  let need = 0;
+  // full lift while a wall could reach the near plane, fading out over LIFT_FADE units beyond that
+  const zone = Math.max(0.15, cam.dist * 0.02) * 1.5 + 0.3, LIFT_D = zone + LIFT_FADE;
+  // sample the eye neighbourhood and 3 points along the ray toward the target (the near-clipping zone)
+  const span = Math.min(3, cam.dist * 0.5);
+  for (let k = 0; k < 4; k++) {
+    const t = (k / 3) * span; // distance from the eye toward the target
+    const px = ex - dx * t, pz = ez - dz * t, py = ey - sp * t;
+    const R = Math.ceil(LIFT_D);
+    const x0 = Math.max(0, Math.floor(px - R)), x1 = Math.min(S.W - 1, Math.floor(px + R));
+    const z0 = Math.max(0, Math.floor(pz - R)), z1 = Math.min(S.H - 1, Math.floor(pz + R));
+    // lifting the eye by L raises this sample point by L * (1 - t / dist)
+    const f = Math.max(0.2, 1 - t / Math.max(cam.dist, 1e-3));
+    _liftSeen.clear();
+    for (let z = z0; z <= z1; z++)
+      for (let x = x0; x <= x1; x++) {
+        const i = z * S.W + x, id = S.bld[i];
+        let top, fx0, fz0, fx1, fz1;
+        if (id) {
+          if (_liftSeen.has(id)) continue;
+          _liftSeen.add(id);
+          const b = S.buildings.get(id);
+          if (!b) continue;
+          top = S.height[b.z * S.W + b.x] * STEP + Math.max(0.3, b.hgt || 1) + LIFT_M;
+          fx0 = b.x; fz0 = b.z; fx1 = b.x + b.w; fz1 = b.z + b.d;
+        } else if (S.trees[i]) {
+          // trees (~1.8 units) right next to a street-level eye fill the screen: keep just above them
+          top = Math.max(S.height[i] * STEP, SEA_Y) + 1.8 + LIFT_M * 0.5;
+          fx0 = x; fz0 = z; fx1 = x + 1; fz1 = z + 1;
+        } else continue;
+        if (top <= py) continue;
+        // horizontal distance from the sample point to the footprint rectangle
+        const hx = Math.max(fx0 - px, 0, px - fx1), hz = Math.max(fz0 - pz, 0, pz - fz1);
+        const hd = Math.hypot(hx, hz);
+        if (hd >= LIFT_D) continue;
+        const w = 1 - M.smoothstep(zone, LIFT_D, hd);
+        need = Math.max(need, ((top - py) * w) / f);
+      }
+  }
+  return Math.min(need, 60);
 }
 
 function rayBox(o, d, x0, y0, z0, x1, y1, z1) {

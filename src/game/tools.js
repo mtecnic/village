@@ -511,6 +511,8 @@ const T = (VC.tools = {
       showLabel(false);
       return;
     }
+    // photo mode / hidden UI: look, don't build (no invisible edits, clean screenshots)
+    if (VC.hud && (VC.hud.uiHidden || VC.hud.photo) && T.current !== 'select') T.select('select');
     pick(false);
     if (T.drag) {
       track();
@@ -1120,7 +1122,7 @@ function updateLabel() {
   if (!label) return;
   const p = T.plan;
   const hidden = VC.hud && (VC.hud.uiHidden || VC.hud.photo);
-  if (T.kind === 'select' || !p || !p.kind || (!T.inside && !T.drag) || hidden) {
+  if (T.kind === 'select' || !p || !p.kind || (!T.inside && !T.drag) || hidden || (p.kind === 'bulldoze' && !p.count)) {
     showLabel(false);
     return;
   }

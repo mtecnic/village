@@ -71,8 +71,8 @@ function build(root) {
   MM.base = document.createElement('canvas');
   MM.bctx = MM.base.getContext('2d');
   MM.title = h('span', { class: 'mm-title' }, 'Map');
-  MM.ovBtn = h('button', { class: 'mm-btn', 'data-tip': '<b>Map overlays</b> <kbd>O</kbd>', onclick: (e) => { e.stopPropagation(); VC.bus.emit('sfx', { name: 'click' }); openOverlayPicker(MM.ovBtn, 'top'); } }, '🎨');
-  MM.colBtn = h('button', { class: 'mm-btn mm-col', 'data-tip': 'Collapse / expand', onclick: (e) => { e.stopPropagation(); toggleOpen(); } }, h('i'));
+  MM.ovBtn = h('button', { class: 'mm-btn', 'aria-label': 'Map overlays', 'data-tip': '<b>Map overlays</b> <kbd>O</kbd>', onclick: (e) => { e.stopPropagation(); VC.bus.emit('sfx', { name: 'click' }); openOverlayPicker(MM.ovBtn, 'top'); } }, '🎨');
+  MM.colBtn = h('button', { class: 'mm-btn mm-col', 'aria-label': 'Collapse minimap', 'data-tip': 'Collapse / expand', onclick: (e) => { e.stopPropagation(); toggleOpen(); } }, h('i'));
   const head = h('div', { class: 'mm-head', onclick: () => { if (!MM.open) toggleOpen(); } }, h('span', { class: 'mm-glyph' }, '🗺️'), MM.title, MM.ovBtn, MM.colBtn);
   MM.north = h('span', { class: 'mm-north' }, 'N');
   MM.body = h('div', { class: 'mm-body' }, MM.canvas, MM.north);
@@ -84,10 +84,11 @@ function build(root) {
   MM.lgLo = h('span');
   MM.lgHi = h('span');
   MM.lgNet = h('div', { class: 'lg-net' });
-  MM.lgDesc = h('div', { class: 'lg-desc' });
-  MM.legend = h('div', { class: 'hud-legend pe' },
+  // compact legend: the long description lives in its tooltip
+  MM.legend = h('div', { class: 'hud-legend pe', 'data-tip': '1' },
     h('div', { class: 'lg-head' }, MM.lgIcon, MM.lgName, h('button', { class: 'win-btn lg-x', title: 'Clear overlay', onclick: () => { VC.bus.emit('sfx', { name: 'click' }); VC.gfx.setOverlay('none'); } }, '×')),
-    MM.lgRamp, h('div', { class: 'lg-labels' }, MM.lgLo, MM.lgHi), MM.lgNet, MM.lgDesc);
+    MM.lgRamp, h('div', { class: 'lg-labels' }, MM.lgLo, MM.lgHi), MM.lgNet);
+  MM.legend._tip = () => { const k = VC.gfx.overlay; const o = VC.OVERLAYS.find((x) => x.key === k); return o ? `<div class="tt-head"><span class="tt-icon">${o.icon}</span>${o.name}</div><div class="tt-desc">${OVERLAY_DESC[k] || ''}</div><div class="tt-foot">Press <kbd>O</kbd> to cycle overlays</div>` : ''; };
   root.appendChild(h('div', { class: 'hud-bl' }, MM.legend, MM.el));
   // interaction
   const toWorld = (e) => {
@@ -330,7 +331,6 @@ function refreshLegend() {
   if (!on) return;
   MM.lgIcon.textContent = ov.icon;
   MM.lgName.textContent = ov.name;
-  MM.lgDesc.textContent = OVERLAY_DESC[key] || '';
   const net = ov.ramp === 'net';
   MM.lgRamp.style.display = net ? 'none' : '';
   MM.lgLo.parentNode.style.display = net ? 'none' : '';

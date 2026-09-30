@@ -91,9 +91,10 @@ const hud = (VC.hud = {
     buildDock();
     buildReadout();
     buildPhotoHint();
-    // left column slots: tutorial card on top, advisor / disaster notes below
+    // slots: tutorial card top-left; advisor / disaster notes top-right (beside the dock)
     hud.slots = { tutorial: h('div', { class: 'hl-tut' }), notes: h('div', { class: 'hl-notes' }) };
-    hud.root.appendChild(h('div', { class: 'hud-left' }, hud.slots.tutorial, hud.slots.notes));
+    hud.root.appendChild(h('div', { class: 'hud-left' }, hud.slots.tutorial));
+    hud.root.appendChild(h('div', { class: 'hud-right' }, hud.slots.notes));
     for (const p of hud.parts) if (p.init) safe(() => p.init(hud.root), p.name + '.init');
 
     const bus = VC.bus;
@@ -288,7 +289,7 @@ function buildTop() {
   T.speed = [];
   const sp = h('div', { class: 'tb-speed' });
   for (let i = 0; i < 4; i++) {
-    const b = h('button', { class: 'sp-btn sp' + i, 'data-tip': SPEED_TIPS[i], html: SPEED_SVG[i], onclick: () => { VC.bus.emit('sfx', { name: 'click' }); VC.setSpeed(i); } });
+    const b = h('button', { class: 'sp-btn sp' + i, 'data-tip': SPEED_TIPS[i], 'aria-label': ['Pause', 'Normal speed', 'Fast', 'Ultra fast'][i], html: SPEED_SVG[i], onclick: () => { VC.bus.emit('sfx', { name: 'click' }); VC.setSpeed(i); } });
     T.speed.push(b);
     sp.appendChild(b);
   }
@@ -320,8 +321,8 @@ function buildTop() {
   T.wt = utilPill('💧', 'water');
   T.utilSeg = h('div', { class: 'tb-util' }, T.pw.el, T.wt.el);
   // system
-  T.fs = h('button', { class: 'tb-sys-btn', 'data-tip': '<b>Fullscreen</b> <kbd>F11</kbd>', html: FS_SVG, onclick: toggleFullscreen });
-  T.menuBtn = h('button', { class: 'tb-sys-btn', 'data-tip': '<b>Game menu</b> <kbd>Esc</kbd>', html: MENU_SVG, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); VC.menu && VC.menu.pause && VC.menu.pause(); } });
+  T.fs = h('button', { class: 'tb-sys-btn', 'aria-label': 'Fullscreen', 'data-tip': '<b>Fullscreen</b> <kbd>F11</kbd>', html: FS_SVG, onclick: toggleFullscreen });
+  T.menuBtn = h('button', { class: 'tb-sys-btn', 'aria-label': 'Game menu', 'data-tip': '<b>Game menu</b> <kbd>Esc</kbd>', html: MENU_SVG, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); VC.menu && VC.menu.pause && VC.menu.pause(); } });
 
   const sep = () => h('div', { class: 'tb-sep' });
   T.bar = h('div', { class: 'hud-top pe' },
@@ -638,7 +639,7 @@ function buildDock() {
 function dockButton(key, icon, name, hotkey, onClick, cls) {
   const badge = h('span', { class: 'dock-badge' });
   const label = h('span', { class: 'dock-label' }, name, hotkey ? h('kbd', { class: 'kbd' }, hotkey) : null);
-  const b = h('button', { class: 'dock-btn ' + (cls || ''), 'data-key': key, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); onClick(b); } }, h('span', { class: 'dock-icon' }, icon), badge, label);
+  const b = h('button', { class: 'dock-btn ' + (cls || ''), 'data-key': key, 'aria-label': name, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); onClick(b); } }, h('span', { class: 'dock-icon' }, icon), badge, label);
   b.badge = badge;
   return b;
 }

@@ -9,6 +9,7 @@
 .hud.off .hud-toolwrap { transform: translateY(170%); opacity: 0; }
 .hud.off .hud-bl { transform: translateX(-120%); opacity: 0; }
 .hud.off .hud-left { transform: translateX(-120%); opacity: 0; }
+.hud.off .hud-right { opacity: 0; }
 .hud.off .hud-ticker { transform: translateY(110%); opacity: 0; }
 .hud.off .hud-readout { opacity: 0; }
 .hud.off .pe, .hud.off .pe * { pointer-events: none !important; }
@@ -215,8 +216,6 @@
 .tc-lock { position: absolute; top: 5px; left: 5px; padding: 1px 6px 1px 4px; border-radius: 7px; background: rgba(255, 90, 106, 0.2); border: 1px solid rgba(255, 90, 106, 0.4); font: 800 10px var(--font); color: #ffc3ca; white-space: nowrap; }
 .tc-badge { position: absolute; top: 5px; right: 5px; font-size: 9.5px; font-weight: 850; color: var(--good); background: rgba(61, 220, 132, 0.16); padding: 1px 5px; border-radius: 6px; }
 .tc-star { position: absolute; top: 4px; right: 6px; font-size: 11px; filter: drop-shadow(0 0 4px rgba(255, 209, 102, 0.8)); }
-.shake { animation: shake 0.42s; }
-@keyframes shake { 20%, 60% { transform: translateX(-5px); } 40%, 80% { transform: translateX(5px); } }
 /* zoning matrix */
 .pal-zones { display: grid; grid-template-columns: auto repeat(3, 94px) auto; gap: 6px 7px; align-items: stretch; }
 .pz-rowh { display: flex; align-items: center; gap: 8px; font-weight: 850; font-size: 13px; padding-right: 6px; white-space: nowrap; }
@@ -309,9 +308,12 @@
 
 /* ================================================================== left column: tutorial + notes */
 .hud-left { position: absolute; left: 10px; top: 70px; width: 322px; display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; }
+.hud-right { position: absolute; right: 66px; top: 70px; width: 322px; scale: var(--ui-scale); transform-origin: 100% 0; pointer-events: none; transition: opacity 0.4s; }
 .hl-notes { display: flex; flex-direction: column; gap: 8px; }
-.adv-card { position: relative; display: flex; gap: 11px; padding: 11px 12px 12px 11px; border-radius: 16px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); border-left: 3px solid var(--ac); box-shadow: var(--shadow), var(--hi); pointer-events: auto; animation: advIn 0.5s var(--ease); overflow: hidden; }
-.adv-card.out { animation: advOut 0.26s ease-in forwards; pointer-events: none; }
+.adv-card { position: relative; display: flex; gap: 11px; padding: 11px 12px 12px 11px; border-radius: 16px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); border-left: 3px solid var(--ac); box-shadow: var(--shadow), var(--hi); pointer-events: auto; animation: noteIn 0.5s var(--ease); overflow: hidden; }
+.adv-card.out { animation: noteOut 0.26s ease-in forwards; pointer-events: none; }
+@keyframes noteIn { from { opacity: 0; transform: translateX(46px) scale(0.95); } }
+@keyframes noteOut { to { opacity: 0; transform: translateX(36px); } }
 @keyframes advIn { from { opacity: 0; transform: translateX(-46px) scale(0.95); } }
 @keyframes advOut { to { opacity: 0; transform: translateX(-36px); } }
 .adv-portrait { flex: none; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; font-size: 23px; background: radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.6), transparent 55%), var(--ac); box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16), 0 0 18px var(--ac); animation: portraitIn 0.6s var(--ease) 0.1s backwards; }
@@ -328,7 +330,7 @@
 .adv-x { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; font-size: 17px; }
 .adv-timer { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--ac); opacity: 0.75; transform-origin: 0 50%; }
 .adv-card.sev-bad { border-color: rgba(255, 90, 106, 0.5); border-left-color: var(--ac); box-shadow: var(--shadow), 0 0 26px rgba(255, 90, 106, 0.2); }
-.adv-card.disaster { background: linear-gradient(180deg, rgba(96, 22, 34, 0.9), rgba(40, 10, 18, 0.92)); animation: advIn 0.5s var(--ease), alarm 1s ease-in-out 0.5s 3; }
+.adv-card.disaster { background: linear-gradient(180deg, rgba(96, 22, 34, 0.9), rgba(40, 10, 18, 0.92)); animation: noteIn 0.5s var(--ease), alarm 1s ease-in-out 0.5s 3; }
 .adv-card.disaster .adv-name { color: #ffb3bb; letter-spacing: 0.04em; }
 @keyframes alarm { 50% { box-shadow: var(--shadow), 0 0 0 4px rgba(255, 90, 106, 0.55), 0 0 44px rgba(255, 90, 106, 0.55); } }
 

@@ -142,9 +142,8 @@ function showNote(n) {
   const slot = VC.hud.slots && VC.hud.slots.notes;
   if (!slot) return;
   if (NOTE.cards.some((c) => c.key === n.key)) return; // same message already on screen
-  // room in the left column: fewer cards on short screens / while the tutorial card is up
-  const tut = VC.hud.tutorialStep && VC.hud.tutorialStep() >= 0;
-  const max = Math.max(1, (tut ? 1 : 2) + (window.innerHeight / VC.ui.scale() >= 860 ? 1 : 0));
+  // room in the right column (between the top bar and the tile readout): ~140px per card
+  const max = VC.M.clamp(Math.floor((window.innerHeight / VC.ui.scale() - 230) / 140), 1, 4);
   if (NOTE.cards.length >= max) {
     if (!NOTE.queue.some((q) => q.key === n.key)) NOTE.queue.push(n);
     if (NOTE.queue.length > 8) NOTE.queue.shift();

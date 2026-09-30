@@ -161,11 +161,11 @@ const SELECT_SVG = '<svg viewBox="0 0 20 20"><path d="M4.2 2.6 15.4 10l-5 .9 2.9
 function buildToolbar(root) {
   const ui = VC.ui;
   TB.bar = h('div', { class: 'hud-toolbar pe' });
-  TB.select = h('button', { class: 'tb-tool tb-select', 'data-tip': '<b>Select & inspect</b> <kbd>Esc</kbd><br><span style="color:var(--text3)">Click buildings to see their details.</span>', html: SELECT_SVG, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); closePalette(); selectTool('select'); } });
+  TB.select = h('button', { class: 'tb-tool tb-select', 'aria-label': 'Select and inspect', 'data-tip': '<b>Select & inspect</b> <kbd>Esc</kbd><br><span style="color:var(--text3)">Click buildings to see their details.</span>', html: SELECT_SVG, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); closePalette(); selectTool('select'); } });
   TB.bar.appendChild(TB.select);
   TB.bar.appendChild(h('div', { class: 'tbt-sep' }));
   for (const g of VC.TOOL_GROUPS) {
-    const b = h('button', { class: 'tb-tool tb-g-' + g.key, 'data-tip': `<b>${g.name}</b> <kbd>${g.hotkey}</kbd>`, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); groupClick(g.key); } }, h('span', { class: 'tbt-icon' }, g.icon), h('span', { class: 'tbt-key' }, g.hotkey));
+    const b = h('button', { class: 'tb-tool tb-g-' + g.key, 'aria-label': g.name, 'data-tip': `<b>${g.name}</b> <kbd>${g.hotkey}</kbd>`, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); groupClick(g.key); } }, h('span', { class: 'tbt-icon' }, g.icon), h('span', { class: 'tbt-key' }, g.hotkey));
     TB.groups.set(g.key, b);
     if (g.key === 'bulldoze') TB.bar.appendChild(h('div', { class: 'tbt-sep' }));
     TB.bar.appendChild(b);
@@ -317,11 +317,16 @@ function positionPalette() {
   const pal = TB.pal, b = TB.groups.get(TB.palGroup);
   if (!pal || !b) return;
   const anchor = TB.bar.parentNode;
-  const s = VC.ui.scale();
+  const s = VC.ui.scale(), W = window.innerWidth;
   const ar = anchor.getBoundingClientRect();
   const bc = b.offsetLeft + TB.bar.offsetLeft + b.offsetWidth / 2;
   const w = pal.offsetWidth;
-  const minX = (10 - ar.left) / s, maxX = (window.innerWidth - 10 - ar.left) / s - w;
+  // keep clear of the minimap (left) and the dock (right) when there is room, else use the full width
+  const bl = VC.hud.root.querySelector('.hud-bl'), dock = VC.hud.root.querySelector('.hud-dock');
+  let lo = bl ? 10 + bl.offsetWidth * s + 8 : 10;
+  let hi = dock ? W - 10 - dock.offsetWidth * s - 8 : W - 10;
+  if (hi - lo < w * s) { lo = 10; hi = W - 10; }
+  const minX = (lo - ar.left) / s, maxX = (hi - ar.left) / s - w;
   const x = VC.M.clamp(bc - w / 2, minX, Math.max(minX, maxX));
   pal.style.left = Math.round(x) + 'px';
   const notch = pal.querySelector('.pal-notch');

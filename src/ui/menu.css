@@ -14,7 +14,8 @@
 .vpm-main { position: absolute; left: max(36px, 6vw); top: 50%; translate: 0 -50%; display: flex; flex-direction: column; scale: var(--ui-scale); transform-origin: 0 50%; transition: opacity 0.35s, filter 0.35s; }
 .vp-menu.has-dialog .vpm-main, .vp-menu.has-dialog .vpm-foot { opacity: 0.25; filter: blur(2px); }
 .vpm-logo { display: flex; align-items: flex-end; margin-left: -4px; filter: drop-shadow(0 0 26px rgba(90, 209, 255, 0.38)) drop-shadow(0 10px 16px rgba(0, 0, 0, 0.55)); }
-.vpm-letter { display: block; flex: none; animation: letterDrop 0.75s var(--ease) backwards, letterFloat 3.6s ease-in-out infinite; }
+.vpm-letter { display: block; flex: none; animation: letterDrop 0.75s var(--ease) backwards, letterFloat 3.6s ease-in-out infinite, letterShine 7s ease-in-out infinite; }
+@keyframes letterShine { 0%, 88%, 100% { filter: none; } 93% { filter: brightness(1.45) drop-shadow(0 0 10px rgba(160, 230, 255, 0.8)); } }
 @keyframes letterDrop { from { opacity: 0; transform: translateY(-60px) rotate(-10deg) scale(0.8); } }
 @keyframes letterFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
 .vpm-tag { margin: 12px 0 26px 2px; font-size: 17px; font-weight: 600; color: rgba(233, 238, 248, 0.88); letter-spacing: 0.035em; text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7); animation: fadeUp 0.9s var(--ease-out) 0.6s backwards; }

@@ -76,11 +76,13 @@ const ui = (VC.ui = {
     window.addEventListener('keydown', onKeyCapture, true);
     applyScale();
     VC.bus.on('settings', applyScale);
-    window.addEventListener('resize', () => wins.forEach((w) => clampWin(w)));
+    window.addEventListener('resize', applyScale);
   },
+  /** Effective UI scale: the user's setting x an automatic boost for very tall viewports (4K at DPR 1). */
   scale() {
-    const s = +((VC.settings && VC.settings.uiScale) || 1);
-    return VC.M.clamp(s || 1, 0.5, 2);
+    const s = VC.M.clamp(+((VC.settings && VC.settings.uiScale) || 1) || 1, 0.5, 2);
+    const auto = VC.M.clamp(window.innerHeight / 1250, 1, 1.8);
+    return Math.round(s * auto * 100) / 100;
   },
 
   /* ---------------- windows ---------------- */

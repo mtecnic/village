@@ -99,7 +99,7 @@ function buildLogo() {
   'VOXELPOLIS'.split('').forEach((ch, i) => {
     const cv = letterCanvas(ch, s);
     cv.className = 'vpm-letter';
-    cv.style.animationDelay = `${0.08 * i}s, ${0.9 + i * 0.16}s`;
+    cv.style.animationDelay = `${0.08 * i}s, ${0.9 + i * 0.16}s, ${2.2 + i * 0.09}s`;
     box.appendChild(cv);
   });
 }

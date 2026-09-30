@@ -146,7 +146,8 @@ const PP = (VC.post = {
 
     /* ---- 3. bloom ---- */
     let bloomTex = PP.black, bloomNorm = 1;
-    const bloomI = 0.2 + n * 0.7 + (env.blueHour || 0) * 0.15 + (env.lightning || 0) * 0.3;
+    const far = M.sat((cam.dist - 30) / 120);
+    const bloomI = 0.2 + n * (0.7 + far * 0.5) + (env.blueHour || 0) * 0.15 + (env.lightning || 0) * 0.3;
     if (f.bloom) {
       let w = hw, h = hh;
       const downs = PP._downs;
@@ -266,7 +267,7 @@ const PP = (VC.post = {
     const gp = grade(env);
     const toScreen = !f.fxaa;
     const ldr = toScreen ? null : rt('ldr', rw, rh, false);
-    const grain = low ? 0 : 0.028;
+    const grain = low ? 0 : 0.024;
     const Pc = P.comp;
     u = pass(Pc, ldr);
     tex(Pc, 'uSrc', hdr.color);
@@ -752,7 +753,7 @@ void main(){
   if (uFx.w > 0.5 && uFx.x > 0.0) {
     vec2 gp = gl_FragCoord.xy + fract(uFx.y * vec2(12.9898, 78.233)) * 512.0;
     float g = hash12(gp) + hash12(gp + 37.1) - 1.0;
-    col += g * uFx.x * (1.0 - l * 0.7);
+    col += g * uFx.x * (4.0 * l * (1.0 - l));
   }
   l = dot(col, vec3(0.299, 0.587, 0.114));
   fragColor = vec4(col, l);
@@ -851,7 +852,8 @@ void main(){
   if (uGrain.x > 0.0) {
     vec2 gp = gl_FragCoord.xy + fract(uGrain.y * vec2(12.9898, 78.233)) * 512.0;
     float g = hash12(gp) + hash12(gp + 37.1) - 1.0;
-    col += g * uGrain.x * (1.0 - dot(col, vec3(0.299, 0.587, 0.114)) * 0.7);
+    float l = dot(col, vec3(0.299, 0.587, 0.114));
+    col += g * uGrain.x * (4.0 * l * (1.0 - l));
   }
   fragColor = vec4(col, 1.0);
 }`;

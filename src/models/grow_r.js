@@ -53,6 +53,9 @@ function yard(c, h) {
   if (h.door != null) {
     for (let z = h.doorZ || frontZ; z < D; z++) { g.set(h.door, 0, z, pathC); mark(c, h.door, z, 1, 1, OCC.PATH); }
   }
+  // rich homes on single-tile lots trade the side driveway for a plunge pool (garages keep it)
+  const smallRich = Wl === 2 && W <= 8 && D <= 8;
+  if (smallRich && h.drive && !h.keepDrive) h.drive = null;
   // driveway + car
   if (h.drive) {
     const d = h.drive;
@@ -68,11 +71,19 @@ function yard(c, h) {
       const pw = isFree(c, r.x, r.z, 4, 5) ? 2 : 3, pd = pw === 2 ? 3 : 2;
       K.pool(g, r.x + 1, r.z + 1, pw, pd, deck, 0, rng);
       mark(c, r.x, r.z, pw + 2, pd + 2, OCC.POOL);
-    } else if ((r = findFree(c, 2, 4, frontZ)) || (r = findFree(c, 2, 3, frontZ))) {
+    } else if ((r = findFree(c, 2, 4, D - 1)) || (r = findFree(c, 2, 3, D - 1))) {
+      // plunge pool in a side strip: deck ends + water
       const pd = isFree(c, r.x, r.z, 2, 4) ? 4 : 3;
       g.box(r.x, 0, r.z, 2, 1, pd, deck);
-      g.box(r.x, 0, r.z + (pd > 3 ? 1 : 0), 2, 1, pd > 3 ? 2 : 2, P.WATER_POOL);
+      g.box(r.x, 0, r.z + (pd > 3 ? 1 : 0), 2, 1, 2, P.WATER_POOL);
       mark(c, r.x, r.z, 2, pd, OCC.POOL);
+    } else if ((r = findFree(c, 3, 2, D - 1)) || (r = findFree(c, 2, 2, D - 1))) {
+      // patio: wooden deck with a parasol (or a hot tub)
+      const pw = isFree(c, r.x, r.z, 3, 2) ? 3 : 2;
+      g.box(r.x, 0, r.z, pw, 1, 2, P.WOOD_L);
+      if (pw === 3) K.umbrella(g, r.x + 1, 1, r.z, c.pk(12, [P.AWNING_R, P.AWNING_B, P.AWNING_Y, P.AWNING_G]));
+      else g.set(r.x, 0, r.z, P.WATER_POOL);
+      mark(c, r.x, r.z, pw, 2, OCC.POOL);
     }
   }
   // flower bed / hedge row along the house front
@@ -137,7 +148,8 @@ function yard(c, h) {
 /* ------------------------------------------------------------------ */
 /** Standard placement: house rect sized for the lot, back yard of 1+. */
 function place(c, bw, bd) {
-  const w = Math.min(c.W - 2, bw + Math.floor((c.W - 8) * 0.55));
+  let w = Math.min(c.W - 2, bw + Math.floor((c.W - 8) * 0.55));
+  if (c.Wl === 2 && c.W <= 8) w = Math.min(w, 5); // leave a side strip for the pool
   const d = Math.min(c.D - 3, bd + Math.floor((c.D - 8) * 0.45));
   const x = 1, z = Math.max(1, Math.min(c.D - d - 2, 1 + ((c.D - 8) >> 2)));
   return { x, z, w, d };
@@ -204,7 +216,7 @@ const R1_ARCH = [
         rects.push([gx, h.z, gw, gd]);
         drive = { x: gx, z: h.z + gd, w: Math.min(2, gw), d: c.D - h.z - gd };
       }
-      return Object.assign(h, { door: h.x + (h.w >> 1), drive, rects });
+      return Object.assign(h, { door: h.x + (h.w >> 1), drive, keepDrive: L === 3, rects });
     },
   },
   {
@@ -312,7 +324,7 @@ const R1_ARCH = [
       if (L >= 2) K.chimney(g, h.x + 1, top, h.z + 1, 2, P.STONE);
       if (L === 3 && c.Wl) g.box(h.x + 3, 1, gz, 1, 3, 1, c.trim); // porch post
       const drive = { x: gx, z: gz + gd, w: 3, d: c.D - gz - gd };
-      return Object.assign(h, { door: h.x + 2, drive, car: drive.d >= 3, rects: [[gx, gz, gw, gd]] });
+      return Object.assign(h, { door: h.x + 2, drive, keepDrive: true, car: drive.d >= 3, rects: [[gx, gz, gw, gd]] });
     },
   },
   {

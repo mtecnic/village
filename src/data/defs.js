@@ -372,6 +372,8 @@ VC.DEFAULT_SETTINGS = {
   weather: true,
   musicVol: 0.5,
   sfxVol: 0.7,
+  ambienceVol: 0.6,
+  muted: false,
   edgeScroll: false,
   invertZoom: false,
   showGrid: true,
@@ -379,4 +381,7 @@ VC.DEFAULT_SETTINGS = {
   disasters: true,
   uiScale: 1,
   tutorial: true,
+  showFps: false,
+  ticker: true,
+  minimapOpen: true,
 };

@@ -501,7 +501,7 @@ function build(seed, type, size, res) {
       if (lv >= 34 + nS * 2.5) m = TERR.SNOW;
       else if (lv >= 27 + nS * 3 || (sl >= 5 && lv > SEA + 5 && nS > -0.3) || (mtn && sl >= 3 && lv > 18) || (g.cliff[k] && dw < 4)) m = TERR.ROCK;
       else if (dw <= T.beach && lv <= SEA + 1 && (!fG || fG[k] > T.gate)) m = TERR.SAND;
-      else if (fD[k] > 0.47) m = TERR.DIRT;
+      else if (fD[k] > 0.5) m = TERR.DIRT;
       else if (fM[k] > 0.16) m = TERR.MEADOW;
       else m = TERR.GRASS;
       terr[k] = m;

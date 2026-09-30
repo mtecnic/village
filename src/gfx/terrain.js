@@ -18,7 +18,8 @@
  *   loc 1 aI  uint8 x4  (integer attrib)
  *     .x normal index (0 +X,1 -X,2 +Y,3 -Y,4 +Z,5 -Z, 6+d = ramp rising toward dir d) | kind << 4
  *     .y terr | road type << 3 | bridge << 5 | ramp << 6
- *     .z road connection mask (bit d: 0 +X,1 -X,2 +Z,3 -Z) | neighbour-is-intersection mask << 4
+ *     .z roads: connection mask (bit d: 0 +X,1 -X,2 +Z,3 -Z) | neighbour-is-intersection mask << 4
+ *        land tops: water-neighbour mask (same bit order as the AO mask) for the shoreline wash
  *     .w tops: AO mask (edge higher: 1 +X,2 -X,4 +Z,8 -Z; corner: 16 +X+Z,32 -X+Z,64 +X-Z,128 -X-Z)
  *        sides: bottom level (255 = slab bottom)
  *
@@ -62,7 +63,16 @@ const T = (VC.terrain = {
   budgetMs: 4, // incremental rebuild budget per frame
 
   init() {
-    T.prog = VC.gfx.program('terrain', VS, FS);
+    T.variants = new Map();
+    T.progs = [0, 1, 2].map((g) => program(g, 0));
+    T.prog = T.progs[0];
+    // bilinear sampling from one mip level for the noise texture (half the texel reads of trilinear)
+    const gl = VC.gfx.gl;
+    T.sampler = gl.createSampler();
+    gl.samplerParameteri(T.sampler, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+    gl.samplerParameteri(T.sampler, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.samplerParameteri(T.sampler, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.samplerParameteri(T.sampler, gl.TEXTURE_WRAP_T, gl.REPEAT);
     T.progShadow = VC.gfx.program('terrain_shadow', VS_SHADOW, FS_SHADOW);
     VC.gfx.addLayer(T);
     VC.bus.on('dirty', (d) => T.markDirty(d.x0, d.z0, d.x1, d.z1));
@@ -77,7 +87,7 @@ const T = (VC.terrain = {
     T.ch = Math.ceil(S.H / CH);
     for (let cz = 0; cz < T.ch; cz++)
       for (let cx = 0; cx < T.cw; cx++) {
-        const c = { cx, cz, x0: cx * CH, z0: cz * CH, x1: Math.min(S.W, cx * CH + CH), z1: Math.min(S.H, cz * CH + CH), dirty: false, vao: null, vbo: null, quads: 0, hash: -1, minY: 0, maxY: 1, dist: 0 };
+        const c = { cx, cz, x0: cx * CH, z0: cz * CH, x1: Math.min(S.W, cx * CH + CH), z1: Math.min(S.H, cz * CH + CH), dirty: false, vao: null, vbo: null, quads: 0, q: [0, 0, 0], hash: -1, minY: 0, maxY: 1, dist: 0 };
         T.chunks.push(c);
         setDirty(c);
       }
@@ -94,8 +104,8 @@ const T = (VC.terrain = {
   /** Marks chunks overlapping the inclusive tile rect (+ margin for road/ramp context) for rebuild. */
   markDirty(x0, z0, x1, z1) {
     if (!T.chunks.length) return;
-    const c0x = Math.max(0, Math.floor((x0 - 2) / CH)), c1x = Math.min(T.cw - 1, Math.floor((x1 + 2) / CH));
-    const c0z = Math.max(0, Math.floor((z0 - 2) / CH)), c1z = Math.min(T.ch - 1, Math.floor((z1 + 2) / CH));
+    const c0x = Math.max(0, Math.floor((x0 - 3) / CH)), c1x = Math.min(T.cw - 1, Math.floor((x1 + 3) / CH));
+    const c0z = Math.max(0, Math.floor((z0 - 3) / CH)), c1z = Math.min(T.ch - 1, Math.floor((z1 + 3) / CH));
     for (let cz = c0z; cz <= c1z; cz++) for (let cx = c0x; cx <= c1x; cx++) setDirty(T.chunks[cz * T.cw + cx]);
   },
 
@@ -180,6 +190,32 @@ const T = (VC.terrain = {
     return out;
   },
 });
+
+/**
+ * Shader variants: draw group (0 terrain, 1 roads, 2 structures) x feature bits (1 overlay, 2 snow, 4 rain).
+ * Features that are off are compiled out entirely, so fair weather without an overlay runs the leanest
+ * shaders. Variants compile lazily on first use and are cached.
+ */
+const F_OVERLAY = 1, F_SNOW = 2, F_WET = 4;
+function program(g, f) {
+  const key = g * 8 + f;
+  let p = T.variants.get(key);
+  if (p) return p;
+  let defs = '#define GROUP ' + g + '\n';
+  if (f & F_OVERLAY) defs += '#define F_OVERLAY 1\n';
+  if (f & F_SNOW) defs += '#define F_SNOW 1\n';
+  if (f & F_WET) defs += '#define F_WET 1\n';
+  p = VC.gfx.program('terrain_g' + g + '_f' + f, VS, FS, { defines: defs });
+  T.variants.set(key, p);
+  return p;
+}
+function features(env) {
+  let f = 0;
+  if (VC.gfx.overlay && VC.gfx.overlay !== 'none') f |= F_OVERLAY;
+  if (env && env.snow > 0.004) f |= F_SNOW;
+  if (env && env.wet > 0.01) f |= F_WET;
+  return f;
+}
 
 function setDirty(c) {
   if (c.dirty) return;
@@ -297,21 +333,35 @@ function cornerY(x, z, u, v) {
 /* ------------------------------------------------------------------ */
 /* Vertex writer                                                        */
 /* ------------------------------------------------------------------ */
-let VB = new ArrayBuffer(48 * 16384);
-let I16 = new Int16Array(VB), U8 = new Uint8Array(VB);
-let nv = 0; // vertices written
+/*
+ * Faces are sorted into three DRAW GROUPS, each drawn with a shader specialised for it (keeps
+ * fragment shaders small: far cheaper on weak GPUs and software rasterizers):
+ *   0 terrain (tops, sides) · 1 road surfaces (road, sidewalk, kerb, median) · 2 structures.
+ */
+const GROUP = [0, 1, 0, 1, 1, 1, 2, 2, 2, 2, 2]; // kind -> draw group
+const NG = 3;
+const GB = [];
+for (let g = 0; g < NG; g++) {
+  const buf = new ArrayBuffer(48 * (g === 0 ? 8192 : 2048));
+  GB.push({ buf, i16: new Int16Array(buf), u8: new Uint8Array(buf), nv: 0 });
+}
+let cur = GB[0];
 let aKind = 0, aB = 0, aC = 0, aD = 0; // attributes of the face being written
+function setKind(k) {
+  aKind = k;
+  cur = GB[GROUP[k]];
+}
 function ensure(quads) {
-  const need = (nv + quads * 4) * 12;
-  if (need <= VB.byteLength) return;
-  const nb = new ArrayBuffer(Math.max(need, VB.byteLength * 2));
-  new Uint8Array(nb).set(U8.subarray(0, nv * 12));
-  VB = nb;
-  I16 = new Int16Array(VB);
-  U8 = new Uint8Array(VB);
+  const need = (cur.nv + quads * 4) * 12;
+  if (need <= cur.buf.byteLength) return;
+  const nb = new ArrayBuffer(Math.max(need, cur.buf.byteLength * 2));
+  new Uint8Array(nb).set(cur.u8.subarray(0, cur.nv * 12));
+  cur.buf = nb;
+  cur.i16 = new Int16Array(nb);
+  cur.u8 = new Uint8Array(nb);
 }
 function V(x, y, z, w, nrm) {
-  const o = nv * 6, u = nv * 12 + 8;
+  const b = cur, v = b.nv, o = v * 6, u = v * 12 + 8, I16 = b.i16, U8 = b.u8;
   I16[o] = Math.round(x * Q);
   I16[o + 1] = Math.round(y * Q);
   I16[o + 2] = Math.round(z * Q);
@@ -320,7 +370,20 @@ function V(x, y, z, w, nrm) {
   U8[u + 1] = aB;
   U8[u + 2] = aC;
   U8[u + 3] = aD;
-  nv++;
+  b.nv = v + 1;
+}
+function resetGroups() {
+  for (const b of GB) b.nv = 0;
+}
+/** Concatenates the group buffers (group order) into one upload buffer; returns quad counts per group. */
+let UP = new Uint8Array(48 * 16384);
+function packGroups(counts) {
+  let total = 0;
+  for (let g = 0; g < NG; g++) { counts[g] = GB[g].nv >> 2; total += GB[g].nv * 12; }
+  if (UP.length < total) UP = new Uint8Array(Math.max(total, UP.length * 2));
+  let o = 0;
+  for (const b of GB) { UP.set(b.u8.subarray(0, b.nv * 12), o); o += b.nv * 12; }
+  return total;
 }
 /** Horizontal-ish quad over [x0,x1]x[z0,z1] with corner heights y0 (x0,z0), y1 (x1,z0), y2 (x1,z1), y3 (x0,z1). */
 function topQ(x0, z0, x1, z1, y0, y1, y2, y3, nrm) {
@@ -348,8 +411,8 @@ function sideZ(zf, x0, x1, b0, b1, t0, t1, pos) {
  */
 function prism(x0, z0, x1, z1, b0, b1, b2, b3, h, faces, kTop, kSide, nTop) {
   const t0 = b0 + h, t1 = b1 + h, t2 = b2 + h, t3 = b3 + h;
-  if (faces & 16) { aKind = kTop; topQ(x0, z0, x1, z1, t0, t1, t2, t3, nTop); }
-  aKind = kSide;
+  if (faces & 16) { setKind(kTop); topQ(x0, z0, x1, z1, t0, t1, t2, t3, nTop); }
+  setKind(kSide);
   if (faces & 1) sideX(x1, z0, z1, b1, b2, t1, t2, true);
   if (faces & 2) sideX(x0, z0, z1, b0, b3, t0, t3, false);
   if (faces & 4) sideZ(z1, x0, x1, b3, b2, t3, t2, true);
@@ -381,6 +444,13 @@ function aoMask(x, z, lv, fm) {
   if (!(m & 10) && hi(x - 1, z - 1)) m |= 128;
   return m;
 }
+/** Bits of the 8 neighbours that are water (same bit order as aoMask) — only for low land near the sea level. */
+function waterMask(x, z, lv) {
+  if (lv < SEA || lv > SEA + 1) return 0;
+  const wt = (xx, zz) => xx >= 0 && zz >= 0 && xx < W && zz < H && S.height[zz * W + xx] < SEA;
+  return (wt(x + 1, z) ? 1 : 0) | (wt(x - 1, z) ? 2 : 0) | (wt(x, z + 1) ? 4 : 0) | (wt(x, z - 1) ? 8 : 0) |
+    (wt(x + 1, z + 1) ? 16 : 0) | (wt(x - 1, z + 1) ? 32 : 0) | (wt(x + 1, z - 1) ? 64 : 0) | (wt(x - 1, z - 1) ? 128 : 0);
+}
 function nbInter(x, z, fm) {
   let b = 0;
   for (let d = 0; d < 4; d++) if (fm & (1 << d) && POP[cFM(x + DX[d], z + DZ[d])] >= 3) b |= 1 << d;
@@ -407,13 +477,13 @@ function emitTile(x, z) {
   const nbi = rt ? nbInter(x, z, fm) : 0;
   const y0 = rampY(lv, rc, 0, 0), y1 = rampY(lv, rc, 1, 0), y2 = rampY(lv, rc, 1, 1), y3 = rampY(lv, rc, 0, 1);
   // ---- top ----
-  aKind = landRoad ? K.ROAD : K.TOP;
+  setKind(landRoad ? K.ROAD : K.TOP);
   aB = terr | (landRoad ? rt << 3 : 0) | (rc ? 64 : 0);
-  aC = landRoad ? fm | (nbi << 4) : 0;
+  aC = landRoad ? fm | (nbi << 4) : water ? 0 : waterMask(x, z, lv);
   aD = aoMask(x, z, lv, landRoad ? fm : 0);
   topQ(x, z, x + 1, z + 1, y0, y1, y2, y3, rc ? rampNormal(rc) : 2);
   // ---- sides toward lower neighbours (and skirts at the map edge) ----
-  aKind = K.SIDE;
+  setKind(K.SIDE);
   aB = terr | (landRoad ? rt << 3 : 0);
   aC = 0;
   sideFace(x, z, 0, y1, y2, cornerY(x + 1, z, 0, 0), cornerY(x + 1, z, 0, 1));
@@ -432,10 +502,10 @@ function roadExtras(x, z, rt, fm, nbi, bridge, lv, rc, terr) {
   aD = 0;
   if (bridge) {
     // deck surface
-    aKind = K.ROAD;
+    setKind(K.ROAD);
     topQ(x, z, x + 1, z + 1, DECK_Y, DECK_Y, DECK_Y, DECK_Y, 2);
     // fascia along open edges
-    aKind = K.DECKSIDE;
+    setKind(K.DECKSIDE);
     const yb = DECK_Y - DECK_T;
     if (!(fm & 1)) sideX(x + 1, z, z + 1, yb, yb, DECK_Y, DECK_Y, true);
     if (!(fm & 2)) sideX(x, z, z + 1, yb, yb, DECK_Y, DECK_Y, false);
@@ -525,10 +595,10 @@ function piers(x, z, fm, lv) {
 /* ------------------------------------------------------------------ */
 /* Chunks                                                               */
 /* ------------------------------------------------------------------ */
-/** Hash of everything the chunk mesh depends on (height/terr/road in chunk + 2 tile margin). */
+/** Hash of everything the chunk mesh depends on (height/terr/road in chunk + 3 tile margin). */
 function chunkHash(c) {
   let h = 2166136261;
-  const x0 = Math.max(0, c.x0 - 2), z0 = Math.max(0, c.z0 - 2), x1 = Math.min(W, c.x1 + 2), z1 = Math.min(H, c.z1 + 2);
+  const x0 = Math.max(0, c.x0 - 3), z0 = Math.max(0, c.z0 - 3), x1 = Math.min(W, c.x1 + 3), z1 = Math.min(H, c.z1 + 3);
   const hg = S.height, tr = S.terr, rd = S.road;
   for (let z = z0; z < z1; z++)
     for (let i = z * W + x0, e = z * W + x1; i < e; i++) h = Math.imul(h ^ (hg[i] | (tr[i] << 8) | (rd[i] << 12)), 16777619);
@@ -542,7 +612,7 @@ function buildChunk(c) {
   if (c.vao && hsh === c.hash) { T.stats.skipped++; return false; }
   c.hash = hsh;
   prepCache(c.x0, c.z0);
-  nv = 0;
+  resetGroups();
   let minY = 1e9, maxY = -1e9;
   for (let z = c.z0; z < c.z1; z++)
     for (let x = c.x0; x < c.x1; x++) {
@@ -556,7 +626,8 @@ function buildChunk(c) {
   if (c.x0 === 0 || c.z0 === 0 || c.x1 === W || c.z1 === H) minY = SKIRT_Y;
   c.minY = minY - 0.05;
   c.maxY = maxY + 0.3;
-  const quads = nv >> 2;
+  const bytes = packGroups(c.q);
+  const quads = bytes / 48;
   const ib = VC.gfx.quadIndexBuffer(quads); // (unbinds VAOs) — call before binding ours
   if (!c.vao) {
     c.vao = gl.createVertexArray();
@@ -573,7 +644,7 @@ function buildChunk(c) {
     gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
   }
-  gl.bufferData(gl.ARRAY_BUFFER, U8.subarray(0, nv * 12), gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, UP.subarray(0, bytes), gl.STATIC_DRAW);
   gl.bindVertexArray(null);
   T.stats.quads += quads - c.quads;
   c.quads = quads;
@@ -619,7 +690,7 @@ function process() {
 function buildPlinth(st) {
   const gl = VC.gfx.gl;
   const w = st.W, h = st.H, p = PLINTH, yb = SKIRT_Y - 0.32, th = 0.44;
-  nv = 0;
+  resetGroups();
   aB = 0; aC = 0; aD = 0;
   const ring = (x0, z0, x1, z1, faces) => prism(x0, z0, x1, z1, yb, yb, yb, yb, th, faces | 16, K.PLINTH, K.PLINTH, 2);
   ring(-p, -p, w + p, 0, 1 | 2 | 8);
@@ -629,11 +700,12 @@ function buildPlinth(st) {
   if (!T.plinth) {
     T.plinth = { vao: gl.createVertexArray(), vbo: gl.createBuffer(), quads: 0 };
   }
-  const quads = nv >> 2;
+  const bytes = packGroups([0, 0, 0]);
+  const quads = bytes / 48;
   const ib = VC.gfx.quadIndexBuffer(quads);
   gl.bindVertexArray(T.plinth.vao);
   gl.bindBuffer(gl.ARRAY_BUFFER, T.plinth.vbo);
-  gl.bufferData(gl.ARRAY_BUFFER, U8.slice(0, nv * 12), gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, UP.slice(0, bytes), gl.STATIC_DRAW);
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 4, gl.SHORT, false, 12, 0);
   gl.enableVertexAttribArray(1);
@@ -680,20 +752,38 @@ function draw(ctx, shadow) {
     c.dist = (c.x0 + CH * 0.5 - cp[0]) ** 2 + (c.z0 + CH * 0.5 - cp[2]) ** 2;
     visible.push(c);
   }
-  if (!shadow) visible.sort((a, b) => a.dist - b.dist); // front to back for early-z
-  const prog = shadow ? T.progShadow : T.prog;
-  prog.use();
-  for (const c of visible) {
-    gl.bindVertexArray(c.vao);
-    gl.drawElements(gl.TRIANGLES, c.quads * 6, gl.UNSIGNED_INT, 0);
+  if (shadow) {
+    T.progShadow.use();
+    for (const c of visible) {
+      gl.bindVertexArray(c.vao);
+      gl.drawElements(gl.TRIANGLES, c.quads * 6, gl.UNSIGNED_INT, 0);
+    }
+    gl.bindVertexArray(null);
+    return;
   }
-  if (!shadow) {
-    T.stats.drawn = visible.length;
-    if (T.plinth && T.plinth.quads) {
+  visible.sort((a, b) => a.dist - b.dist); // front to back for early-z
+  const f = features(ctx.env);
+  if (T._feat !== f) {
+    T._feat = f;
+    T.progs = [0, 1, 2].map((g) => program(g, f));
+  }
+  gl.bindSampler(VC.gfx.UNIT.NOISE, T.sampler);
+  for (let g = 0; g < NG; g++) {
+    T.progs[g].use();
+    for (const c of visible) {
+      const n = c.q[g];
+      if (!n) continue;
+      const q0 = g === 0 ? 0 : g === 1 ? c.q[0] : c.q[0] + c.q[1];
+      gl.bindVertexArray(c.vao);
+      gl.drawElements(gl.TRIANGLES, n * 6, gl.UNSIGNED_INT, q0 * 24);
+    }
+    if (g === 2 && T.plinth && T.plinth.quads) {
       gl.bindVertexArray(T.plinth.vao);
       gl.drawElements(gl.TRIANGLES, T.plinth.quads * 6, gl.UNSIGNED_INT, 0);
     }
   }
+  gl.bindSampler(VC.gfx.UNIT.NOISE, null);
+  T.stats.drawn = visible.length;
   gl.bindVertexArray(null);
 }
 
@@ -726,7 +816,11 @@ const vec3 NRM[10] = vec3[10](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,
   vec3(-0.2425,0.9701,0.0), vec3(0.2425,0.9701,0.0), vec3(0.0,0.9701,-0.2425), vec3(0.0,0.9701,0.2425));
 const float SW_ST = 0.140625, SW_AV = 0.09375;
 
-float gPx; // world size of one pixel (set in main, used for texture LOD / AA)
+// Per-pixel shared inputs (computed once in main, reused by every material):
+float gPx;              // world size of one pixel (texture LOD / AA / detail fade)
+vec4 gN1;               // smooth noise at the voxel centre (scale 0.05; r,g,b,a = 2.5, 1.25, 0.6, 5 unit features)
+float gQ;               // blocky noise: one value per 4x4 voxel block
+float gH0, gH1, gH2;    // three independent per-voxel hashes
 
 /** Integer lattice hash -> [0,1): pattern-free on voxel grids (floor(c) is hashed). */
 float ih(vec2 c){
@@ -749,119 +843,44 @@ vec3 seasonGrass(){
 float autumnAmt(){ float s = seasonF(); return smoothstep(1.3, 2.0, s) * (1.0 - smoothstep(2.7, 3.2, s)); }
 float flowerAmt(){ float s = seasonF(); return s < 2.0 ? smoothstep(0.0, 0.3, s) * (1.0 - smoothstep(1.3, 1.9, s)) : smoothstep(3.6, 4.0, s); }
 
-/* ---------------- materials (sRGB albedo) ---------------- */
-vec3 grassCol(vec2 cell, vec2 p, bool meadow, float fade){
-  vec3 g = seasonGrass();
-  vec4 nb = tn(p, 0.017), nm = tn(p + 3.1, 0.07);
-  g *= 0.84 + 0.32 * nb.r;
-  g = mix(g, g * vec3(1.16, 1.05, 0.62), smoothstep(0.55, 0.85, nm.g) * 0.55);
-  g = mix(g, g * vec3(0.78, 0.95, 0.85), smoothstep(0.6, 0.8, nb.b) * 0.45);
-  float h = ih(cell), h2 = ih(cell + 174.0);
-  g *= 1.0 + (h - 0.5) * 0.2 * fade;
-  g = mix(g, g * 0.74, step(0.92, h2) * fade);
-  g = mix(g, g * 1.17, step(h2, 0.05) * fade);
-  if (meadow) {
-    g = mix(g, g * vec3(1.1, 1.08, 0.8), 0.35);
-    float fl = step(0.95, h2) * fade * max(flowerAmt(), 0.15);
-    vec3 fc = h < 0.3 ? vec3(0.98, 0.84, 0.22) : h < 0.55 ? vec3(0.98, 0.97, 0.94) : h < 0.8 ? vec3(0.93, 0.45, 0.66) : vec3(0.62, 0.42, 0.9);
-    g = mix(g, fc, fl);
-  } else {
-    g = mix(g, vec3(0.98, 0.9, 0.3), step(0.993, h2) * fade * flowerAmt());
-  }
-  g = mix(g, vec3(0.78, 0.4, 0.12), step(0.955, ih(cell + 211.0)) * fade * autumnAmt() * 0.9);
-  return g;
+/* ---------------- voxel materials (sRGB albedo; cheap: shared noise + hashes only) ---------------- */
+vec3 grassCol(bool meadow, float fade){
+  vec3 g = seasonGrass() * (0.84 + 0.32 * gN1.r);
+  g = mix(g, g * vec3(1.16, 1.05, 0.62), smoothstep(0.55, 0.85, gN1.g) * 0.55);
+  g = mix(g, g * vec3(0.78, 0.95, 0.85), smoothstep(0.6, 0.8, gN1.a) * 0.45);
+  g *= 1.0 + (gH0 - 0.5) * 0.2 * fade;
+  g = mix(g, g * 0.74, step(0.92, gH1) * fade);
+  g = mix(g, g * 1.17, step(gH1, 0.05) * fade);
+  if (meadow) g = mix(g, g * vec3(1.1, 1.08, 0.8), 0.35);
+  vec3 fc = !meadow ? vec3(0.98, 0.9, 0.3) : gH0 < 0.3 ? vec3(0.98, 0.84, 0.22) : gH0 < 0.55 ? vec3(0.98, 0.97, 0.94) : gH0 < 0.8 ? vec3(0.93, 0.45, 0.66) : vec3(0.62, 0.42, 0.9);
+  float fl = meadow ? step(0.95, gH1) * max(flowerAmt(), 0.15) : step(0.993, gH1) * flowerAmt();
+  g = mix(g, fc, fl * fade);
+  return mix(g, vec3(0.78, 0.4, 0.12), step(0.955, gH2) * fade * autumnAmt() * 0.9);
 }
 vec3 sandCol(vec2 cell, float fade){
-  vec2 c = (cell + 0.5) * 0.125;
-  float r = sin(dot(c, vec2(2.3, 3.9)) * 4.0 + tn(c, 0.043).r * 9.0);
-  vec3 s = vec3(0.84, 0.76, 0.55) * (0.95 + 0.05 * r * fade);
-  s *= 1.0 + (ih(cell) - 0.5) * 0.08 * fade;
-  s = mix(s, vec3(0.97, 0.95, 0.9), step(0.975, ih(cell + 248.0)) * fade);
-  s = mix(s, vec3(0.62, 0.56, 0.46), step(0.986, ih(cell + 285.0)) * fade);
-  return s;
+  float r = sin(dot(cell, vec2(0.29, 0.49)) * 4.0 + gN1.r * 9.0);
+  vec3 s = vec3(0.84, 0.76, 0.55) * (0.95 + 0.05 * r * fade) * (1.0 + (gH0 - 0.5) * 0.08 * fade);
+  s = mix(s, vec3(0.97, 0.95, 0.9), step(0.975, gH1) * fade);
+  return mix(s, vec3(0.62, 0.56, 0.46), step(0.986, gH2) * fade);
 }
-vec3 dirtCol(vec2 cell, vec2 p, float fade){
-  vec3 d = vec3(0.5, 0.38, 0.26) * (0.86 + 0.28 * tn(p + 0.7, 0.05).g);
-  d *= 1.0 + (ih(cell) - 0.5) * 0.18 * fade;
-  d = mix(d, vec3(0.57, 0.47, 0.36), step(0.95, ih(cell + 322.0)) * fade);
-  d = mix(d, seasonGrass() * 0.9, step(0.9, ih(cell + 359.0)) * fade * 0.8);
-  return d;
+vec3 dirtCol(float fade){
+  vec3 d = vec3(0.5, 0.38, 0.26) * (0.86 + 0.28 * gN1.g) * (1.0 + (gH0 - 0.5) * 0.18 * fade);
+  d = mix(d, vec3(0.57, 0.47, 0.36), step(0.95, gH1) * fade);
+  return mix(d, seasonGrass() * (0.8 + 0.25 * gH0), step(0.84, gH2) * fade * 0.85);
 }
-vec3 rockCol(vec2 cell, float fade){
-  vec2 c = (cell + 0.5) * 0.125;
-  vec3 r = vec3(0.53, 0.51, 0.48) * (0.82 + 0.3 * tn(c, 0.06).b);
-  r *= 1.0 + (ih(cell) - 0.5) * 0.16 * fade;
-  float cn = tn(c + 0.3, 0.21).g;
-  r *= 1.0 - (1.0 - smoothstep(0.0, 0.04, abs(cn - 0.5))) * 0.45 * fade;
-  r = mix(r, vec3(0.46, 0.53, 0.33), smoothstep(0.6, 0.72, tn(c + 0.7, 0.13).a) * 0.45);
-  return r;
+vec3 rockCol(float fade){
+  vec3 r = vec3(0.53, 0.51, 0.48) * (0.82 + 0.3 * gN1.b) * (1.0 + (gH0 - 0.5) * 0.16 * fade);
+  r *= 1.0 - (1.0 - smoothstep(0.0, 0.03, abs(gN1.g - 0.5))) * 0.45 * fade; // cracks
+  return mix(r, vec3(0.46, 0.53, 0.33), smoothstep(0.6, 0.72, gN1.a) * 0.45); // lichen
 }
-vec3 snowCol(vec2 cell, float fade){
-  vec2 p = (cell + 0.5) * 0.125;
-  return vec3(0.9, 0.93, 0.98) * (0.93 + 0.07 * tn(p, 0.07).b) * (0.96 + 0.06 * ih(cell + 396.0) * fade);
-}
+vec3 snowCol(float fade){ return vec3(0.9, 0.93, 0.98) * (0.93 + 0.07 * gN1.b) * (0.96 + 0.06 * gH1 * fade); }
 float sparkle(vec2 cell, vec3 V, float fade){ return step(0.992, hash13(vec3(cell, floor(dot(V, vec3(23.0, 17.0, 29.0)))))) * fade; }
-
-vec3 terrainTop(uint terr, vec2 cell, vec2 p, float fade){
+vec3 terrainTop(uint terr, vec2 cell, float fade){
   if (terr == 1u) return sandCol(cell, fade);
-  if (terr == 2u) return dirtCol(cell, p, fade);
-  if (terr == 3u) return rockCol(cell, fade);
-  if (terr == 4u) return snowCol(cell, fade);
-  return grassCol(cell, p, terr == 5u, fade);
-}
-vec3 seabed(uint terr, vec2 cell, vec2 p, float depth, float fade){
-  vec3 s = terr == 1u ? sandCol(cell, fade) * vec3(0.84, 0.88, 0.78) : vec3(0.36, 0.38, 0.26) * (0.85 + 0.3 * tn(p, 0.05).r);
-  s *= 1.0 + (ih(cell) - 0.5) * 0.12 * fade;
-  float wd = smoothstep(0.55, 0.75, tn(p + 0.2, 0.09).b);
-  s = mix(s, vec3(0.2, 0.38, 0.2), wd * 0.7 * step(0.3, ih(cell + 433.0)));
-  s *= mix(0.95, 0.55, smoothstep(0.1, 1.2, depth));
-  return s * vec3(0.84, 0.97, 0.92);
-}
-/** Colour of the top material where it wraps over a cliff edge. */
-vec3 lipCol(uint terr, vec2 cell, vec2 p, float fade){
-  if (terr == 1u) return sandCol(cell, fade);
-  if (terr == 3u) return rockCol(cell, fade);
-  if (terr == 4u) return snowCol(cell, fade);
-  if (terr == 2u) return dirtCol(cell, p, fade);
-  return seasonGrass() * (0.9 + 0.2 * ih(cell + 470.0) * fade);
-}
-/** Stratified soil / rock on vertical faces: bands every 2 voxels, darker toward the slab bottom. */
-vec3 sideCol(vec3 wp, float topY, uint terr, uint road, vec2 cell, float fade){
-  float below = topY - wp.y;
-  float band = floor(wp.y * 4.0 + 0.001);
-  float bh = hash11(band * 0.618 + 3.1);
-  vec3 soil = bh < 0.25 ? vec3(0.49, 0.35, 0.23) : bh < 0.5 ? vec3(0.57, 0.43, 0.29) : bh < 0.75 ? vec3(0.43, 0.32, 0.24) : vec3(0.63, 0.51, 0.36);
-  vec3 stone = mix(vec3(0.44, 0.43, 0.41), vec3(0.57, 0.55, 0.51), bh);
-  float rocky = smoothstep(1.4, -0.4, wp.y);
-  if (terr == 3u || terr == 4u) rocky = max(rocky, 0.8);
-  vec3 col = mix(soil, stone, rocky);
-  if (terr == 1u) col = mix(col, vec3(0.8, 0.71, 0.5), smoothstep(0.75, 0.1, below) * (1.0 - rocky));
-  float soilTop = (terr == 0u || terr == 5u || terr == 2u) ? 1.0 : 0.0;
-  col = mix(col, vec3(0.34, 0.24, 0.16), smoothstep(0.42, 0.18, below) * (1.0 - rocky) * soilTop);
-  col *= 1.0 + (ih(cell) - 0.5) * 0.16 * fade;
-  col = mix(col, stone * 1.08, step(0.955, ih(cell + 507.0)) * fade * (1.0 - rocky));
-  float bf = fract(wp.y * 4.0);
-  col *= 1.0 - 0.13 * (1.0 - smoothstep(0.0, 0.14, bf)) * fade;
-  col *= mix(0.4, 1.0, smoothstep(-3.0, 1.3, wp.y));
-  if (road > 0u) {
-    if (below < 0.07) col = vec3(0.21, 0.215, 0.23);
-    else if (below < 0.16) col = vec3(0.5, 0.48, 0.45) * (0.9 + 0.2 * ih(cell));
-  } else {
-    float lipH = 0.125 * (1.0 + step(0.62, ih(vec2(cell.x, 5.0)))) + SNOW * 0.07;
-    if (below < lipH) {
-      col = lipCol(terr, cell, wp.xz, fade);
-      if (SNOW > 0.2 && terr != 1u) col = mix(col, snowCol(cell, fade), smoothstep(0.2, 0.6, SNOW));
-    }
-  }
-  return col;
-}
-
-/* ---------------- effects ---------------- */
-float caustic(vec2 p){
-  float t = TIME * 0.05;
-  float a = tn(p + vec2(t, t * 0.7) * 11.0, 0.09).g;
-  float b = tn(p * 1.37 - vec2(t * 0.8, -t * 0.4) * 11.0 + 5.0, 0.09).g;
-  return pow(1.0 - smoothstep(0.0, 0.07, abs(a - b)), 3.0);
+  if (terr == 2u) return dirtCol(fade);
+  if (terr == 3u) return rockCol(fade);
+  if (terr == 4u) return snowCol(fade);
+  return grassCol(terr == 5u, fade);
 }
 float topAO(vec2 uv, uint m){
   float a = 1.0;
@@ -876,12 +895,83 @@ float topAO(vec2 uv, uint m){
   if ((m & 128u) != 0u) a *= mix(0.65, 1.0, smoothstep(0.0, R, length(uv)));
   return a;
 }
+#if GROUP != 1
+/** Animated caustic web from interfering waves (pure ALU). */
+float caustic(vec2 p){
+  float t = TIME * 0.8;
+  vec2 q = p * 2.2;
+  float w = sin(q.x + sin(q.y * 1.3 + t) * 0.9 + t * 0.7) + sin(q.y * 1.1 + sin(q.x * 0.9 - t * 0.8) * 0.9 - t * 0.5);
+  return pow(1.0 - smoothstep(0.0, 0.55, abs(w)), 4.0);
+}
+#endif
+
+#if GROUP == 0
+vec3 seabed(uint terr, vec2 cell, float depth, float fade){
+  vec3 s = terr == 1u ? sandCol(cell, fade) * vec3(0.84, 0.88, 0.78) : vec3(0.36, 0.38, 0.26) * (0.85 + 0.3 * gN1.r) * (1.0 + (gH0 - 0.5) * 0.12 * fade);
+  s = mix(s, vec3(0.2, 0.38, 0.2), smoothstep(0.55, 0.75, gN1.b) * 0.7 * step(0.3, gH2)); // weed beds
+  return s * mix(0.95, 0.55, smoothstep(0.1, 1.2, depth)) * vec3(0.84, 0.97, 0.92);
+}
+/** Stratified soil / rock on vertical faces: bands every 2 voxels, darker toward the slab bottom. */
+vec3 sideCol(vec3 wp, float topY, uint terr, uint road, vec2 cell, float fade){
+  float below = topY - wp.y;
+  float band = floor(wp.y * 4.0 + 0.001);
+  float bh = hash11(band * 0.618 + 3.1);
+  vec3 soil = bh < 0.25 ? vec3(0.49, 0.35, 0.23) : bh < 0.5 ? vec3(0.57, 0.43, 0.29) : bh < 0.75 ? vec3(0.43, 0.32, 0.24) : vec3(0.63, 0.51, 0.36);
+  vec3 stone = mix(vec3(0.44, 0.43, 0.41), vec3(0.57, 0.55, 0.51), bh);
+  float rocky = smoothstep(1.4, -0.4, wp.y);
+  if (terr == 3u || terr == 4u) rocky = max(rocky, 0.8);
+  vec3 col = mix(soil, stone, rocky);
+  if (terr == 1u) col = mix(col, vec3(0.8, 0.71, 0.5), smoothstep(0.75, 0.1, below) * (1.0 - rocky));
+  float soilTop = (terr == 0u || terr == 5u || terr == 2u) ? 1.0 : 0.0;
+  col = mix(col, vec3(0.34, 0.24, 0.16), smoothstep(0.42, 0.18, below) * (1.0 - rocky) * soilTop);
+  col *= 1.0 + (gH0 - 0.5) * 0.16 * fade;
+  col = mix(col, stone * 1.08, step(0.955, gH1) * fade * (1.0 - rocky));
+  col *= 1.0 - 0.13 * (1.0 - smoothstep(0.0, 0.14, fract(wp.y * 4.0))) * fade;
+  col *= mix(0.4, 1.0, smoothstep(-3.0, 1.3, wp.y));
+  if (road > 0u) {
+    if (below < 0.07) col = vec3(0.21, 0.215, 0.23);
+    else if (below < 0.16) col = vec3(0.5, 0.48, 0.45) * (0.9 + 0.2 * gH0);
+  } else if (below < 0.125 * (1.0 + step(0.62, ih(vec2(cell.x, 5.0)))) + SNOW * 0.07) { // top material wraps the edge
+    col = terr == 0u || terr == 5u ? seasonGrass() * (0.9 + 0.2 * gH2 * fade) : terrainTop(terr, cell, fade);
+    if (SNOW > 0.2 && terr != 1u) col = mix(col, snowCol(fade), smoothstep(0.2, 0.6, SNOW));
+  }
+  return col;
+}
+/** Distance (tile units) from uv to the nearest edge/corner shared with a water tile (bits from the mesher). */
+float shoreDist(uint m, vec2 uv){
+  float d = 9.0;
+  if ((m & 1u) != 0u) d = min(d, 1.0 - uv.x);
+  if ((m & 2u) != 0u) d = min(d, uv.x);
+  if ((m & 4u) != 0u) d = min(d, 1.0 - uv.y);
+  if ((m & 8u) != 0u) d = min(d, uv.y);
+  if ((m & 16u) != 0u) d = min(d, length(1.0 - uv));
+  if ((m & 32u) != 0u) d = min(d, length(vec2(uv.x, 1.0 - uv.y)));
+  if ((m & 64u) != 0u) d = min(d, length(vec2(1.0 - uv.x, uv.y)));
+  if ((m & 128u) != 0u) d = min(d, length(uv));
+  return d;
+}
+/** Paved / lawn lot base under buildings, by zone. */
+vec3 lotBase(uint zc, vec2 uv, vec2 p, float fade, float aa){
+  uint zt = zc >> 2u, den = zc & 3u;
+  vec2 f = abs(fract(p * 4.0) - 0.5);
+  float joint = 1.0 - smoothstep(0.003, 0.003 + aa, (0.5 - max(f.x, f.y)) * 0.25);
+  vec3 lawn = seasonGrass() * (0.95 + 0.1 * step(0.5, fract(p.x * 2.0))) * (1.0 + (gH0 - 0.5) * 0.1 * fade);
+  vec3 pv = (zt == 3u ? vec3(0.55, 0.54, 0.51) : zt == 2u ? vec3(0.67, 0.65, 0.61) : vec3(0.72, 0.7, 0.66)) * (0.94 + 0.1 * ih(floor(p * 4.0)));
+  pv *= 1.0 - joint * 0.2 * fade;
+  if (zt == 3u) pv = mix(pv, pv * 0.7, smoothstep(0.62, 0.7, gN1.b) * 0.6); // oil stains
+  if (zt == 1u && den == 1u) return lawn;
+  if (zt == 1u && den == 2u) return mix(pv, lawn, smoothstep(0.12, 0.12 + aa, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y))));
+  return pv;
+}
+#endif
+
+#if GROUP == 1
 /** Warm street-lamp light pools (tiles with x+z even; mid-points of open sidewalks). */
 float lampPool(vec2 uv, uint mask, uint road, vec2 tile){
   if (((uint(tile.x) + uint(tile.y)) & 1u) != 0u) return 0.0;
   if (road == 3u) {
     if (mask != 3u && mask != 12u) return 0.0;
-    vec2 d = uv - 0.5; d *= mask == 3u ? vec2(0.7, 1.4) : vec2(1.4, 0.7);
+    vec2 d = (uv - 0.5) * (mask == 3u ? vec2(0.7, 1.4) : vec2(1.4, 0.7));
     return exp(-dot(d, d) * 9.0);
   }
   float h = (road == 1u ? SW_ST : SW_AV) * 0.5, p = 0.0;
@@ -910,23 +1000,7 @@ float crossing(vec2 uv, uint d, float sw, float aa){
   float stp = bnd(e, 0.235, 0.26, aa) * bnd(side, 0.0, 0.5 - sw - 0.012, aa);
   return max(cw, stp);
 }
-/** Paved / lawn lot base under buildings, by zone. */
-vec3 lotBase(vec3 alb, uint zc, vec2 uv, vec2 p, float fade, float aa){
-  uint zt = zc >> 2u, den = zc & 3u;
-  vec2 f = abs(fract(p * 4.0) - 0.5);
-  float joint = 1.0 - smoothstep(0.003, 0.003 + aa, (0.5 - max(f.x, f.y)) * 0.25);
-  float sl = ih(floor(p * 4.0));
-  vec3 lawn = seasonGrass() * (0.95 + 0.1 * step(0.5, fract(p.x * 2.0))) * (1.0 + (ih(floor(p * 8.0)) - 0.5) * 0.1 * fade);
-  vec3 pv = (zt == 3u ? vec3(0.55, 0.54, 0.51) : zt == 2u ? vec3(0.67, 0.65, 0.61) : vec3(0.72, 0.7, 0.66)) * (0.94 + 0.1 * sl);
-  pv *= 1.0 - joint * 0.2 * fade;
-  if (zt == 3u) pv = mix(pv, pv * 0.7, smoothstep(0.62, 0.7, tn(p, 0.3).b) * 0.6);
-  if (zt == 1u && den == 1u) return lawn;
-  if (zt == 1u && den == 2u) {
-    float e = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-    return mix(pv, lawn, smoothstep(0.12, 0.12 + aa, e));
-  }
-  return pv;
-}
+#endif
 
 void main(){
   uint nIdx = vI.x & 15u, kind = vI.x >> 4u;
@@ -944,27 +1018,31 @@ void main(){
   bool under = wp.y < SEA_Y - 0.01;
   vec2 cellT = floor(wp.xz * 8.0);
   vec2 cell = top ? cellT : floor(vec2(dot(wp.xz, abs(n.zx)) * 8.0, wp.y * 8.0));
-  vec4 td = texelFetch(uTileTex, ivec2(clamp(tileF, vec2(0.0), uMap.xy - 1.0)), 0);
-  uint tfl = uint(td.b * 255.0 + 0.5), zc = uint(td.a * 255.0 + 0.5);
+  gH0 = ih(cell); gH1 = ih(cell + 174.0); gH2 = ih(cell + 211.0);
+  vec2 pc = (cell + 0.5) * 0.125;
+  gN1 = tn(pc, 0.05);
+  gQ = ih(floor(cell * 0.25) + 911.0);
 
   vec3 alb = vec3(0.5), emis = vec3(0.0);
   float ao = 1.0, snowF = 0.0, wetP = 0.0, gut = 1.0, pool = 0.0, metal = 0.0, ovA = 0.0, decA = 0.0;
   vec3 decCol = vec3(0.0);
+#if GROUP != 2
+  vec4 td = texelFetch(uTileTex, ivec2(clamp(tileF, vec2(0.0), uMap.xy - 1.0)), 0);
+#endif
 
+#if GROUP == 0
   if (kind == 0u) { // ---------------- terrain & seabed tops
-    if (under) alb = seabed(terr, cell, wp.xz, SEA_Y - wp.y, fade);
+    uint tfl = uint(td.b * 255.0 + 0.5), zc = uint(td.a * 255.0 + 0.5);
+    if (under) alb = seabed(terr, cell, SEA_Y - wp.y, fade);
     else {
-      alb = terrainTop(terr, cell, wp.xz, fade);
-      if ((tfl & 8u) != 0u) alb = lotBase(alb, zc, uv, wp.xz, fade, aa);
+      alb = terrainTop(terr, cell, fade);
+      if ((tfl & 8u) != 0u) alb = lotBase(zc, uv, wp.xz, fade, aa);
       else if (zc > 0u) {
         uint zt = zc >> 2u, den = zc & 3u;
         vec3 zcol = zt == 1u ? vec3(0.224, 0.851, 0.541) : zt == 2u ? vec3(0.247, 0.655, 1.0) : vec3(1.0, 0.784, 0.239);
         float ga = uMisc.w;
         // planned lot: cleared, calm lawn tinted in the zone colour
-        if (terr == 0u || terr == 2u || terr == 5u) {
-          vec3 lawn = seasonGrass() * (0.94 + 0.08 * tn(wp.xz, 0.05).r) * (1.0 + (ih(cell + 655.0) - 0.5) * 0.08 * fade);
-          alb = mix(alb, lawn, 0.8);
-        }
+        if (terr == 0u || terr == 2u || terr == 5u) alb = mix(alb, seasonGrass() * (0.94 + 0.08 * gN1.r) * (1.0 + (gH2 - 0.5) * 0.08 * fade), 0.8);
         alb = mix(alb, zcol, 0.1 + 0.2 * ga);
         // dashed inset border with solid corners + 1..3 density markers (applied after snow)
         float ex = min(uv.x, 1.0 - uv.x), ez = min(uv.y, 1.0 - uv.y), e = min(ex, ez);
@@ -980,12 +1058,28 @@ void main(){
         decCol = mkr > border ? zcol : zcol * 0.85;
         emis += srgb2lin(zcol) * (border * 0.35 + mkr * 0.7) * (0.04 + 0.96 * ga) * (0.35 + NIGHT);
       }
+      // shoreline: damp band that breathes with the waves (sand), muddy banks (grass/dirt)
+      if (vI.z != 0u && terr != 3u && terr != 4u) {
+        float sd = shoreDist(vI.z, uv);
+        if (sd < 1.0) {
+          float wash = 0.2 + 0.07 * sin(TIME * 0.9 + (wp.x + wp.z) * 0.7) + 0.05 * sin(TIME * 1.7 + wp.x * 2.3);
+          alb *= mix(1.0, terr == 1u ? 0.7 : 0.8, 1.0 - smoothstep(wash - 0.04, wash + 0.12, sd));
+          if (terr == 1u) alb = mix(alb, vec3(0.95, 0.96, 0.94), bnd(sd, wash - 0.02, wash + 0.02, aa) * 0.5 * fade);
+        }
+      }
       snowF = 1.0;
       wetP = (terr == 1u || terr == 4u) ? 0.0 : 0.55;
       ovA = 0.85;
     }
     ao = topAO(uv, vI.w);
-  } else if (kind == 1u) { // ---------------- road surface (land, ramps, bridge decks)
+  } else { // ---------------- cliffs, seabed steps, diorama skirt
+    alb = sideCol(wp, vTop, terr, road, cell, fade);
+    float by = vI.w == 255u ? ${SKIRT_Y.toFixed(1)} : float(vI.w) * 0.25;
+    ao = mix(0.55, 1.0, smoothstep(0.0, 0.32, wp.y - by));
+    if (under) alb *= vec3(0.8, 0.93, 0.88) * mix(0.9, 0.6, smoothstep(0.0, 1.2, SEA_Y - wp.y));
+  }
+#elif GROUP == 1
+  if (kind == 1u) { // ---------------- road surface (land, ramps, bridge decks)
     float sw = road == 1u ? SW_ST : road == 2u ? SW_AV : 0.0;
     uint cnt = (mask & 1u) + ((mask >> 1u) & 1u) + ((mask >> 2u) & 1u) + ((mask >> 3u) & 1u);
     bool inter = cnt >= 3u, straight = mask == 3u || mask == 12u;
@@ -1001,20 +1095,21 @@ void main(){
       if ((mask & 10u) == 10u) dk = min(dk, max(uv.x, uv.y));
     }
     gut = dk - sw;
-    if (road == 3u) {
-      alb = vec3(0.6, 0.59, 0.56) * (0.9 + 0.15 * tn(wp.xz, 0.21).r);
+    if (road == 3u) { // concrete slabs
+      alb = vec3(0.6, 0.59, 0.56) * (0.9 + 0.15 * gN1.r) * (1.0 + (ih(floor(wp.xz * 2.0)) - 0.5) * 0.07) * (1.0 + (gH0 - 0.5) * 0.05 * fade);
       vec2 jf = fract(wp.xz * 2.0);
-      float jd = min(min(jf.x, 1.0 - jf.x), min(jf.y, 1.0 - jf.y)) * 0.5;
-      alb *= 1.0 - (1.0 - smoothstep(0.004, 0.004 + aa, jd)) * 0.22 * fade;
-      alb *= 1.0 + (ih(floor(wp.xz * 2.0)) - 0.5) * 0.07;
-      alb *= 1.0 + (ih(cell) - 0.5) * 0.05 * fade;
-    } else {
-      alb = vec3(0.235, 0.24, 0.255) * (0.86 + 0.24 * tn(wp.xz, 0.17).r);
-      alb *= 1.0 + (ih(cell) - 0.5) * 0.12 * fade;
-      alb = mix(alb, alb * 0.86, smoothstep(0.64, 0.68, tn(wp.xz + 0.4, 0.09).g) * 0.5);
-      alb = mix(alb, vec3(0.34, 0.34, 0.35), step(0.985, ih(cell + 544.0)) * fade * 0.6);
+      alb *= 1.0 - (1.0 - smoothstep(0.004, 0.004 + aa, min(min(jf.x, 1.0 - jf.x), min(jf.y, 1.0 - jf.y)) * 0.5)) * 0.22 * fade;
+    } else { // asphalt
+      alb = vec3(0.235, 0.24, 0.255) * (0.88 + 0.12 * gN1.r + 0.1 * gQ) * (1.0 + (gH0 - 0.5) * 0.12 * fade);
+      alb = mix(alb, alb * 0.86, smoothstep(0.64, 0.68, gN1.g) * 0.5);
+      alb = mix(alb, vec3(0.34, 0.34, 0.35), step(0.985, gH2) * fade * 0.6);
     }
     alb *= mix(0.78, 1.0, smoothstep(0.0, 0.07, gut));
+    if (road != 3u && straight && gut < 0.04) { // kerb-side storm drains
+      float along = mask == 3u ? uv.x : uv.y;
+      float grate = bnd(along, 0.44, 0.56, aa) * (1.0 - smoothstep(0.035, 0.035 + aa, gut));
+      alb = mix(alb, vec3(0.07, 0.075, 0.08) * (0.6 + 0.8 * step(0.5, fract(along * 70.0))), grate * fade);
+    }
     if (inter) alb *= 0.97 - 0.07 * smoothstep(0.35, 0.0, length(uv - 0.5));
     float mk = 0.0, mky = 0.0;
     if (!inter && cnt > 0u) {
@@ -1034,40 +1129,34 @@ void main(){
       }
     }
     if (road == 3u) mk = max(mk, bnd(dk, 0.07, 0.088, aa));
-    float wear = 0.72 + 0.28 * tn(wp.xz, 0.45).a;
+    float wear = 0.72 + 0.28 * gN1.a;
     alb = mix(alb, vec3(0.92, 0.91, 0.87), mk * 0.92 * wear);
     alb = mix(alb, vec3(0.93, 0.74, 0.2), mky * 0.9 * wear);
     alb = mix(alb, vec3(0.43, 0.42, 0.41), SNOW * 0.25);
-    snowF = max(1.0 - smoothstep(0.01, 0.1, gut), 0.25 * tn(wp.xz, 0.6).r);
+    snowF = max(1.0 - smoothstep(0.01, 0.1, gut), 0.25 * gN1.r);
     pool = lampPool(uv, mask, road, tileF);
     wetP = 1.0;
     ovA = 0.5;
     ao = topAO(uv, vI.w);
-  } else if (kind == 2u) { // ---------------- cliffs, seabed steps, diorama skirt
-    alb = sideCol(wp, vTop, terr, road, cell, fade);
-    float by = vI.w == 255u ? ${SKIRT_Y.toFixed(1)} : float(vI.w) * 0.25;
-    ao = mix(0.55, 1.0, smoothstep(0.0, 0.32, wp.y - by));
-    if (under) alb *= vec3(0.8, 0.93, 0.88) * mix(0.9, 0.6, smoothstep(0.0, 1.2, SEA_Y - wp.y));
-  } else if (kind == 3u) { // ---------------- sidewalk
-    vec2 sl = floor(wp.xz * 4.0);
-    alb = vec3(0.7, 0.69, 0.66) * (0.93 + 0.1 * ih(sl)) * (0.92 + 0.12 * tn(wp.xz, 0.23).g);
-    alb *= 1.0 + (ih(cell) - 0.5) * 0.06 * fade;
+  } else if (kind == 3u) { // ---------------- sidewalk slabs
+    alb = vec3(0.7, 0.69, 0.66) * (0.93 + 0.1 * ih(floor(wp.xz * 4.0))) * (0.92 + 0.12 * gQ) * (1.0 + (gH0 - 0.5) * 0.06 * fade);
     vec2 f = abs(fract(wp.xz * 4.0) - 0.5);
     alb *= 1.0 - (1.0 - smoothstep(0.003, 0.003 + aa, (0.5 - max(f.x, f.y)) * 0.25)) * 0.2 * fade;
     pool = lampPool(uv, mask, road, tileF);
     snowF = 0.85; wetP = 0.7; ovA = 0.6;
   } else if (kind == 4u) { // ---------------- kerb faces
-    alb = vec3(0.76, 0.75, 0.72) * (1.0 + (ih(cell) - 0.5) * 0.08 * fade);
+    alb = vec3(0.76, 0.75, 0.72) * (1.0 + (gH0 - 0.5) * 0.08 * fade);
     ao = 0.85;
     snowF = 0.6;
-  } else if (kind == 5u) { // ---------------- green median
-    float h = ih(cell);
-    alb = seasonGrass() * 0.92 * (1.0 + (h - 0.5) * 0.25 * fade);
+  } else { // ---------------- green median
+    alb = seasonGrass() * 0.92 * (1.0 + (gH0 - 0.5) * 0.25 * fade);
     alb = mix(alb, alb * 0.62, step(0.72, ih(floor(wp.xz * 4.0))));
-    alb = mix(alb, vec3(0.95, 0.5, 0.65), step(0.96, h) * flowerAmt() * fade);
+    alb = mix(alb, vec3(0.95, 0.5, 0.65), step(0.96, gH0) * flowerAmt() * fade);
     snowF = 1.0; ovA = 0.6;
-  } else if (kind == 6u) { // ---------------- highway jersey barrier
-    alb = vec3(0.8, 0.79, 0.76) * (1.0 + (ih(cell) - 0.5) * 0.06 * fade);
+  }
+#else
+  if (kind == 6u) { // ---------------- highway jersey barrier
+    alb = vec3(0.8, 0.79, 0.76) * (1.0 + (gH0 - 0.5) * 0.06 * fade);
     if (!top) {
       float along = dot(wp.xz, abs(n.zx)), below = vTop - wp.y;
       alb *= 1.0 - 0.2 * bnd(below, 0.045, 0.058, aa);
@@ -1080,52 +1169,55 @@ void main(){
     metal = 1.0; snowF = 1.0; ao = top ? 1.0 : 0.85;
   } else if (kind == 8u) { // ---------------- bridge deck fascia
     float below = vTop - wp.y;
-    alb = vec3(0.68, 0.67, 0.64) * (0.92 + 0.12 * tn(wp.xz + wp.y, 0.3).r);
+    alb = vec3(0.68, 0.67, 0.64) * (0.92 + 0.12 * gQ);
     alb *= 1.0 - 0.22 * smoothstep(0.05, 0.11, below);
     alb *= 1.0 - 0.15 * bnd(below, 0.012, 0.022, aa);
   } else if (kind == 9u) { // ---------------- bridge piers
-    alb = vec3(0.62, 0.61, 0.58) * (0.9 + 0.14 * tn(vec2(wp.x + wp.z, wp.y), 0.4).g);
-    alb *= 1.0 + (ih(cell) - 0.5) * 0.08 * fade;
-    float wl = wp.y - SEA_Y;
-    alb = mix(alb, vec3(0.3, 0.36, 0.27), 1.0 - smoothstep(-0.02, 0.1, wl));
+    alb = vec3(0.62, 0.61, 0.58) * (0.9 + 0.14 * gQ) * (1.0 + (gH0 - 0.5) * 0.08 * fade);
+    alb = mix(alb, vec3(0.3, 0.36, 0.27), 1.0 - smoothstep(-0.02, 0.1, wp.y - SEA_Y)); // waterline algae
     if (under) alb *= 0.8;
   } else { // ---------------- wooden plinth
     float along = top ? wp.x + wp.z : dot(wp.xz, abs(n.zx));
-    float grain = sin(along * 34.0 + tn(vec2(along * 0.3, wp.y * 3.0), 0.2).r * 14.0) * 0.5 + 0.5;
+    float grain = sin(along * 34.0 + gN1.r * 14.0 + gQ * 3.0) * 0.5 + 0.5;
     alb = mix(vec3(0.26, 0.15, 0.08), vec3(0.42, 0.26, 0.14), grain * 0.55 + 0.2);
     if (!top) alb *= mix(0.7, 1.0, smoothstep(${(SKIRT_Y - 0.32).toFixed(2)}, ${(SKIRT_Y + 0.12).toFixed(2)}, wp.y));
     metal = 0.35;
   }
+#endif
 
   ao = mix(ao, 1.0, smoothstep(0.12, 0.45, gPx)); // voxel AO only reads up close
 
   // ---------------- snow cover ----------------
   float snowAmt = 0.0;
+#ifdef F_SNOW
   if (SNOW > 0.01 && top && !under && snowF > 0.0) {
-    float cover = smoothstep(0.08, 0.32, SNOW * 1.3 - tn(wp.xz, 0.045).g * 0.42 - ih(cellT) * 0.07 * fade + (wp.y - 2.5) * 0.015);
-    cover *= snowF;
-    alb = mix(alb, snowCol(cellT, fade), cover);
+    float cover = smoothstep(0.08, 0.32, SNOW * 1.3 - gN1.g * 0.42 - gH0 * 0.07 * fade + (wp.y - 2.5) * 0.015) * snowF;
+    alb = mix(alb, snowCol(fade), cover);
     snowAmt = cover;
   }
+#endif
+#if GROUP == 0
   if (kind == 0u && terr == 4u && !under) snowAmt = 1.0;
   alb = mix(alb, decCol, decA); // zone decals stay visible in winter
+#endif
 
   // ---------------- rain: darkening + puddles ----------------
+#ifdef F_WET
   float wetS = WET;
+#if GROUP == 1
   if (kind == 1u) wetS = max(wetS, SNOW * 0.5);
-  if (!under) alb *= 1.0 - (kind == 2u ? 0.15 : 0.3) * wetS * (1.0 - snowAmt);
-  float pud = 0.0;
-  if (wetP > 0.0 && wetS > 0.05 && n.y > 0.99 && snowAmt < 0.5) {
-    float pn = tn(wp.xz + 0.17, 0.11).b;
-    float thr = mix(0.9, 0.56, wetS) - (kind == 1u ? 0.1 * (1.0 - smoothstep(0.0, 0.12, gut)) : 0.0);
-    pud = smoothstep(thr, thr + 0.025, pn) * smoothstep(0.15, 0.45, wetS) * wetP;
-  }
-
-  // ---------------- lighting ----------------
+#endif
+  if (!under) alb *= 1.0 - (top ? 0.3 : 0.15) * wetS * (1.0 - snowAmt);
+#endif
   vec3 albL = srgb2lin(alb);
   vec3 c = shade(albL, n, wp, ao);
-  float sheen = (kind == 1u || kind == 3u) ? wetS * 0.6 : 0.0;
-  float refl = max(pud, sheen * 0.35);
+#if GROUP != 2 && defined(F_WET)
+  float pud = 0.0;
+  if (wetP > 0.0 && wetS > 0.05 && n.y > 0.99 && snowAmt < 0.5) {
+    float thr = mix(0.9, 0.56, wetS) - (kind == 1u ? 0.1 * (1.0 - smoothstep(0.0, 0.12, gut)) : 0.0);
+    pud = smoothstep(thr, thr + 0.025, gN1.b) * smoothstep(0.15, 0.45, wetS) * wetP;
+  }
+  float refl = max(pud, (kind == 1u || kind == 3u) ? wetS * 0.21 : 0.0);
   if (refl > 0.001 && !under) {
     vec3 pn = n;
     if (pud > 0.01 && WET > 0.05) { // rain ripples
@@ -1140,28 +1232,33 @@ void main(){
     c += skyColor(reflect(-V, pn)) * fres * refl * 1.1 + specular(pn, wp, 220.0, 3.0) * refl;
     c += vec3(1.0, 0.7, 0.4) * pool * NIGHT * refl * 0.5;
   }
+#endif
+#if GROUP == 1
   if (pool > 0.0) c += albL * vec3(1.0, 0.72, 0.42) * pool * NIGHT * (kind == 3u ? 1.4 : 2.0);
+#endif
   if (snowAmt > 0.2) c += uSunColor.rgb * uSunDir.w * sparkle(cellT, V, fade) * snowAmt * 2.5;
+#if GROUP == 2
   if (metal > 0.0) c += specular(n, wp, 60.0, 0.8 * metal);
-  if (under) {
-    float depth = SEA_Y - wp.y;
-    c += albL * uSunColor.rgb * uSunDir.w * caustic(wp.xz + wp.y * 0.3) * 0.55 * exp(-depth * 1.1) * (0.4 + 0.6 * max(n.y, 0.0));
-  }
+#endif
+#if GROUP != 1
+  if (under) c += albL * uSunColor.rgb * uSunDir.w * caustic(wp.xz + wp.y * 0.3) * 0.55 * exp(-(SEA_Y - wp.y) * 1.1) * (0.4 + 0.6 * max(n.y, 0.0));
+#endif
 
+#if GROUP != 2
   // ---------------- build grid + hover ----------------
-  if (top && !under && kind != 10u) {
+  if (top && !under) {
     float e = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
     if (uMisc.w > 0.0) {
       float gl = 1.0 - smoothstep(0.0, aa * 1.5 + 0.004, e);
       c = mix(c, c * 0.5 + vec3(0.02, 0.03, 0.04) * (0.3 + NIGHT), gl * uMisc.w * 0.7);
     }
-    if (abs(tileF.x - uHover.x) < 0.5 && abs(tileF.y - uHover.y) < 0.5) {
-      float glow = exp(-e * 26.0) * 0.9 + 0.08;
-      emis += vec3(0.45, 0.85, 1.0) * glow * (0.85 + 0.15 * sin(TIME * 6.0)) * 1.4;
-    }
+    if (abs(tileF.x - uHover.x) < 0.5 && abs(tileF.y - uHover.y) < 0.5)
+      emis += vec3(0.45, 0.85, 1.0) * (exp(-e * 26.0) * 0.9 + 0.08) * (0.85 + 0.15 * sin(TIME * 6.0)) * 1.4;
   }
+#endif
   c += emis;
 
+#if GROUP != 2 && defined(F_OVERLAY)
   // ---------------- data overlay: smooth heatmap between tile centres ----------------
   if (uMap.w > 0.0 && ovA > 0.0) {
     float kindR = uHover.w, v;
@@ -1180,12 +1277,13 @@ void main(){
       // follow scene exposure by day, stay readable at night
       vec3 amb = mix(uGroundAmb.rgb, uSkyAmb.rgb, 0.5 + 0.5 * n.y);
       float lum = dot(amb + uSunColor.rgb * max(dot(n, uSunDir.xyz), 0.0) * uSunDir.w * 0.75, vec3(0.3, 0.55, 0.15));
-      float q = abs(fract(v * 10.0) - 0.5);
-      float line = kindR > 2.5 ? 0.0 : 1.0 - smoothstep(0.0, 0.06, 0.5 - q);
+      float line = kindR > 2.5 ? 0.0 : 1.0 - smoothstep(0.0, 0.06, 0.5 - abs(fract(v * 10.0) - 0.5));
       vec3 ocol = oc * max(lum, 0.55) * 0.8 * (1.0 - line * 0.3);
-      c = mix(c, ocol, uMap.w * ovA * 1.1);
+      float base = dot(c, vec3(0.3, 0.55, 0.15)); // keep light & shadow, drop colour noise
+      c = mix(mix(c, vec3(base), 0.7 * uMap.w / 0.75), ocol, uMap.w * ovA * 1.15);
     }
   }
+#endif
 
   c = applyFog(c, wp);
   fragColor = vec4(c, 1.0);

@@ -812,6 +812,13 @@ function onPolicy(key) {
   const def = VC.POLICY[key];
   if (!S || !S.adv || !def || !A._live) return;
   const on = !!S.policies[key];
+  // venues that need a policy (the casino) close / reopen with it
+  for (const d of VC.CATALOG) {
+    if (d.requiresPolicy !== key || !VC.world.count(d.key)) continue;
+    post('finance', on
+      ? { key: 'venue_open_' + d.key, severity: 'good', title: `${d.name} reopens`, text: `The ${d.name} is back in business. Cha-ching!`, panel: 'budget' }
+      : { key: 'venue_closed_' + d.key, severity: 'warn', title: `${d.name} closed`, text: `Without ${def.name}, the ${d.name} can't operate — that's ${money(d.income || 0)} a month we're not earning.`, panel: 'policies' });
+  }
   const k = 'pol_' + key;
   if ((S.adv.newsCd[k] || 0) > S.time.day) return; // no spam when toggling back and forth
   S.adv.newsCd[k] = S.time.day + 20;

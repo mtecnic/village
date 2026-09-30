@@ -80,7 +80,8 @@ const agg = {
   upkeep: {}, // dept -> Σ def.upkeep at 100% funding (before cost multiplier)
   count: {}, // dept -> number of catalog buildings
   special: [], // catalog buildings with def.income
-  tourism: 0, // Σ def.tourism of built catalog buildings
+  tourism: 0, // Σ def.tourism of built catalog buildings (not needing a policy)
+  tourismReq: [], // [{policy, pts}] tourism of venues that only open with a policy (casino)
   roads: [0, 0, 0, 0], // road tiles per VC.ROAD type
   roadsDirty: true,
 };
@@ -112,6 +113,7 @@ function scan(S, force) {
   for (const d of VC.DEPARTMENTS) { agg.upkeep[d.key] = 0; agg.count[d.key] = 0; }
   agg.special.length = 0;
   agg.tourism = 0;
+  agg.tourismReq.length = 0;
   for (const b of S.buildings.values()) {
     if (b.key === 'grow') {
       if (b.abandoned || !(b.built >= 1)) continue;
@@ -130,7 +132,10 @@ function scan(S, force) {
     if (def.housing && b.pop) agg.base.R[2] += b.pop; // arcology residents pay high-wealth taxes
     if (b.built >= 1) {
       if (def.income) agg.special.push(b);
-      if (def.tourism) agg.tourism += def.tourism;
+      if (def.tourism) {
+        if (def.requiresPolicy) agg.tourismReq.push({ policy: def.requiresPolicy, pts: def.tourism });
+        else agg.tourism += def.tourism;
+      }
     }
   }
   if (agg.roadsDirty) {
@@ -145,7 +150,9 @@ function scan(S, force) {
 /** Tourism points: the sim's figure when available, else Σ landmark tourism × policy modifier. */
 function tourismPoints(S, a) {
   if (S.stats.tourism > 0) return S.stats.tourism;
-  return a.tourism * Math.max(0, 1 + (S.mods.tourism || 0));
+  let pts = a.tourism;
+  for (const t of a.tourismReq) if (S.policies[t.policy]) pts += t.pts;
+  return pts * Math.max(0, 1 + (S.mods.tourism || 0));
 }
 
 /** Full monthly model. Returns {income:{cat}, expenses:{cat}, totals, detail}. Values are $ (positive). */

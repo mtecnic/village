@@ -234,6 +234,11 @@ K.pediment = (g, x, y, z, w, c, depth = 1, slope = 2) => {
   for (let k = 0; w - 2 * k * slope > 0; k++) g.box(x + k * slope, y + k, z, w - 2 * k * slope, 1, depth, c);
   return g;
 };
+/** Steep stepped spire / pyramid roof: each ring is `rise` voxels tall. */
+K.spire = (g, x, y, z, w, d, c, rise = 2) => {
+  for (let s = 0; w - 2 * s > 0 && d - 2 * s > 0; s++) g.box(x + s, y + s * rise, z + s, w - 2 * s, rise, d - 2 * s, c);
+  return g;
+};
 /** Row of columns along X at plane z. */
 K.columns = (g, x0, y, z, n, step, h, c, cap = 0) => {
   for (let i = 0; i < n; i++) {
@@ -324,7 +329,7 @@ K.clock = (g, face, ca, cy, plane, r = 2.3, rim = P.GOLD, dial = P.WHITE, hands 
       const d = Math.hypot(da, dy);
       if (d > r) continue;
       const [x, z] = faceXZ(face, ca + (face === 'n' || face === 'e' ? -da : da), plane);
-      g.set(x, cy + dy, z, d > r - 0.95 ? rim : dial);
+      g.set(x, cy + dy, z, d > r - 0.95 && r >= 2 ? rim : dial);
     }
   const hand = (da, dy) => {
     const [x, z] = faceXZ(face, ca + (face === 'n' || face === 'e' ? -da : da), plane);

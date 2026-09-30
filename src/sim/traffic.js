@@ -1,7 +1,10 @@
 /*
  * VOXELPOLIS — simulation: commuter traffic on the road graph (part of VC.sim).
  *
- *   VC.sim.computeTraffic()      full recompute (sim calls it every 8 days; ~1-3 ms on 128x128)
+ *   VC.sim.computeTraffic()      full recompute now (synchronous; ~1-3 ms on 128x128)
+ *   X.trafficGen(S, live, clock) the same pass as a generator: the live game runs it through the sim's job
+ *                                scheduler (sim.js) in slices. It works on its own scratch arrays and
+ *                                publishes the traffic map, congestion, volumes and parents at the end.
  *   VC.sim.trafficAt(x, z)       congestion ratio on a road tile (0 empty, 1 at capacity, >1 jammed)
  *   VC.sim.trafficVolume         Float32Array(N): peak-hour cars per road tile (for the car renderer)
  *   VC.sim.trafficParent         Int32Array(N): next road tile toward jobs (-1 = none) — cars can follow it
@@ -36,6 +39,8 @@ function ensure(S) {
   X.trHeapK = new Float32Array(N * 4 + 16);
   X.trBias = new Float32Array(N); // source attraction bias carried along the tree (dist - bias = travel time)
   X.trCong = new Float32Array(N);
+  X.trVolW = new Float32Array(N); // working volumes / parents of a running pass (published at its end)
+  X.trParW = new Int32Array(N);
   SIM.trafficVolume = new Float32Array(N);
   SIM.trafficParent = new Int32Array(N).fill(-1);
   X.trStats = { avgCongestion: 0, jammedTiles: 0, roadTiles: 0, noPath: 0, trips: 0 };
@@ -75,14 +80,13 @@ function hpop() {
   return top;
 }
 
-SIM.computeTraffic = function () {
-  const S = VC.state;
-  if (!S || !S.road) return;
-  const t0 = performance.now();
+/** The traffic pass as a generator (live: yields every few thousand tiles / hundreds of buildings). */
+function* trafficGen(S, live, ck) {
+  const clk = ck || { work: 0, t0: performance.now() };
   ensure(S);
   const W = S.W, N = S.N, road = S.road, maps = S.maps;
   const dist = X.trDist, order = X.trOrder, cong = X.trCong, bias = X.trBias;
-  const vol = SIM.trafficVolume, parent = SIM.trafficParent;
+  const vol = X.trVolW, parent = X.trParW;
   const ROADS = VC.ROADS;
   // edge costs per road type
   const cost = [0, 1 / ROADS[1].speed, 1 / ROADS[2].speed, 1 / ROADS[3].speed];
@@ -96,8 +100,10 @@ SIM.computeTraffic = function () {
   vol.fill(0);
   hn = 0;
   // ---- sources: job buildings' access road tiles ----
-  let sources = 0;
+  let sources = 0, nb = 0;
+  if (live) yield 'init';
   for (const b of S.buildings.values()) {
+    if (live && (++nb & 511) === 0) yield 'src';
     if (b.built < 1 || b.abandoned) continue;
     let jobs = 0;
     if (b.key === 'grow') {
@@ -126,6 +132,7 @@ SIM.computeTraffic = function () {
     const i = hpop();
     if (kTop > dist[i]) continue; // stale entry
     order[settled++] = i;
+    if (live && (settled & 4095) === 0) yield 'dijkstra';
     const x = i % W;
     const base = dist[i];
     // cost to step onto neighbour j
@@ -152,7 +159,9 @@ SIM.computeTraffic = function () {
   const transit = maps.transit;
   const carBase = 0.85 * Math.max(0.2, 1 + (S.mods.traffic || 0));
   let noPath = 0, trips = 0;
+  nb = 0;
   for (const b of S.buildings.values()) {
+    if (live && (++nb & 511) === 0) yield 'homes';
     const res = b.key === 'grow' ? (b.zt === 1 ? b.pop : 0) : b.key === 'arcology' ? b.pop * 0.35 : 0;
     if (b.key === 'grow' && b.zt !== 1) {
       // workplaces: commute ok if the building is on the network at all
@@ -181,7 +190,10 @@ SIM.computeTraffic = function () {
     const p = parent[i];
     if (p >= 0) vol[p] += vol[i];
   }
-  // ---- congestion -> map ----
+  if (live) yield 'accum';
+  // ---- publish: volumes, parents, congestion -> map (one piece) ----
+  SIM.trafficVolume.set(vol);
+  SIM.trafficParent.set(parent);
   const out = maps.traffic;
   let sum = 0, roadTiles = 0, jammed = 0;
   for (let i = 0; i < N; i++) {
@@ -206,7 +218,17 @@ SIM.computeTraffic = function () {
   st.roadTiles = roadTiles;
   st.noPath = noPath;
   st.trips = Math.round(trips);
-  X.trafficMs = performance.now() - t0;
+  X.trafficMs = clk.work + (performance.now() - clk.t0);
+}
+X.trafficGen = trafficGen;
+
+/** Full recompute now (synchronous; cancels a staged pass that is still running). */
+SIM.computeTraffic = function () {
+  const S = VC.state;
+  if (!S || !S.road) return;
+  if (X.cancelJob) X.cancelJob('traffic');
+  const g = trafficGen(S, false, null);
+  while (!g.next().done);
 };
 
 /** Congestion ratio on a tile (0 = empty road or not a road, 1 = at capacity, >1 jammed). */

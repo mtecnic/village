@@ -6,7 +6,8 @@
  * so nothing here emits 'toast' or 'sfx' for them.
  *
  * ADVISORS: on bus 'month' (after econ) a context snapshot of the city is gathered once and every
- * RULE is evaluated. Triggered rules respect per-rule cooldowns; at most MAX_PER_MONTH new messages
+ * RULE is evaluated. During live play that work runs one frame after the month tick (the sim's month
+ * frame already carries econ's bookkeeping); a synchronous fast-forward (VC.debug.run) evaluates at once. Triggered rules respect per-rule cooldowns; at most MAX_PER_MONTH new messages
  * are posted (worst severity first, one per advisor). Messages land in the inbox (newest first,
  * capped). Broadcast on bus 'advisor' (message object): 'warn'/'bad' (the HUD pops a card; a repeated
  * warning within 180 days only lands in the inbox) and 'good' (the HUD shows one toast); 'info' stays
@@ -66,6 +67,9 @@ const PARKS = { small_park: 1, playground: 1, plaza: 1, sports_field: 1, big_par
 const RENEWABLE = { wind_turbine: 1, solar_farm: 1, fusion_plant: 1 };
 const FOSSIL = { coal_plant: 1, gas_plant: 1, incinerator: 1 };
 
+const MAP_SAMPLE = ['crime', 'pollution', 'happiness', 'health', 'edu', 'police', 'fire', 'park', 'garbage', 'landValue', 'noise'];
+const gatherArrs = new Array(MAP_SAMPLE.length).fill(null);
+const gatherSum = new Float64Array(MAP_SAMPLE.length), gatherHSum = new Float64Array(MAP_SAMPLE.length);
 /** Gathers everything the rules need in one pass over buildings / tiles. Cached per sim day. */
 function gather(force) {
   const S = S_();
@@ -85,9 +89,10 @@ function gather(force) {
     mapsOn: sawMaps || (S.ver && S.ver.maps > 0), flagsOn: sawFlags || (S.ver && S.ver.flags > 0),
     avg: {}, homeAvg: {},
   };
-  const keys = ['crime', 'pollution', 'happiness', 'health', 'edu', 'police', 'fire', 'park', 'garbage', 'landValue', 'noise'];
-  const sum = {}, hsum = {};
-  for (const k of keys) { sum[k] = 0; hsum[k] = 0; }
+  // map samples: arrays hoisted out of the building loop (a keyed lookup per building and map was
+  // the bulk of the month's advisor cost on big cities)
+  const K = MAP_SAMPLE.length, arrs = gatherArrs, sum = gatherSum, hsum = gatherHSum;
+  for (let m = 0; m < K; m++) { arrs[m] = S.maps[MAP_SAMPLE[m]] || null; sum[m] = 0; hsum[m] = 0; }
   let wsum = 0, hw = 0, indF = 0, indU = 0;
   const fireMap = S.maps.fire;
   for (const b of S.buildings.values()) {
@@ -104,9 +109,11 @@ function gather(force) {
       }
       // sample the maps at the building's origin tile (weighted by occupants)
       const i = b.z * W + b.x, w = 1 + (b.pop || 0) * 0.1;
-      for (const k of keys) { const m = S.maps[k]; if (m) sum[k] += m[i] * w; }
       wsum += w;
-      if (b.zt === 1) { for (const k of keys) { const m = S.maps[k]; if (m) hsum[k] += m[i] * w; } hw += w; }
+      if (b.zt === 1) {
+        for (let m = 0; m < K; m++) { const a = arrs[m]; if (a) { const v = a[i] * w; sum[m] += v; hsum[m] += v; } }
+        hw += w;
+      } else for (let m = 0; m < K; m++) { const a = arrs[m]; if (a) sum[m] += a[i] * w; }
       if (b.zt === 3 && b.built >= 1 && fireMap) {
         const jobs = Math.max(1, b.pop || 0), fc = fireMap[i] / 255;
         c.indN++;
@@ -142,9 +149,10 @@ function gather(force) {
   const log = (S.adv && S.adv.burnLog) || [];
   c.burnt90 = 0; c.burnt90I = 0;
   for (const f of log) if (f.day >= S.time.day - 90) { c.burnt90++; if (f.zt === 3) c.burnt90I++; }
-  for (const k of keys) {
-    c.avg[k] = wsum ? sum[k] / wsum / 255 : 0;
-    c.homeAvg[k] = hw ? hsum[k] / hw / 255 : 0;
+  for (let m = 0; m < K; m++) {
+    const k = MAP_SAMPLE[m];
+    c.avg[k] = wsum ? sum[m] / wsum / 255 : 0;
+    c.homeAvg[k] = hw ? hsum[m] / hw / 255 : 0;
   }
   // tiles: zoning, road access, traffic
   const zone = S.zone, bld = S.bld, flags = S.flags, road = S.road, traffic = S.maps.traffic;
@@ -1042,6 +1050,18 @@ function onMonth() {
   if (!live(S)) return;
   ensureAdv(S);
   checkMilestones(S);
+  // live play: evaluate on the next frame (see header); fast-forward: now, once per month
+  const X = VC.sim && VC.sim._;
+  if (X && X.inUpdate) {
+    monthWait = { S, frames: 1 };
+    return;
+  }
+  monthWork(S);
+}
+let monthWait = null; // {S, frames}: a month evaluation waiting for its frame
+function monthWork(S) {
+  monthWait = null;
+  if (!live(S) || S !== S_()) return;
   const c = gather(true);
   monthlyAdvice(S, c);
   monthlyNews(S, c);
@@ -1126,12 +1146,14 @@ const A = (VC.advisors = {
     ctxCache = null;
     lastBuildNews = -999;
     cardQ = [];
+    monthWait = null;
     const a = ensureAdv(S);
     A.inbox = a.inbox;
     A.news = a.news;
   },
 
   update() {
+    if (monthWait && monthWait.frames-- <= 0) monthWork(monthWait.S);
     flushCards();
   },
   /** Advisor broadcasts waiting for their turn (paced to one per CARD_GAP_MS). */

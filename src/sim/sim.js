@@ -5,13 +5,19 @@
  * stats, inspector API), sim/sim_maps.js (derived maps), sim/sim_net.js (power/water/access),
  * sim/traffic.js (commuter traffic). All attach to VC.sim; shared scratch lives in VC.sim._ (X).
  *
- * TIME: update() turns rdt * C.SPEEDS[speed] / C.DAY_SEC into whole days (<= 8 tickDay() per frame).
+ * TIME: update() turns rdt * C.SPEEDS[speed] / C.DAY_SEC into whole days (<= 8 per frame).
  *   Construction progress is advanced continuously per frame (smooth build-up animation); when tickDay()
  *   is called directly (VC.debug.run) it advances construction itself.
+ * FRAME BUDGET: the frame loop runs each day as a generator (dayGen) and the heavy passes (networks,
+ *   maps, traffic) as staged jobs (see "job scheduler"), all within ~4 ms per frame (a quarter of the
+ *   frame on slow machines): a big city's day may span two frames, the month's bookkeeping gets its own
+ *   slice, only one heavy pass runs (and finishes) per frame, and at high speed the passes run every
+ *   N days such that they stay >= 1-2 s real time apart. tickDay() still does a whole day synchronously.
  * DAILY: construction, occupancy (move-ins / job filling), stats; for a quarter of the buildings
  *   ((id + day) & 3): happiness, garbage, abandonment, downgrade, level-up, fire ignition. Fire
  *   spread/extinguish, growth slice (1/4 of the map in a fixed random order), abandoned 12+ months
- *   -> rubble. day%4==1 networks, day%4==2 maps, day%8==3 traffic, day%3==0 demand (smoothed).
+ *   -> rubble. day%3==0 demand (smoothed). Heavy passes: tickDay() day%4==1 networks, day%4==2 maps,
+ *   day%8==3 traffic; frame loop every 4 / 4 / 8 days at 1x, 8 / 12 / 16 at 8x (CADENCE).
  * GROWTH BUDGET: capacity units per zone per day (demand x sub-linear city size), spent by new
  *   buildings and level-ups; lot sizes are capped by the zone's unmet need.
  * MONTHLY: wealth drift, rubble clearing (6 months), abandonment summary -> then 'month' / 'year'.
@@ -332,8 +338,8 @@ function redevelopTo(S, b, oldCap) {
  * quarter of the buildings per day (b.id + day) & 3, with rates scaled to the 4-day step.
  * sim = false: totals only (used after reset/load).
  */
-function dailyBuildings(S, sim) {
-  const tot = (X.tot = newTot());
+function* dailyBuildings(S, sim, live) {
+  const tot = newTot(); // published as X.tot when the pass is done (a live pass spans frames)
   const m = S.maps, dem = S.demand, rnd = X.rnd;
   const fill = X.fill;
   const pend = X.pending;
@@ -343,7 +349,9 @@ function dailyBuildings(S, sim) {
   pend.length = 0;
   if (sim) X.bk[-day & 3].fill(0);
   else for (let k = 0; k < 4; k++) X.bk[k].fill(0);
+  let nb = 0;
   for (const b of S.buildings.values()) {
+    if (live && (++nb & 255) === 0) yield 'bld';
     if (b.simI == null) initBuilding(S, b);
     if (sim) b.age = (b.age || 0) + 1;
     const key = b.key;
@@ -537,9 +545,14 @@ function dailyBuildings(S, sim) {
     tot.happyS += B[0]; tot.happyW += B[1]; tot.eduS += B[2]; tot.healthS += B[3];
     tot.crimeS += B[4]; tot.lvS += B[5]; tot.svcS += B[6]; tot.polS += B[7]; tot.polW += B[8];
   }
+  X.tot = tot;
   // collapse long-abandoned buildings (outside the iteration)
   for (const b of pend) toRubble(S, b, 'abandon');
   pend.length = 0;
+}
+/** Runs a generator to completion (synchronous use of the staged passes). */
+function runSync(g) {
+  while (!g.next().done);
 }
 
 /* ------------------------------------------------------------------ */
@@ -597,15 +610,117 @@ function updateStats(S) {
   X.happyMod = (mods.happiness || 0) + t.happyMod;
 }
 
-/**
- * Map pass: synchronous when cheap (or outside a frame, e.g. VC.debug.run), otherwise staged over
- * the next frames (sim_maps.js X.startMaps) so a big city never stalls a frame.
+/* ------------------------------------------------------------------ */
+/* job scheduler (live game)                                            */
+/* ------------------------------------------------------------------ */
+/*
+ * The heavy passes (networks, maps, traffic) are generators (X.netGen, X.mapsGen, X.trafficGen) that the
+ * frame loop advances in slices within the sim's per-frame time budget: one pass at a time (priority
+ * net > maps > traffic, since maps read the networks' results) and at most one pass finishing per frame
+ * (its bus event fans out into renderer rebuilds). Their day cadence stretches with the game speed so a
+ * pass never runs more often than every CADENCE[k][1] real seconds (at 8x: networks every 8 days, maps
+ * every 12, traffic every 16 instead of 4 / 4 / 8). Synchronous calls (recalcNetworks, computeMaps,
+ * computeTraffic, tickDay) cancel a running pass of the same kind and do the whole work at once.
  */
-function mapsNow(live) {
-  if (live && (X.mapsMs || 0) > 8 && X.startMaps) {
-    if (!X.mapsJob) X.startMaps();
-    X.stepMaps(3);
-  } else SIM.computeMaps();
+const CADENCE = { net: [4, 1.0], maps: [4, 1.5], traffic: [8, 2.0] }; // [days at 1x, min real seconds]
+function cadence(S, kind) {
+  const c = CADENCE[kind];
+  const dps = (C.SPEEDS[S.time.speed] || 1) / C.DAY_SEC;
+  return Math.max(c[0], Math.ceil(c[1] * dps));
+}
+const JOB_ORDER = ['net', 'maps', 'traffic'];
+/** Drops a staged pass that is still running (kind omitted: whatever runs). */
+function cancelJob(kind) {
+  const j = X.job;
+  if (!j || (kind && j.kind !== kind)) return;
+  X.job = null;
+  if (j.kind === 'net') X.topoDirty = true; // its partial topology work is redone by a full rebuild
+  else if (j.kind === 'maps') X.mapsDirty = true;
+}
+X.cancelJob = cancelJob;
+function startJob(S) {
+  for (const kind of JOB_ORDER) {
+    if (!X.want[kind]) continue;
+    X.want[kind] = false;
+    const ck = { work: 0, t0: 0 };
+    let gen = null;
+    if (kind === 'net') {
+      gen = X.netGen(S, false, true, ck);
+      X.netDay = S.time.day;
+    } else if (kind === 'maps') {
+      X.mapsDirty = false;
+      gen = X.mapsGen(S, true, ck);
+      X.mapsDay = S.time.day;
+    } else {
+      if (!X.trafficGen) continue;
+      gen = X.trafficGen(S, true, ck);
+      X.trafDay = S.time.day;
+    }
+    X.job = { kind, gen, ck, S };
+    return true;
+  }
+  return false;
+}
+/** Advances the running pass for about budgetMs (at least one slice), or starts the next wanted one. */
+function runJobs(S, budgetMs) {
+  const t0 = performance.now();
+  if (X.job && X.job.S !== S) X.job = null;
+  if (!X.job && !startJob(S)) return;
+  const j = X.job, ck = j.ck;
+  for (;;) {
+    ck.t0 = performance.now();
+    let r;
+    try {
+      r = j.gen.next();
+    } catch (e) {
+      cancelJob();
+      throw e;
+    }
+    const tn = performance.now();
+    ck.work += tn - ck.t0;
+    sliceStat(j.kind, r.done ? 'end' : r.value, tn - ck.t0);
+    if (r.done) {
+      X.job = null;
+      X.jobDone[j.kind] = (X.jobDone[j.kind] || 0) + 1;
+      if (j.kind === 'net') checkShortages(S);
+      return; // at most one pass finishes per frame
+    }
+    if (tn - t0 >= budgetMs) return;
+  }
+}
+/** Profiling: longest slice per job kind and phase (the value its generator yielded at the end of it). */
+function sliceStat(kind, tag, ms) {
+  const all = X.slices || (X.slices = {});
+  const m = all[kind] || (all[kind] = {});
+  const e = m[tag || '-'] || (m[tag || '-'] = [0, 0, 0]); // count, sum, max
+  e[0]++;
+  e[1] += ms;
+  if (ms > e[2]) e[2] = ms;
+}
+/** Advances the running day for about budgetMs (at least one slice). True when the day is done. */
+function stepDay(budgetMs) {
+  const g = X.dayJob, pc = X.dayClock;
+  const t0 = performance.now();
+  for (;;) {
+    if (pc.lastYield) pc.paused += performance.now() - pc.lastYield;
+    let r;
+    try {
+      r = g.next();
+    } catch (e) {
+      X.dayJob = null;
+      pc.lastYield = 0;
+      throw e;
+    }
+    const tn = performance.now();
+    sliceStat('day', r.done ? 'end' : r.value, tn - (pc.lastYield > t0 ? pc.lastYield : t0));
+    if (r.done) {
+      X.dayJob = null;
+      pc.lastYield = 0;
+      return true;
+    }
+    pc.lastYield = tn;
+    if (tn - t0 >= budgetMs) return false;
+  }
 }
 
 /** Growth state that must survive save/load (S.simState is saved with the city). */
@@ -907,12 +1022,13 @@ function growBudget(S) {
   }
 }
 
-function growth(S) {
+function* growth(S, live) {
   const dem = S.demand;
   if (X.growAcc[1] <= 0 && X.growAcc[2] <= 0 && X.growAcc[3] <= 0) return;
   const N = S.N, perm = X.perm, zone = S.zone, bld = S.bld, road = S.road, flags = S.flags, rnd = X.rnd;
   const K = Math.ceil(N / 4);
   for (let k = 0; k < K; k++) {
+    if (live && (k & 4095) === 4095) yield 'growth';
     const i = perm[X.permPos];
     if (++X.permPos >= N) X.permPos = 0;
     const code = zone[i];
@@ -1129,6 +1245,79 @@ function checkShortages(S) {
 }
 
 /* ------------------------------------------------------------------ */
+/* one day                                                               */
+/* ------------------------------------------------------------------ */
+/**
+ * One sim day as a generator. live = true (frame loop): yields between the day's phases and inside
+ * the long loops so a big city's day can be spread over frames, and requests the heavy passes from the
+ * job scheduler (speed-scaled cadence). live = false (tickDay): everything now, heavy passes
+ * synchronously on fixed day phases (networks day%4==1 or dirty, maps day%4==2 or dirty, traffic day%8==3).
+ */
+function* dayGen(S, live) {
+  const t0 = performance.now();
+  const pc = X.dayClock, paused0 = pc.paused; // time spent between slices is not the day's work
+  S.time.day++;
+  const day = S.time.day;
+  X.fxBudget = 8;
+  let t = t0, pl = paused0;
+  // section profiler: accumulated and max ms per section
+  const lap = (k) => {
+    const tn = performance.now(), d = tn - t - (pc.paused - pl);
+    X.prof[k] += d;
+    if (d > X.profMax[k]) X.profMax[k] = d;
+    t = tn;
+    pl = pc.paused;
+  };
+  refreshCity(S);
+  if (!live) progressConstruction(S, 1); // the frame loop advances construction continuously
+  if (live) {
+    if (X.netDirty || day - X.netDay >= cadence(S, 'net')) X.want.net = true;
+  } else if (X.netDirty || day % 4 === 1) {
+    SIM.recalcNetworks();
+    checkShortages(S);
+    lap('net');
+  }
+  growBudget(S);
+  yield* dailyBuildings(S, true, live);
+  lap('bld');
+  fireStep(S);
+  updateStats(S);
+  lap('misc');
+  if (live) yield 'bld-end';
+  yield* growth(S, live);
+  lap('growth');
+  if (live) {
+    if (X.mapsDirty || day - X.mapsDay >= cadence(S, 'maps')) X.want.maps = true;
+    if (SIM.computeTraffic && day - X.trafDay >= cadence(S, 'traffic')) X.want.traffic = true;
+  } else {
+    if (day % 4 === 2 || X.mapsDirty) {
+      SIM.computeMaps();
+      lap('maps');
+    }
+    if (day % 8 === 3 && SIM.computeTraffic) {
+      SIM.computeTraffic();
+      lap('traffic');
+    }
+  }
+  if (day % 3 === 0) updateDemand(S, false);
+  saveState(S);
+  fireNotice(S);
+  const ms = performance.now() - t0 - (pc.paused - paused0);
+  X.days++;
+  X.dayMs += ms;
+  if (ms > X.dayMsMax) X.dayMsMax = ms;
+  VC.bus.emit('day', day);
+  if (day % C.DAYS_PER_MONTH === 0) {
+    if (live) yield 'day-end'; // the month's bookkeeping (econ, advisors, ...) gets a slice of its own
+    monthly(S);
+    const month = Math.floor(day / C.DAYS_PER_MONTH) % 12;
+    const year = C.START_YEAR + Math.floor(day / (C.DAYS_PER_MONTH * 12));
+    VC.bus.emit('month', { month, year });
+    if (month === 0) VC.bus.emit('year', year);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* public API                                                            */
 /* ------------------------------------------------------------------ */
 Object.assign(SIM, {
@@ -1192,7 +1381,14 @@ Object.assign(SIM, {
     if (X.ensureTraffic) X.ensureTraffic(S);
     X.topoDirty = true;
     X.joinQ = [];
-    X.mapsJob = null;
+    // staged work of the previous city is dropped; the heavy passes start their cadence today
+    X.job = null;
+    X.dayJob = null;
+    X.hold = null;
+    X.want = { net: false, maps: false, traffic: false };
+    X.jobDone = {};
+    X.netDay = X.mapsDay = X.trafDay = S.time.day;
+    X.dayClock = { paused: 0, lastYield: 0 };
     X.lvPrev.set(S.maps.landValue); // crime's poverty input: this city's land value, not the last one's
     X.hCopy = null; // new terrain: rebuild static land value / water distance
     X.staticVer = -1;
@@ -1255,11 +1451,11 @@ Object.assign(SIM, {
     refreshCity(S);
     // full recompute so loaded games show correct flags, maps and stats immediately
     SIM.recalcNetworks(true);
-    dailyBuildings(S, false);
+    runSync(dailyBuildings(S, false, false));
     updateStats(S);
     if (SIM.computeTraffic) SIM.computeTraffic();
     SIM.computeMaps();
-    dailyBuildings(S, false);
+    runSync(dailyBuildings(S, false, false));
     updateStats(S);
     // explain the (saved) demand without moving it: loading must not change the game
     if (S.buildings.size) updateDemand(S, 'factors');
@@ -1267,89 +1463,66 @@ Object.assign(SIM, {
     saveState(S);
   },
 
+  /**
+   * Frame loop: turns rdt * speed into whole days (<= 8 per frame, backlog <= 2) and advances the running
+   * day and then the running heavy pass within a per-frame budget (~4 ms at 60 fps, a quarter of the
+   * frame on slow machines, <= 20 ms). A day that does not fit continues next frame.
+   */
   update(dt, rdt) {
     const S = VC.state;
     if (!S || !X.ready) return;
-    const now = performance.now();
-    // responsive network / coverage updates (also while paused); the network gap adapts to how
-    // long a solve takes, so big maps never spend more than ~1/4 of the time re-solving
-    if (X.netDirty && now - (X.lastNet || 0) > (X.netGap || 150)) SIM.recalcNetworks();
-    if (X.mapsJob) X.stepMaps(3);
-    else if (X.mapsDirty && !X.netDirty && now - (X.lastMaps || 0) > 600) mapsNow(true); // maps read the networks' results
+    const t0 = performance.now();
+    const budget = clamp((rdt || 0) * 250, 4, 20);
+    // responsive network / coverage updates after edits (also while paused); the network gap adapts
+    // to how long a pass takes, so big maps never spend more than ~1/4 of the time re-solving
+    if (X.netDirty && t0 - (X.lastNet || 0) > (X.netGap || 150)) X.want.net = true;
+    if (X.mapsDirty && !X.netDirty && t0 - (X.lastMaps || 0) > 600) X.want.maps = true; // maps read the networks' results
     fireNotice(S);
-    const sp = C.SPEEDS[S.time.speed] || 0;
-    if (!sp) return;
-    const days = (rdt * sp) / C.DAY_SEC;
-    progressConstruction(S, days);
-    X.acc += days;
-    let n = 0;
+    // a sliced autosave snapshot (VC.save) holds the days so the city cannot change under it
+    const H = X.hold, held = !!H && H.S === S && t0 < H.until;
+    const sp = held ? 0 : C.SPEEDS[S.time.speed] || 0;
     X.inUpdate = true;
     try {
-      while (X.acc >= 1 && n < 8) {
-        X.acc -= 1;
-        n++;
-        SIM.tickDay();
+      if (sp) {
+        const days = (rdt * sp) / C.DAY_SEC;
+        progressConstruction(S, days);
+        X.acc += days;
       }
+      let n = 0;
+      for (;;) {
+        if (held) break;
+        if (!X.dayJob) {
+          if (!sp || X.acc < 1 || n >= 8) break;
+          X.acc -= 1;
+          n++;
+          X.dayJob = dayGen(S, true);
+        }
+        if (!stepDay(budget - (performance.now() - t0))) break;
+        if (performance.now() - t0 >= budget) break;
+      }
+      if (X.acc > 2) X.acc = 2; // never build up a backlog
+      runJobs(S, Math.max(1, budget - (performance.now() - t0)));
     } finally {
       X.inUpdate = false;
     }
-    if (X.acc > 2) X.acc = 2; // never build up a backlog
   },
 
+  /**
+   * Advances one day NOW, synchronously (VC.debug.run, tests): the heavy passes run on their fixed day
+   * phases. The frame loop (update) runs the same day as a staged generator instead (see dayGen).
+   */
   tickDay() {
     const S = VC.state;
     if (!S) return;
     if (!X.ready) SIM.reset(S);
-    const t0 = performance.now();
-    S.time.day++;
-    const day = S.time.day;
-    X.fxBudget = 8;
-    let t = t0;
-    // section profiler: accumulated and max ms per section
-    const lap = (k) => {
-      const tn = performance.now(), d = tn - t;
-      X.prof[k] += d;
-      if (d > X.profMax[k]) X.profMax[k] = d;
-      t = tn;
-    };
-    refreshCity(S);
-    if (!X.inUpdate) progressConstruction(S, 1);
-    if (X.netDirty || day % 4 === 1) {
-      SIM.recalcNetworks();
-      checkShortages(S);
-      lap('net');
+    // a day the frame loop is still working on finishes first
+    if (X.dayJob) {
+      const g = X.dayJob;
+      X.dayJob = null;
+      X.dayClock.lastYield = 0;
+      runSync(g);
     }
-    growBudget(S);
-    dailyBuildings(S, true);
-    lap('bld');
-    fireStep(S);
-    updateStats(S);
-    lap('misc');
-    growth(S);
-    lap('growth');
-    if (day % 4 === 2 || X.mapsDirty) {
-      mapsNow(X.inUpdate);
-      lap('maps');
-    }
-    if (day % 8 === 3 && SIM.computeTraffic) {
-      SIM.computeTraffic();
-      lap('traffic');
-    }
-    if (day % 3 === 0) updateDemand(S, false);
-    saveState(S);
-    fireNotice(S);
-    const ms = performance.now() - t0;
-    X.days++;
-    X.dayMs += ms;
-    if (ms > X.dayMsMax) X.dayMsMax = ms;
-    VC.bus.emit('day', day);
-    if (day % C.DAYS_PER_MONTH === 0) {
-      monthly(S);
-      const month = Math.floor(day / C.DAYS_PER_MONTH) % 12;
-      const year = C.START_YEAR + Math.floor(day / (C.DAYS_PER_MONTH * 12));
-      VC.bus.emit('month', { month, year });
-      if (month === 0) VC.bus.emit('year', year);
-    }
+    runSync(dayGen(S, false));
   },
 
   /* ---------------- fires ---------------- */
@@ -1690,6 +1863,7 @@ Object.assign(SIM, {
   /** Timing info for profiling (perDay = average ms per simulated day by section). */
   resetPerf() {
     X.days = 0; X.dayMs = 0; X.dayMsMax = 0;
+    X.slices = {};
     X.prof = { net: 0, bld: 0, misc: 0, growth: 0, maps: 0, traffic: 0 };
     X.profMax = { net: 0, bld: 0, misc: 0, growth: 0, maps: 0, traffic: 0 };
   },
@@ -1699,10 +1873,11 @@ Object.assign(SIM, {
       dayAvgMs: X.days ? +(X.dayMs / X.days).toFixed(3) : 0, dayMaxMs: +(X.dayMsMax || 0).toFixed(2), days: X.days,
       perDay: Object.fromEntries(Object.entries(X.prof || {}).map(([k, v]) => [k, +(v / Math.max(1, X.days)).toFixed(3)])),
       maxMs: Object.fromEntries(Object.entries(X.profMax || {}).map(([k, v]) => [k, +v.toFixed(2)])),
+      job: X.job ? X.job.kind : null, jobsDone: Object.assign({}, X.jobDone), dayPending: !!X.dayJob, slices: Object.fromEntries(Object.entries(X.slices || {}).map(([k, m]) => [k, Object.fromEntries(Object.entries(m).map(([t, e]) => [t, [e[0], +(e[1] / e[0]).toFixed(2), +e[2].toFixed(1)]]))])),
     };
   },
 });
 // fallback if names.js is missing
 if (!SIM.buildingName) SIM.buildingName = (b) => (b ? (b.key === 'grow' ? (VC.ZONES[b.zt] || {}).name + ' building' : (VC.BLD[b.key] || {}).name || b.key) : '');
 if (!SIM.districtName) SIM.districtName = () => 'Downtown';
-X.dailyBuildings = dailyBuildings; // exposed for profiling tests
+X.dailyBuildings = (S, sim) => runSync(dailyBuildings(S, sim, false)); // exposed for profiling tests

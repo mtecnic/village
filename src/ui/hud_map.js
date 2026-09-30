@@ -3,7 +3,10 @@
  *   MINIMAP  W x H pixel image of the world (terrain by material/height with hill shading, water depth,
  *            trees, roads, power lines, zones, buildings in zone colours, civic buildings white) or the
  *            active overlay (S.maps / network flags) using the same ramps as shaderlib overlayRamp.
- *            Incremental: 'dirty' / 'bldChange' rects are recoloured; overlay maps refresh ≤ 1/s.
+ *            Incremental: plain colours are cached per tile (buildings via bldAdd/Change/Remove); world edits
+ *            repaint only the 16-row bands they touch, overlay data changes re-tint at most once per second,
+ *            and all painting runs within ~1.5 ms per frame (bands finish over the next frames).
+ *            Overlays whose 0 means "no data" (happiness: see sim_maps.js) show those tiles grey.
  *            The camera view is drawn as a trapezoid (screen corners projected to the ground plane) from
  *            matrices recomputed for the current camera state (never last frame's), so it is right after
  *            jumps (new city, load, focus). Click / drag to move the camera, wheel to zoom (honours
@@ -13,7 +16,10 @@
  * Also exports VC.hud.OVERLAY_DESC {key: text} and VC.hud.overlayGradient(rampKind) -> CSS gradient.
  */
 const h = VC.h, M = VC.M;
-const MM = { size: 184, base: null, bctx: null, img: null, px: null, W: 0, H: 0, dirty: null, full: true, lastBase: 0, redraw: true, drawn: false, open: true, drag: false, bcol: new Map(), settle: 0 };
+const MM = {
+  size: 184, base: null, bctx: null, img: null, px: null, col: null, bc: null, bx0: null, bx1: null, bandAt: 0, W: 0, H: 0,
+  full: true, viewRow: -1, viewPending: false, viewNext: 0, viewBurst: false, redraw: true, drawn: false, open: true, drag: false, settle: 0,
+};
 
 const OVERLAY_DESC = {
   none: 'The plain city view.',
@@ -56,6 +62,10 @@ function rampLin(v, kind) {
 const toSrgb = (c) => c.map((x) => Math.round(255 * Math.pow(M.sat(x), 1 / 1.6)));
 /** 256-entry sRGB LUTs per ramp kind. */
 const LUT = [0, 1, 2, 3].map((k) => { const a = []; for (let i = 0; i < 256; i++) a.push(toSrgb(rampLin(i / 255, k))); return a; });
+/** The same LUTs as per-channel typed arrays (paint loops). */
+const LUTF = LUT.map((a) => [0, 1, 2].map((ch) => Float32Array.from(a, (c) => c[ch])));
+/** Overlays whose map value 0 means "no data" (sim_maps.js: happiness 0 = nobody lives / works there). */
+const NODATA0 = { happiness: 1 };
 function overlayGradient(ramp) {
   const k = RAMP_KIND[ramp] || 0;
   if (k === 3) return 'linear-gradient(90deg, rgb(' + LUT[3][0] + ') 0 50%, rgb(' + LUT[3][255] + ') 50% 100%)';
@@ -134,51 +144,81 @@ function toggleOpen() {
 }
 
 /* ---------------- base image ---------------- */
+/*
+ * Two layers per tile: MM.col = the plain map colour (terrain, trees, roads, zones, lines, buildings) and
+ * MM.px = what is shown (MM.col, or MM.col tinted by the active overlay). MM.bc caches each building
+ * tile's colour (0 = no building), updated from bldAdd / bldChange / bldRemove, so painting never looks
+ * buildings up. Work is done in bands of BAND rows within a per-frame budget: world edits mark the
+ * bands they touch (plain colour + view), overlay data changes re-tint every band at most once per
+ * OV_REFRESH_MS; each finished band is uploaded with its own putImageData rect.
+ */
+const BAND = 16, PAINT_MS = 1.5, OV_REFRESH_MS = 1000;
 function alloc(S) {
   MM.W = S.W; MM.H = S.H;
   MM.base.width = S.W; MM.base.height = S.H;
   MM.img = MM.bctx.createImageData(S.W, S.H);
   MM.px = new Uint32Array(MM.img.data.buffer);
+  MM.col = new Uint32Array(S.N || S.W * S.H);
+  MM.bc = new Uint32Array(S.N || S.W * S.H);
+  const nb = Math.ceil(S.H / BAND);
+  MM.bx0 = new Int32Array(nb); // dirty x-span per band (plain colour + view); bx0 > bx1 = clean
+  MM.bx1 = new Int32Array(nb);
   MM.full = true;
-  MM.dirty = null;
+}
+/** Marks every band for a full repaint and rebuilds the building-colour cache. */
+function markAll(S) {
+  MM.bx0.fill(0);
+  MM.bx1.fill(S.W - 1);
+  const bc = MM.bc, W = S.W;
+  bc.fill(0);
+  for (const b of S.buildings.values()) stampBld(b, bldColor(b), W, bc);
+  MM.viewRow = -1; // a pending overlay refresh is covered by the full repaint
+  MM.viewBurst = true; // the first picture of a map comes in one go (a frame's worth of budget)
+  MM.full = false;
+}
+function stampBld(b, c, W, bc) {
+  const x0 = Math.max(0, b.x | 0), z0 = Math.max(0, b.z | 0), x1 = Math.min(MM.W, (b.x + b.w) | 0), z1 = Math.min(MM.H, (b.z + b.d) | 0);
+  for (let z = z0; z < z1; z++) for (let x = x0, i = z * W + x0; x < x1; x++, i++) bc[i] = c;
 }
 function markRect(x0, z0, x1, z1) {
   // a corrupt rect (NaN from a bad building) must not reach putImageData: repaint everything instead
   if (!isFinite(x0) || !isFinite(z0) || !isFinite(x1) || !isFinite(z1)) { MM.full = true; return; }
-  const ax = Math.floor(Math.min(x0, x1)), bx = Math.ceil(Math.max(x0, x1));
-  const az = Math.floor(Math.min(z0, z1)), bz = Math.ceil(Math.max(z0, z1));
-  x0 = ax; x1 = bx; z0 = az; z1 = bz;
-  const d = MM.dirty;
-  if (!d) MM.dirty = { x0, z0, x1, z1 };
-  else { d.x0 = Math.min(d.x0, x0); d.z0 = Math.min(d.z0, z0); d.x1 = Math.max(d.x1, x1); d.z1 = Math.max(d.z1, z1); }
+  const W = MM.W, H = MM.H;
+  const ax = Math.max(0, Math.floor(Math.min(x0, x1))), bx = Math.min(W - 1, Math.ceil(Math.max(x0, x1)));
+  const az = Math.max(0, Math.floor(Math.min(z0, z1))), bz = Math.min(H - 1, Math.ceil(Math.max(z0, z1)));
+  if (bx < ax || bz < az) return;
+  for (let b = (az / BAND) | 0, b1 = (bz / BAND) | 0; b <= b1; b++) {
+    if (MM.bx0[b] > MM.bx1[b]) { MM.bx0[b] = ax; MM.bx1[b] = bx; }
+    else { if (ax < MM.bx0[b]) MM.bx0[b] = ax; if (bx > MM.bx1[b]) MM.bx1[b] = bx; }
+  }
 }
-function buildingRGB(b) {
-  if (b.fire > 0) return [255, 112, 40];
-  if (b.key === 'rubble') return RUBBLE_RGB;
-  if (b.abandoned) return [86, 86, 94];
+/** Building event: refresh its cached colour (0 = gone) and mark its footprint. */
+function onBld(b, gone) {
+  if (!b || !MM.px || !MM.bc || !isFinite(b.x) || !isFinite(b.z)) return;
+  stampBld(b, gone ? 0 : bldColor(b), MM.W, MM.bc);
+  markRect(b.x, b.z, b.x + b.w - 1, b.z + b.d - 1);
+}
+const FIRE_P = pack(255, 112, 40), RUBBLE_P = pack(RUBBLE_RGB[0], RUBBLE_RGB[1], RUBBLE_RGB[2]), ABAND_P = pack(86, 86, 94), CIVIC_P = pack(CIVIC_RGB[0], CIVIC_RGB[1], CIVIC_RGB[2]);
+function bldColor(b) {
+  if (b.fire > 0) return FIRE_P;
+  if (b.key === 'rubble') return RUBBLE_P;
+  if (b.abandoned) return ABAND_P;
   if (b.key === 'grow') {
     const z = ZONE_RGB[b.zt] || CIVIC_RGB;
     const k = 0.72 + 0.14 * (b.level || 1);
-    return [z[0] * k, z[1] * k, z[2] * k];
+    return pack((z[0] * k) | 0, (z[1] * k) | 0, (z[2] * k) | 0);
   }
-  return CIVIC_RGB;
+  return CIVIC_P;
 }
-/** Recolours tiles in [x0..x1] x [z0..z1]. */
-function paint(x0, z0, x1, z1) {
-  const S = VC.state, W = S.W, px = MM.px;
-  const hgt = S.height, terr = S.terr, road = S.road, zone = S.zone, bld = S.bld, trees = S.trees, pline = S.pline, flags = S.flags;
-  const SEA = VC.C.SEA, F = VC.F;
-  const ovKey = VC.gfx.overlay || 'none';
-  const ov = ovKey !== 'none' ? VC.OVERLAYS.find((o) => o.key === ovKey) : null;
-  const kind = ov ? RAMP_KIND[ov.ramp] || 0 : -1;
-  const map = ov && ov.map ? S.maps[ov.map] : null;
-  const netFlag = ov && ov.ramp === 'net' ? ov.flag : 0;
-  const netNet = netFlag === F.POWER ? F.POWERNET : F.WATERNET;
-  const bcol = MM.bcol;
-  bcol.clear();
+/** Plain map colours of [x0..x1] x [z0..z1] into MM.col. */
+function paintBase(S, x0, z0, x1, z1) {
+  const W = S.W, col = MM.col, bc = MM.bc;
+  const hgt = S.height, terr = S.terr, road = S.road, zone = S.zone, trees = S.trees, pline = S.pline;
+  const SEA = VC.C.SEA, hk = 0.42 / VC.C.MAXH;
   for (let z = z0; z <= z1; z++) {
-    for (let x = x0; x <= x1; x++) {
-      const i = z * W + x;
+    for (let x = x0, i = z * W + x0; x <= x1; x++, i++) {
+      const c = bc[i];
+      if (c) { col[i] = c; continue; }
       const lv = hgt[i];
       let r, g, b;
       if (lv < SEA) {
@@ -188,70 +228,121 @@ function paint(x0, z0, x1, z1) {
         const tc = TERR_RGB[terr[i]] || TERR_RGB[0];
         // height brightness + NW hill shading
         const hn = z > 0 && x > 0 ? hgt[i - W - 1] : lv;
-        let k = 0.78 + (lv / VC.C.MAXH) * 0.42 + M.clamp((lv - hn) * 0.07, -0.22, 0.22);
+        const sh = (lv - hn) * 0.07;
+        const k = 0.78 + lv * hk + (sh < -0.22 ? -0.22 : sh > 0.22 ? 0.22 : sh);
         r = tc[0] * k; g = tc[1] * k; b = tc[2] * k;
         const tr = trees[i];
         if (tr) { const t = 0.35 + tr * 0.17; r += (TREE_RGB[0] - r) * t; g += (TREE_RGB[1] - g) * t; b += (TREE_RGB[2] - b) * t; }
       }
-      const id = bld[i];
-      if (id) {
-        let c = bcol.get(id);
-        if (!c) { const bb = S.buildings.get(id); c = bb ? buildingRGB(bb) : CIVIC_RGB; bcol.set(id, c); }
-        r = c[0]; g = c[1]; b = c[2];
-      } else if (road[i]) {
-        const c = ROAD_RGB[road[i]] || ROAD_RGB[1];
-        r = c[0]; g = c[1]; b = c[2];
+      const rd = road[i];
+      if (rd) {
+        const rc = ROAD_RGB[rd] || ROAD_RGB[1];
+        r = rc[0]; g = rc[1]; b = rc[2];
       } else {
         const zc = zone[i];
-        if (zc) { const c = ZONE_RGB[zc >> 2]; if (c) { r += (c[0] - r) * 0.5; g += (c[1] - g) * 0.5; b += (c[2] - b) * 0.5; } }
+        if (zc) { const zr = ZONE_RGB[zc >> 2]; if (zr) { r += (zr[0] - r) * 0.5; g += (zr[1] - g) * 0.5; b += (zr[2] - b) * 0.5; } }
         if (pline[i]) { r += (255 - r) * 0.55; g += (214 - g) * 0.55; b += (90 - b) * 0.55; }
       }
-      if (kind >= 0) {
-        // overlay: tint with the ramp, keep luminance for shape
-        const lum = (r * 0.3 + g * 0.59 + b * 0.11) / 255;
-        if (map) {
-          if (lv >= SEA) {
-            const c = LUT[kind][map[i]];
-            const s = 0.45 + lum * 0.6;
-            r = c[0] * s; g = c[1] * s; b = c[2] * s;
-          } else { r *= 0.45; g *= 0.5; b *= 0.6; }
-        } else if (netFlag) {
-          const fl = flags[i];
-          if (id || zone[i]) {
-            const c = fl & netFlag ? LUT[3][255] : LUT[3][0];
-            r = c[0]; g = c[1]; b = c[2];
-          } else if (fl & netNet) { r = 40; g = 120; b = 150; }
-          else { const gr = lum * 110; r = gr; g = gr; b = gr * 1.1; }
-        }
-      }
-      px[i] = pack(r | 0, g | 0, b | 0);
+      col[i] = pack(r | 0, g | 0, b | 0);
     }
   }
 }
+/** Overlay state for painting (null = plain map). */
+function overlayState(S) {
+  const key = VC.gfx.overlay || 'none';
+  const ov = key !== 'none' ? VC.OVERLAYS.find((o) => o.key === key) : null;
+  if (!ov) return null;
+  const F = VC.F;
+  const kind = RAMP_KIND[ov.ramp] || 0;
+  const netFlag = ov.ramp === 'net' ? ov.flag : 0;
+  return {
+    kind, map: ov.map ? S.maps[ov.map] : null, netFlag, netNet: netFlag === F.POWER ? F.POWERNET : F.WATERNET,
+    nodata: !!(ov.nodata0 || NODATA0[key]), lr: LUTF[kind][0], lg: LUTF[kind][1], lb: LUTF[kind][2],
+  };
+}
+/** Shown colours of [x0..x1] x [z0..z1]: MM.col as is, or tinted by the overlay (keeps luminance for shape). */
+function paintView(S, o, x0, z0, x1, z1) {
+  const W = S.W, px = MM.px, col = MM.col;
+  if (!o) {
+    for (let z = z0; z <= z1; z++) { const a = z * W + x0; px.set(col.subarray(a, a + x1 - x0 + 1), a); }
+    return;
+  }
+  const hgt = S.height, flags = S.flags, zone = S.zone, bld = S.bld, SEA = VC.C.SEA;
+  const map = o.map, lr = o.lr, lg = o.lg, lb = o.lb, nodata = o.nodata, netFlag = o.netFlag, netNet = o.netNet;
+  const on = LUT[3][255], off = LUT[3][0];
+  for (let z = z0; z <= z1; z++) {
+    for (let x = x0, i = z * W + x0; x <= x1; x++, i++) {
+      const c = col[i];
+      let r = c & 255, g = (c >>> 8) & 255, b = (c >>> 16) & 255;
+      const lum = (r * 0.3 + g * 0.59 + b * 0.11) / 255;
+      if (map) {
+        if (hgt[i] >= SEA) {
+          const v = map[i];
+          if (nodata && v === 0) { const gr = lum * 110; r = gr; g = gr; b = gr * 1.1; } // n/a: nobody there
+          else { const s = 0.45 + lum * 0.6; r = lr[v] * s; g = lg[v] * s; b = lb[v] * s; }
+        } else { r *= 0.45; g *= 0.5; b *= 0.6; }
+      } else if (netFlag) {
+        const fl = flags[i];
+        if (bld[i] || zone[i]) {
+          const cc = fl & netFlag ? on : off;
+          r = cc[0]; g = cc[1]; b = cc[2];
+        } else if (fl & netNet) { r = 40; g = 120; b = 150; }
+        else { const gr = lum * 110; r = gr; g = gr; b = gr * 1.1; }
+      }
+      px[i] = ((255 << 24) | ((b > 255 ? 255 : b) << 16) | ((g > 255 ? 255 : g) << 8) | (r > 255 ? 255 : r)) >>> 0;
+    }
+  }
+}
+/**
+ * Advances the repaint within the frame budget: dirty bands first (plain colours + view), then a
+ * pending overlay re-tint (row bands, at most once per OV_REFRESH_MS). Returns true if pixels changed.
+ */
 function updateBase(force) {
   const S = VC.state;
   if (!S || !MM.px) return false;
   const now = performance.now();
-  if (MM.full) {
-    if (!force && now - MM.lastBase < 250) return false;
-    paint(0, 0, S.W - 1, S.H - 1);
-    MM.bctx.putImageData(MM.img, 0, 0);
-    MM.full = false;
-    MM.dirty = null;
-    MM.lastBase = now;
-    return true;
-  }
-  if (MM.dirty && now - MM.lastBase >= 120) {
-    const d = MM.dirty;
-    const x0 = M.clamp(d.x0 | 0, 0, S.W - 1), z0 = M.clamp(d.z0 | 0, 0, S.H - 1), x1 = M.clamp(d.x1 | 0, 0, S.W - 1), z1 = M.clamp(d.z1 | 0, 0, S.H - 1);
-    MM.dirty = null;
-    if (x1 < x0 || z1 < z0) return false;
-    paint(x0, z0, x1, z1);
+  if (MM.full) markAll(S);
+  const H = S.H, nb = MM.bx0.length, t0 = now, budget = force ? 1e9 : MM.viewBurst ? 12 : PAINT_MS;
+  let o = null, oReady = false, changed = false;
+  const ov = () => { if (!oReady) { o = overlayState(S); oReady = true; } return o; };
+  for (let k = 0; k < nb; k++) {
+    const b = (MM.bandAt + k) % nb; // round-robin so a busy area cannot starve the rest
+    if (MM.bx0[b] > MM.bx1[b]) continue;
+    const x0 = MM.bx0[b], x1 = MM.bx1[b], z0 = b * BAND, z1 = Math.min(H - 1, z0 + BAND - 1);
+    MM.bx0[b] = 1; MM.bx1[b] = 0;
+    paintBase(S, x0, z0, x1, z1);
+    paintView(S, ov(), x0, z0, x1, z1);
     MM.bctx.putImageData(MM.img, 0, 0, x0, z0, x1 - x0 + 1, z1 - z0 + 1);
-    MM.lastBase = now;
-    return true;
+    changed = true;
+    if (performance.now() - t0 >= budget) { MM.bandAt = (b + 1) % nb; return true; }
   }
-  return false;
+  if (MM.viewRow < 0) MM.viewBurst = false; // every band is clean again
+  // overlay data changed (maps / networks): re-tint everything, sliced, at most once per OV_REFRESH_MS
+  if (MM.viewRow < 0 && MM.viewPending && now >= MM.viewNext) {
+    MM.viewPending = false;
+    MM.viewRow = 0;
+  }
+  // (a re-tint the player asked for — a new overlay — may take a whole frame's worth of budget)
+  const vBudget = MM.viewBurst ? Math.max(budget, 12) : budget;
+  while (MM.viewRow >= 0) {
+    const z0 = MM.viewRow, z1 = Math.min(H - 1, z0 + BAND - 1);
+    paintView(S, ov(), 0, z0, S.W - 1, z1);
+    MM.bctx.putImageData(MM.img, 0, 0, 0, z0, S.W, z1 - z0 + 1);
+    changed = true;
+    MM.viewRow = z1 + 1 < H ? z1 + 1 : -1;
+    if (MM.viewRow < 0) {
+      MM.viewNext = performance.now() + OV_REFRESH_MS;
+      MM.viewBurst = false;
+    }
+    if (performance.now() - t0 >= vBudget) break;
+  }
+  return changed;
+}
+/** Overlay picked / changed: re-tint from the top now (not throttled). */
+function viewNow() {
+  MM.viewPending = false;
+  MM.viewRow = 0;
+  MM.viewBurst = true;
 }
 
 /* ---------------- view frustum ---------------- */
@@ -371,10 +462,11 @@ function refreshLegend() {
   if (!on) return;
   MM.lgIcon.textContent = ov.icon;
   MM.lgName.textContent = ov.name;
-  const net = ov.ramp === 'net';
+  const net = ov.ramp === 'net', nd = !net && !!(ov.nodata0 || NODATA0[key]);
   MM.lgRamp.style.display = net ? 'none' : '';
   MM.lgLo.parentNode.style.display = net ? 'none' : '';
-  MM.lgNet.style.display = net ? '' : 'none';
+  MM.lgNet.style.display = net || nd ? '' : 'none';
+  if (nd) MM.lgNet.innerHTML = '<span><i style="background:rgb(66,66,74)"></i>No residents or workers</span>';
   if (net) {
     const c = (v) => `rgb(${LUT[3][v].join(',')})`;
     const what = ov.flag === VC.F.POWER ? ['Powered', 'No power'] : ['Water service', 'No water'];
@@ -394,14 +486,20 @@ VC.hud.register({
     build(root);
     const bus = VC.bus;
     bus.on('dirty', (d) => { if (d && MM.px) markRect(d.x0, d.z0, d.x1, d.z1); });
-    bus.on('bldChange', (b) => { if (b && MM.px) markRect(b.x, b.z, b.x + b.w - 1, b.z + b.d - 1); });
-    bus.on('bldRemove', (b) => { if (b && MM.px) markRect(b.x, b.z, b.x + b.w - 1, b.z + b.d - 1); });
+    bus.on('bldAdd', (b) => onBld(b, false));
+    bus.on('bldChange', (b) => onBld(b, false));
+    bus.on('bldRemove', (b) => onBld(b, true));
     // camera jumps (new city / load / Continue) happen without motion the next frame: force a redraw
     for (const ev of ['newGame', 'started']) bus.on(ev, () => { MM.redraw = true; MM.settle = 3; });
-    const refull = () => { if (VC.gfx.overlay && VC.gfx.overlay !== 'none') MM.full = true; };
-    bus.on('mapsUpdated', refull);
-    bus.on('flagsUpdated', refull);
-    bus.on('overlay', () => { MM.full = true; MM.lastBase = 0; refreshLegend(); VC.hud.refreshDock && VC.hud.refreshDock(); });
+    // overlay data changed: re-tint (at most once per OV_REFRESH_MS, sliced over frames)
+    const ovData = (net) => () => {
+      const k = VC.gfx.overlay;
+      const ov = k && k !== 'none' ? VC.OVERLAYS.find((o) => o.key === k) : null;
+      if (ov && (net ? ov.ramp === 'net' : !!ov.map)) MM.viewPending = true;
+    };
+    bus.on('mapsUpdated', ovData(false));
+    bus.on('flagsUpdated', ovData(true));
+    bus.on('overlay', () => { viewNow(); refreshLegend(); VC.hud.refreshDock && VC.hud.refreshDock(); });
     bus.on('settings', () => { MM.redraw = true; });
   },
   reset(S) {
@@ -428,15 +526,21 @@ VC.hud.register({
 });
 
 Object.assign(VC.hud, { openOverlayPicker, OVERLAY_DESC, overlayGradient, overlayLUT: LUT });
-/** Benchmark hook: ms for one full minimap repaint + draw (tests / perf checks). */
+/**
+ * Benchmark hook: ms for one full minimap repaint (unbudgeted; the live minimap spreads it over frames),
+ * an overlay re-tint of the whole map (viewMs, with the active overlay) and the draw.
+ */
 VC.hud.debugMinimap = function () {
   const S = VC.state;
   if (!S) return null;
   if (!MM.px || MM.W !== S.W) alloc(S);
   const t0 = performance.now();
-  paint(0, 0, S.W - 1, S.H - 1);
-  MM.bctx.putImageData(MM.img, 0, 0);
+  markAll(S);
+  updateBase(true);
   const t1 = performance.now();
+  paintView(S, overlayState(S), 0, 0, S.W - 1, S.H - 1);
+  MM.bctx.putImageData(MM.img, 0, 0);
+  const t2 = performance.now();
   draw();
-  return { paintMs: +(t1 - t0).toFixed(2), drawMs: +(performance.now() - t1).toFixed(2), size: S.W + 'x' + S.H, buildings: S.buildings.size };
+  return { paintMs: +(t1 - t0).toFixed(2), viewMs: +(t2 - t1).toFixed(2), drawMs: +(performance.now() - t2).toFixed(2), size: S.W + 'x' + S.H, buildings: S.buildings.size };
 };

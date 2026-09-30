@@ -9,10 +9,19 @@
  *   VC.panels.open(key, {tab})     opens/focuses a panel. Extra keys: 'loans' (budget → Loans tab),
  *                                  'inspector' (re-opens the last inspected target)
  *   VC.panels.toggle(key)          closes if open, else opens
- *   VC.panels.close(key), isOpen(key), refresh(key?) (immediate live update)
- *   VC.panels.inspect(building | {x, z} | null)   opens the inspector (null closes it)
+ *   VC.panels.close(key), isOpen(key), refresh(key?) (immediate live update; no key = all, throttled)
+ *   VC.panels.inspect(building | {x, z} | null)   opens the inspector (null closes it); sets/clears
+ *                                  VC.tools.selectedId; VC.panels.inspected() -> current target
+ *   VC.panels.onSelectHook         optional fn(sel) -> true to consume the next bus 'select' (used by
+ *                                  the Disasters "pick on map" mode before the inspector sees it)
+ *   VC.panels.util                 shared widget helpers (kpi, meter, diverge, pill, seg, slider, spark,
+ *                                  keyed lists, chartHover, formatting) for panel files
  * Window ids are the panel keys themselves ('budget', 'inspector', …) so bus 'windowOpened' /
  * 'windowClosed' payloads can be compared to VC.panels.list keys directly.
+ * Bus in: select, bldRemove, policyChanged, budgetChanged, loanChanged, overlay, advisor, milestone,
+ * achievement, disaster, month, money (refresh), windowClosed. Bus out: sfx {name:'open'|'click'|'policy'}, toast.
+ * Hotkeys belong to input.js; a guarded fallback here only fires if nobody else handled the key.
+ * Positions are kept in screen px and work with either UI scaling model (CSS zoom or `scale`).
  *
  * PANEL DEFINITIONS (registered at load time by ui/panels_*.js, which load after this file):
  *   VC.panels.defs[key] = { title, icon, width, place: 'left'|'center'|'right', build(p) -> updater }

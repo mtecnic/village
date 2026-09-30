@@ -626,6 +626,8 @@ function pump() {
   }, { timeout: 400 });
 }
 A.ready = () => !!(A.ctx && A.ctx.state === 'running' && A.bus);
+/** Current bus volume targets ({music, sfx, amb, master}; 0 = muted). */
+A.volumes = () => lastVols;
 /** Queues idle-time rendering of every variant of the named recipes. */
 function warm(names) {
   for (const n of names) {
@@ -654,6 +656,7 @@ A.play = function (name, opts) {
     if (!warnedUnknown[name]) { warnedUnknown[name] = 1; console.info('[audio] unknown sfx "' + name + '"'); }
     return false;
   }
+  if ((R.bus === 'amb' ? lastVols.amb : lastVols.sfx) === 0) return false; // bus muted: create nothing
   const nowMs = performance.now();
   const grp = R.group || name;
   if (nowMs - (lastGroup[grp] || -1e9) < (R.win == null ? 60 : R.win)) { A.stats.deduped++; return false; }

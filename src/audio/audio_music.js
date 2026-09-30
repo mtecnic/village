@@ -736,9 +736,14 @@ MU.update = function () {
   if (!MU.on || !A.ctx) return;
   const ctx = A.ctx, t = ctx.currentTime;
   readMood();
-  const want = mood.paused ? 'drone' : 'play';
+  // music volume at zero: stop scheduling altogether (no silent nodes)
+  const want = A.volumes().music === 0 ? 'off' : mood.paused ? 'drone' : 'play';
   if (want !== MU.mode) {
-    if (want === 'play') {
+    if (want === 'off') {
+      droneOff(t);
+      N.level.gain.cancelScheduledValues(t);
+      N.level.gain.setTargetAtTime(0, t, 0.1);
+    } else if (want === 'play') {
       planSection(); // coming back from pause (or the first start): begin a fresh section
       MU.step = 0;
       MU.nextT = t + 0.1;

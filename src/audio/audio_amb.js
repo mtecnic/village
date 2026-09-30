@@ -444,9 +444,13 @@ AMB.update = function () {
     acc = 0;
     sampleEnv(S);
     computeTargets(S, step);
+    if (A.volumes().amb === 0) { // muted: let every bed fade out and retire its source
+      for (const k in T) T[k] = 0;
+      for (const k in dis) dis[k][0] = 0;
+    }
     applyTargets(step);
   }
-  oneShots(S, rdt);
+  if (A.volumes().amb !== 0) oneShots(S, rdt);
 };
 AMB.info = function () {
   const lv = {};

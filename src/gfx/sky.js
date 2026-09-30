@@ -28,7 +28,8 @@
  * JS API: GLSL, UBO_BINDING, ubo, attach(prog), moonPhase (0 new .. 0.5 full .. 1, from S.time.day),
  * moonIllum (0..1 lit fraction), cover (smoothed cloud cover), cityGlow (0..1 from the population),
  * auroraLevel (0..1 current), forceAurora(v|null), forceRainbow(v|null), shootingStar() (spawns one now,
- * e.g. for celebrations). Reads VC.fx.lastBolt {x, z} (optional) to light the clouds above a strike.
+ * e.g. for celebrations), restore() (re-creates the UBO + program after a WebGL context restore).
+ * Reads VC.fx.lastBolt {x, z} (optional) to light the clouds above a strike.
  */
 const M = VC.M;
 
@@ -380,18 +381,8 @@ const Sk = (VC.sky = {
   _forceBow: null,
 
   init() {
-    const G = VC.gfx, gl = G.gl;
     Sk.data = new Float32Array(UBO_VEC4 * 4);
-    Sk.ubo = gl.createBuffer();
-    gl.bindBuffer(gl.UNIFORM_BUFFER, Sk.ubo);
-    gl.bufferData(gl.UNIFORM_BUFFER, Sk.data.byteLength, gl.DYNAMIC_DRAW);
-    gl.bindBufferBase(gl.UNIFORM_BUFFER, UBO_BINDING, Sk.ubo);
-    Sk.prog = G.program(
-      'sky',
-      `out vec2 vNdc; void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2) * 2.0 - 1.0; vNdc = p; gl_Position = vec4(p, 1.0, 1.0); }`,
-      GLSL + SKY_FS
-    );
-    Sk.attach(Sk.prog);
+    initGL();
     // simulation state (real-time, independent of the sim speed)
     Sk.st = {
       cu: [0.13, 0.57], ci: [0.71, 0.29], wind: [1, 0], windS: 0.5, cover: 0.25, rain: 0, cirrus: 0.5,
@@ -399,6 +390,12 @@ const Sk = (VC.sky = {
       shoot: null, shootWait: 6, boltDir: [0, 1, 0], lastLightning: 0, rng: M.rng(90731),
     };
     VC.gfx.addLayer(Sk);
+  },
+
+  /** Re-creates the GL objects (SkyFrame UBO, sky program) after a WebGL context restore. */
+  restore() {
+    Sk._err = false;
+    initGL();
   },
 
   /** Binds the SkyFrame uniform block of a program that includes VC.sky.GLSL. */
@@ -470,6 +467,21 @@ const Sk = (VC.sky = {
     VC.gfx.fullscreen();
   },
 });
+
+/** (Re)creates the SkyFrame UBO and the sky program. */
+function initGL() {
+  const G = VC.gfx, gl = G.gl;
+  Sk.ubo = gl.createBuffer();
+  gl.bindBuffer(gl.UNIFORM_BUFFER, Sk.ubo);
+  gl.bufferData(gl.UNIFORM_BUFFER, Sk.data.byteLength, gl.DYNAMIC_DRAW);
+  gl.bindBufferBase(gl.UNIFORM_BUFFER, UBO_BINDING, Sk.ubo);
+  Sk.prog = G.program(
+    'sky',
+    `out vec2 vNdc; void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2) * 2.0 - 1.0; vNdc = p; gl_Position = vec4(p, 1.0, 1.0); }`,
+    GLSL + SKY_FS
+  );
+  Sk.attach(Sk.prog);
+}
 
 /* ------------------------------------------------------------------ */
 /* Per-frame sky simulation (clouds drift, weather smoothing, events)   */

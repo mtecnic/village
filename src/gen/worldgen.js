@@ -14,8 +14,9 @@
  * (meandering river paths rasterized through a distance transform, noisy coastline with bays and
  * cliffs, island blobs, ridged mountain ranges around a valley, lake noise + blob lakes, gentle
  * plains with ponds) -> voxel terraces on land -> flat start plateau near the center -> integer
- * levels -> despeckle -> shallow shelves along shores -> materials (sand beaches, rock on steep/high
- * ground, snow on peaks, dirt/meadow patches) -> clustered forests + lone trees.
+ * levels -> despeckle + contour smoothing (no 1-tile notches) -> shallow shelves along shores + seabed
+ * smoothing -> materials (sand beaches, rock on steep/high ground, snow on peaks, dirt/meadow patches,
+ * sandy shallows / silty deep beds along a noisy boundary) -> clustered forests + lone trees.
  *
  * Sampling: at resolution `res` sample (i, j) sits at tile coordinate (i + 0.5) * step - 0.5 with
  * step = size / res (step 1 = one sample per tile). Every distance / radius is in TILES.
@@ -462,6 +463,18 @@ function build(seed, type, size, res) {
         if (L[k] > mx) L[k] = mx;
         else if (L[k] < mn) L[k] = mn;
       }
+  // contour smoothing: a land tile one level off from 3+ agreeing neighbours takes their level. Removes the
+  // 1-tile notches / protrusions along every contour, whose 0.25-high risers (and their shadows) read as
+  // short dark scratches all over gentle maps. Shorelines never move (both levels must be dry land).
+  for (let pass = 0; pass < 2; pass++)
+    for (let j = 1; j < res - 1; j++)
+      for (let i = 1, k = j * res + 1; i < res - 1; i++, k++) {
+        const c = L[k];
+        if (c < SEA) continue;
+        const a = L[k - 1], b = L[k + 1], d = L[k - res], e = L[k + res];
+        const t = a === b && (a === d || a === e) ? a : d === e && (d === a || d === b) ? d : -1;
+        if (t >= SEA && (t === c + 1 || t === c - 1)) L[k] = t;
+      }
 
   // ---- 4. distance to water / land, shallow shelves along shores ----
   const wet = new Uint8Array(N), dry = new Uint8Array(N);
@@ -473,6 +486,17 @@ function build(seed, type, size, res) {
     if (d <= 1.01) L[k] = Math.max(L[k], SEA - 1);
     else if (d <= 2.6) L[k] = Math.max(L[k], SEA - 2);
   }
+  // the same notch smoothing on the seabed: single tiles one level off their shelf show through the water as
+  // a light / dark tile checkerboard (water stays water)
+  for (let pass = 0; pass < 2; pass++)
+    for (let j = 1; j < res - 1; j++)
+      for (let i = 1, k = j * res + 1; i < res - 1; i++, k++) {
+        const c = L[k];
+        if (c >= SEA) continue;
+        const a = L[k - 1], b = L[k + 1], d = L[k - res], e = L[k + res];
+        const t = a === b && (a === d || a === e) ? a : d === e && (d === a || d === b) ? d : -1;
+        if (t >= 0 && t < SEA && (t === c + 1 || t === c - 1)) L[k] = t;
+      }
 
   // ---- 5. materials + forests ----
   const terr = new Uint8Array(N), trees = new Uint8Array(N);
@@ -488,7 +512,9 @@ function build(seed, type, size, res) {
       const tx = (i + 0.5) * step - 0.5;
       const lv = L[k];
       if (lv < SEA) {
-        terr[k] = dL[k] * step <= 2.2 ? TERR.SAND : TERR.DIRT;
+        // sandy shallows, silty deep beds; the boundary follows smooth noise (a bare distance threshold
+        // lands in the middle of 4-6 tile rivers and scatters sand / silt tiles into a checkerboard)
+        terr[k] = dL[k] * step + fS[k] * 0.9 <= 3.2 ? TERR.SAND : TERR.DIRT;
         continue;
       }
       let sl = 0;

@@ -634,9 +634,12 @@ function setSkip(mw, cam, shNear, shFar) {
     if (v > kindSkip[k][mw.kind]) kindSkip[k][mw.kind] = v;
   }
 }
-/** Fast 1/4-resolution downsample (most common colour of each 4x4x4 block, windows/emissive preferred). */
-function downsample4(g) {
-  const f = 4, nx = Math.ceil(g.sx / f), ny = Math.ceil(g.sy / f), nz = Math.ceil(g.sz / f);
+/**
+ * Fast 1/4-resolution downsample (most common colour of each 4x4x4 block, windows/emissive preferred). The block
+ * grid starts ox / oz voxels before the model grid (0..3), and blocks need minN voxels (ground blocks groundN).
+ */
+function downsample4(g, ox = 0, oz = 0, minN = 6, groundN = 3) {
+  const f = 4, nx = Math.ceil((g.sx + ox) / f), ny = Math.ceil(g.sy / f), nz = Math.ceil((g.sz + oz) / f);
   const o = new VC.VoxelGrid(nx, ny, nz);
   const v = g.v, sx = g.sx, sz = g.sz, sy = g.sy, pal = VC.voxel.palette;
   const cols = new Uint8Array(64), cnts = new Float32Array(64);
@@ -645,9 +648,10 @@ function downsample4(g) {
       for (let bx = 0; bx < nx; bx++) {
         let nc = 0, n = 0;
         for (let y = by * f; y < Math.min(sy, by * f + f); y++)
-          for (let z = bz * f; z < Math.min(sz, bz * f + f); z++) {
-            let i = bx * f + sx * (z + sz * y);
-            for (let x = bx * f; x < Math.min(sx, bx * f + f); x++, i++) {
+          for (let z = Math.max(0, bz * f - oz); z < Math.min(sz, bz * f + f - oz); z++) {
+            const x0 = Math.max(0, bx * f - ox);
+            let i = x0 + sx * (z + sz * y);
+            for (let x = x0; x < Math.min(sx, bx * f + f - ox); x++, i++) {
               const c = v[i];
               if (!c) continue;
               n++;
@@ -661,7 +665,7 @@ function downsample4(g) {
             }
           }
         // sparse blocks vanish (a 1-voxel pole must not become a 4-voxel slab); ground blocks need 3 voxels
-        if (n >= 6 || (n >= 3 && by === 0)) {
+        if (n >= minN || (n >= groundN && by === 0)) {
           let best = 0;
           for (let k = 1; k < nc; k++) if (cnts[k] > cnts[best]) best = k;
           o.v[bx + nx * (bz + nz * by)] = cols[best];
@@ -674,9 +678,18 @@ function buildL2(mi) {
   const mw = MWS[mi];
   const g = mw.m.grid;
   if (!g || !VC.voxel.mesh) { mwL2State[mi] = 3; return; }
-  const small = downsample4(g);
+  // slim conifers (def.farCenter): at 1/4 resolution a block straddling the trunk doubles an 8-voxel tree into a fat
+  // 8-voxel pillar; a block grid centred on the trunk keeps a 4-voxel spire (half-filled blocks only)
+  const def = VC.models.defs && VC.models.defs[mw.m.key];
+  const fc = !!(def && def.farCenter);
+  const ox = fc ? (((2 - (g.sx >> 1)) % 4) + 4) % 4 : 0, oz = fc ? (((2 - (g.sz >> 1)) % 4) + 4) % 4 : 0;
+  const small = fc ? downsample4(g, ox, oz, 12, 12) : downsample4(g);
   const mesh = VC.voxel.mesh(small, 4);
   if (!mesh.quads) { mwL2State[mi] = 3; return; }
+  if (ox || oz) {
+    const p = new Int16Array(mesh.data.buffer, mesh.data.byteOffset, mesh.data.byteLength >> 1);
+    for (let k = 0; k < p.length; k += 4) { p[k] -= ox; p[k + 2] -= oz; }
+  }
   mw.lv[2] = VC.voxel.upload(mesh);
   mwHasL2[mi] = 1;
   mwL2State[mi] = 2;

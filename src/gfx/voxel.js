@@ -31,6 +31,8 @@
  *     parts: [{ model:'wind_rotor', pivot:[x,y,z], partPivot:[x,y,z], axis:'x'|'y'|'z', speed: radPerSec }],
  *     sized: false,                        // true: forBuilding passes params {fw, fd} (e.g. 'rubble')
  *     lodMinFill: 3,                       // LOD-1 downsample keeps blocks with >= this many voxels (1 for poles)
+ *     farCenter: false,                    // true (slim conifers): the renderer's 1/4-res mesh centres its block
+ *                                          // grid on the trunk, so a far tree stays a slim spire, not a fat pillar
  *     lod: true,                           // false: no downsampled LOD — model.lod IS the model (its full-mesh
  *                                          // handles). For thin street furniture (lamps, signals, hydrants), whose
  *                                          // 1-voxel poles would double into chunky pillars at half resolution

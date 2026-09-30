@@ -457,6 +457,7 @@ VC.models.define('tree_birch', {
 });
 
 VC.models.define('tree_pine', {
+  farCenter: true,
   variants: 6,
   gen(rng) {
     const g = new VC.VoxelGrid(T, 23, T);
@@ -466,7 +467,7 @@ VC.models.define('tree_pine', {
     trunk2(g, 0, H - 2); // core: shows below the skirts and between tiers
     for (let t = 0; t < tiers; t++) {
       const yb = Math.round(y0 + t * step), yn = Math.round(y0 + (t + 1) * step);
-      const r = 3.5 - t * 0.52 + rng.range(-0.08, 0.08);
+      const r = 3.5 - t * 0.66 + rng.range(-0.08, 0.08);
       // each tier: a dark drooping skirt, then a narrower body filling up to the next skirt
       // (equal outlines stack into tall merged side faces)
       K.disc(g, 4, yb, 4, r, P.PINE_D);
@@ -481,6 +482,7 @@ VC.models.define('tree_pine', {
 });
 
 VC.models.define('tree_cypress', {
+  farCenter: true,
   variants: 5,
   gen(rng) {
     const g = new VC.VoxelGrid(T, 22, T);

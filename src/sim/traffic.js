@@ -157,8 +157,9 @@ SIM.computeTraffic = function () {
     if (b.key !== 'grow' && b.key !== 'arcology') continue;
     const r = b.simRoad;
     if (r == null || r < 0 || dist[r] >= INF) {
-      b.simCommute = sources > 0 || res > 0 ? -1 : 0;
-      if (res > 0) noPath++;
+      // jobs exist but no road leads there (with no jobs at all, unemployment covers it)
+      b.simCommute = sources > 0 ? -1 : 0;
+      if (sources > 0 && res > 0) noPath++;
       continue;
     }
     b.simCommute = dist[r] - bias[r]; // travel time (street-tile units) to the chosen workplace

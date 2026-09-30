@@ -319,7 +319,7 @@ KINDS.level3 = {
   text: (g, v) => `${Math.max(0, v - g.base)} / ${g.target - g.base}`,
 };
 KINDS.tourism = {
-  cat: 'grow', cool: 360,
+  cat: 'grow', cool: 360, optional: true,
   score: (c) => (c.pop >= 4000 ? 2 : 0),
   make(c) {
     const t = c.st.tourism || 0;
@@ -370,14 +370,37 @@ KINDS.fix_water = {
   doneTitle: () => 'Bring water to every building',
   text: (g, v) => `${num(Math.max(0, g.base - v))} / ${num(g.base)} fixed`,
 };
+/** Empty zoned tiles without road access (indices; at most 4000). */
+function noAccessTiles(S) {
+  const out = [], F = VC.F;
+  for (let i = 0; i < S.N && out.length < 4000; i++) if (S.zone[i] && !S.bld[i] && !(S.flags[i] & F.ACCESS)) out.push(i);
+  return out;
+}
+/**
+ * The goal's own tiles still to fix: a tile is fixed when it is zoned with road access (or built on), or a road
+ * now runs over it (those count for at most 35% of the tiles). Dezoning is NOT a fix, so zoning a remote patch
+ * and dezoning it again cannot farm the reward. Older saves without the tile list count the city-wide number.
+ */
+function accessLeft(g) {
+  const S = S_(), t = g.meta && g.meta.tiles;
+  if (!S || !Array.isArray(t)) return iss().zonedNoAccess || 0;
+  const F = VC.F, roadCap = Math.floor(t.length * 0.35);
+  let left = 0, roads = 0;
+  for (const i of t) {
+    if (S.zone[i] && (S.bld[i] || S.flags[i] & F.ACCESS)) continue;
+    if (!S.zone[i] && S.road[i] && roads < roadCap) { roads++; continue; }
+    left++;
+  }
+  return left;
+}
 KINDS.fix_access = {
   cat: 'fix', cool: 240, persist: 30, hold: HOLD_DAYS,
   score: (c) => ((iss().zonedNoAccess || 0) >= 12 ? 7 : 0),
   make(c) {
-    const n = iss().zonedNoAccess || 0;
-    return { title: 'Connect zones to roads', desc: `${num(n)} zoned tiles are more than ${C.ROAD_ACCESS} tiles from a street, so nothing can grow there. Add roads (or dezone).`, icon: '🚧', target: Math.floor(n * 0.2), base: n, unit: 'left', focus: { group: 'roads', locate: 'noaccess', tool: 'road_street' }, reward: { money: nice(cash(0.8) * M.clamp(n / 60, 0.25, 1)) } };
+    const tiles = noAccessTiles(c.S), n = tiles.length;
+    return { title: 'Connect zones to roads', desc: `${num(n)} zoned tiles are more than ${C.ROAD_ACCESS} tiles from a street, so nothing can grow there. Run streets to them.`, icon: '🚧', target: Math.floor(n * 0.2), base: n, unit: 'left', focus: { group: 'roads', locate: 'noaccess', tool: 'road_street' }, reward: { money: nice(cash(0.8) * M.clamp(n / 60, 0.25, 1)) }, meta: { tiles } };
   },
-  cur: () => iss().zonedNoAccess || 0,
+  cur: (c, g) => accessLeft(g),
   prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
   text: (g, v) => `${num(Math.max(0, v - g.target))} tiles to go`,
 };
@@ -395,7 +418,7 @@ KINDS.fix_abandoned = {
   text: (g, v) => `${num(M.clamp(g.base - v, 0, g.base - g.target))} / ${num(g.base - g.target)} done`,
 };
 KINDS.fix_traffic = {
-  cat: 'fix', cool: 180, persist: 30, hold: HOLD_DAYS,
+  cat: 'fix', cool: 180, persist: 30, hold: HOLD_DAYS, optional: true,
   score: (c) => ((iss().jammedRoads || 0) >= 12 ? 5 : 0),
   make(c) {
     const n = iss().jammedRoads || 0;
@@ -534,7 +557,7 @@ KINDS.policy = {
   prog: (c, g, v) => (v > 0 ? 1 : 0),
 };
 KINDS.clean_power = {
-  cat: 'build', cool: 540,
+  cat: 'build', cool: 540, optional: true,
   score: (c) => (c.pop >= 3000 && counts().power > 0 && cleanShare() < 0.3 && unlocked('wind_turbine') ? 2 : 0),
   make: (c) => ({ title: 'Go green: 50% clean power', desc: 'Wind, solar and nuclear power keep the lights on without the smog.', icon: '🌬️', target: 0.5, base: cleanShare(), unit: 'pct', focus: { group: 'power', overlay: 'pollution' }, reward: { mods: { happiness: 0.02, landValue: 0.03 }, days: 240, label: 'Green reputation' } }),
   cur: () => cleanShare(),
@@ -730,12 +753,16 @@ function generate(S, forceKind, opts) {
   const day = S.time.day;
   rnd = M.rng((S.seed ^ Math.imul(day + 7, 2654435761) ^ (G.seq * 97)) >>> 0);
   const cands = [];
+  // a thin card (fewer than 2 goals) halves the rest of grow/build kinds that completed (not stale ones, not
+  // fixes): late-game cities have few fresh kinds left and the card must not sit empty
+  const thin = G.active.length < 2;
   if (forceKind) { if (KINDS[forceKind]) cands.push({ K: KINDS[forceKind], s: 1 }); }
   else {
     for (const key in KINDS) {
       const K = KINDS[key];
       if (G.active.some((g) => g.kind === key)) continue;
-      if ((G.cool[key] || 0) > day) continue;
+      const cool = G.cool[key] || 0;
+      if (cool > day && !(thin && K.cat !== 'fix' && !G.stale[key] && K.cool < ONCE && cool - day <= K.cool / 2)) continue;
       if (noFix && K.cat === 'fix') continue;
       if (K.persist && !(G.seen[key] != null && day - G.seen[key] >= K.persist)) continue;
       let s = 0;
@@ -876,7 +903,9 @@ function swap(id) {
   const i = G.active.findIndex((g) => g.id === id);
   if (i < 0 || G.active[i].done) return false;
   const g = G.active.splice(i, 1)[0];
-  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + 120);
+  const K = KINDS[g.kind];
+  // (at least a full cooldown: the thin-card rule in generate() must not hand the swapped kind straight back)
+  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + Math.max(120, K && K.cool < ONCE ? K.cool : 0));
   const n = generate(S, null, { noFix: true });
   G.next = S.time.day + (n ? NEXT_DAYS : 2);
   if (!n) VC.bus.emit('goalsChanged', G.active);

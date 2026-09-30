@@ -482,7 +482,7 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .dk-min.win-btn { flex: none; width: 24px; height: 24px; }
 /* (.dk-body only groups them: its parts are flex items of .dk-full, so the story's min-height is what counts) */
 .dk-body { display: contents; }
-.dk-story { flex: 0 1 auto; min-height: 60px; margin-right: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.dk-story { flex: 0 1 auto; min-height: 52px; margin-right: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .dk-choices, .dk-out { flex: none; margin-right: 7px; }
 .dk-title { display: flex; align-items: flex-start; gap: 7px; margin: 8px 0 4px; font-size: 14.5px; font-weight: 850; line-height: 1.25; color: #fff; }
 .dk-ticon { flex: none; font-size: 16px; line-height: 1.15; }
@@ -2609,9 +2609,9 @@ for (const p of VC.POLICIES) VC.POLICY[p.key] = p;
 /* ------------------------------------------------------------------ */
 VC.MILESTONES = [
   { pop: 0, name: 'Hamlet', reward: 0 },
-  { pop: 250, name: 'Village', reward: 4000 },
-  { pop: 1000, name: 'Town', reward: 8000 },
-  { pop: 3000, name: 'Small City', reward: 12000 },
+  { pop: 250, name: 'Village', reward: 3000 },
+  { pop: 1000, name: 'Town', reward: 6000 },
+  { pop: 3000, name: 'Small City', reward: 10000 },
   { pop: 10000, name: 'City', reward: 25000 },
   { pop: 25000, name: 'Large City', reward: 40000 },
   { pop: 50000, name: 'Metropolis', reward: 60000 },
@@ -14534,7 +14534,8 @@ function buildRender() {
  *   to back — and each instance picks a LOD tier by camera distance (0 full mesh, 1 model.lod, 2 a
  *   1/4-resolution mesh built lazily here from model.grid; props stop at tier 1, models without a distinct
  *   LOD mesh (incl. thin street furniture whose model.lod is the model) stay in one bucket, bare deciduous crowns
- *   use their winter LOD mesh for tier 2 as well, and a model's few 1/4-res instances (<= 3) join its LOD-1
+ *   use a 1/4-res mesh of their wood for tier 2, slim conifers (def.farCenter) a trunk-centred one, and a
+ *   model's few 1/4-res instances (<= 3) join its LOD-1
  *   bucket). The LOD distances are the preset's lodDist on high/ultra (moved closer only by dynamic resolution /
  *   wide FOV); on medium/low the full-mesh range is screen-space (see lodDistance). Tiny/far things are skipped (SKIP_DEF:
  *   props end at 0.9 lodDist, their glows stay), and the visible slot indices are counting-sorted per
@@ -14831,6 +14832,7 @@ const MWS = [];
 const mwMap = new Map();
 let mwKind = new Uint8Array(64), mwHasL2 = new Uint8Array(64), mwL2State = new Uint8Array(64), mwSameL1 = new Uint8Array(64);
 let mwBareL1 = new Uint8Array(64); // 1: bare-crown tree with a winter LOD mesh (its tier 2 is that mesh while bareSeason())
+let mwHasWL2 = new Uint8Array(64); // 1: bare-crown tree whose 1/4-res wood mesh (lvWinter[2]) is built
 const mwSkip = [new Float32Array(64), new Float32Array(64), new Float32Array(64)]; // (factor * lodDist)^2 per mode (camera, shadow near, shadow far), in units of lodDist^2
 const l2Queue = [];
 // lit slots (model has lights) for the static sprite list
@@ -15057,6 +15059,7 @@ function ensureMwArrays(n) {
   mwL2State = growU8(mwL2State, len, 0);
   mwSameL1 = growU8(mwSameL1, len, 0);
   mwBareL1 = growU8(mwBareL1, len, 0);
+  mwHasWL2 = growU8(mwHasWL2, len, 0);
   for (let k = 0; k < 3; k++) {
     const a = new Float32Array(len);
     a.set(mwSkip[k]);
@@ -15116,9 +15119,9 @@ function getMW(m, kind) {
  * (Re)reads the mesh handles of wrapper mw from its model (at creation and after a context restore re-uploaded
  * the model): tier 0 full mesh, tier 1 model.lod (or the full mesh: models without a LOD, and thin street furniture
  * whose model.lod is the model itself), tier 2 the 1/4-res mesh built here lazily (dropped: requested again by
- * gather), winter meshes of open-foliage trees. Bare crowns do not use the 1/4-res mesh (at 1/4 resolution the
- * leaves out-vote the skeleton, and a 2-voxel trunk would become a 4-voxel pillar): their tier 2 is the winter LOD
- * mesh (gather folds those instances into the tier-1 bucket while bareSeason()).
+ * gather), winter meshes of open-foliage trees. Bare crowns do not use the leafy 1/4-res mesh (at 1/4 resolution
+ * the leaves out-vote the skeleton): their tier 2 is lvWinter[2], a 1/4-res mesh of the wood alone on a block grid
+ * centred on the trunk (built by buildL2), or the half-res winter LOD mesh until that exists.
  */
 function meshLevels(mw) {
   const m = mw.m, idx = mw.idx;
@@ -15134,6 +15137,7 @@ function meshLevels(mw) {
   mwL2State[idx] = l0 ? 0 : 3;
   mwSameL1[idx] = l1 === l0 ? 1 : 0;
   mwBareL1[idx] = wl1 ? 1 : 0;
+  mwHasWL2[idx] = 0; // (rebuilt with the 1/4-res mesh)
 }
 /** Overrides skip distances (in units of quality lodDist; Infinity = never skip, 0 = never draw) for a wrapper. */
 function setSkip(mw, cam, shNear, shFar) {
@@ -15182,6 +15186,25 @@ function downsample4(g, ox = 0, oz = 0, minN = 6, groundN = 3) {
       }
   return o;
 }
+/** 1/4-res mesh of a tree's wood (non-foliage voxels), block grid centred on the trunk; null when empty. */
+function woodL2Mesh(g) {
+  const pal = VC.voxel.palette, FOL = VC.MAT.FOLIAGE;
+  const w = new VC.VoxelGrid(g.sx, g.sy, g.sz);
+  let any = false;
+  for (let i = 0; i < g.v.length; i++) {
+    const c = g.v[i];
+    if (c && !(pal[c * 4 + 3] & FOL)) { w.v[i] = c; any = true; }
+  }
+  if (!any) return null;
+  const ox = (((2 - (g.sx >> 1)) % 4) + 4) % 4, oz = (((2 - (g.sz >> 1)) % 4) + 4) % 4;
+  const m = VC.voxel.mesh(downsample4(w, ox, oz, 3, 2), 4);
+  if (!m.quads) return null;
+  if (ox || oz) {
+    const p = new Int16Array(m.data.buffer, m.data.byteOffset, m.data.byteLength >> 1);
+    for (let k = 0; k < p.length; k += 4) { p[k] -= ox; p[k + 2] -= oz; }
+  }
+  return m;
+}
 function buildL2(mi) {
   if (mwL2State[mi] !== 1) return; // (dropped by a context restore meanwhile, or already built)
   const mw = MWS[mi];
@@ -15201,6 +15224,11 @@ function buildL2(mi) {
   }
   mw.lv[2] = VC.voxel.upload(mesh);
   mwHasL2[mi] = 1;
+  // bare crowns: a 1/4-res mesh of the wood alone (block grid centred on the trunk) for their tier 2 in winter
+  if (mw.lvWinter && mwBareL1[mi]) {
+    const wm = woodL2Mesh(g);
+    if (wm) { mw.lvWinter[2] = VC.voxel.upload(wm); mwHasWL2[mi] = 1; }
+  }
   mwL2State[mi] = 2;
   B.stats.l2++;
 }
@@ -16192,9 +16220,10 @@ function gather(set, planes, mode) {
         if (mwL2State[mi] === 0) { mwL2State[mi] = 1; l2Queue.push(mi); }
         tier = 1;
       }
-      // bare crowns: the leafy 1/4-res mesh has no skeleton left, the winter LOD mesh draws their tier 2 (the 1/4-res
-      // mesh is still requested above, so it is ready when the leaves come back)
-      if (tier === 2 && bare && mwBareL1[mi]) tier = 1;
+      // bare crowns: the leafy 1/4-res mesh has no skeleton left; their tier 2 is the 1/4-res WOOD mesh
+      // (lvWinter[2], built with the leafy one, which is ready again when the leaves come back) and, until that is
+      // built, the half-res winter LOD mesh
+      if (tier === 2 && bare && mwBareL1[mi] && !mwHasWL2[mi]) tier = 1;
       if (tier === 1 && mwSameL1[mi]) tier = 0; // no distinct LOD mesh: one bucket, one draw
       const bk = mi * 3 + tier;
       if (bCnt[bk]++ === 0) { used[nUsed++] = bk; bMin[bk] = d2; }
@@ -29132,7 +29161,8 @@ function startInc(S) {
 function restartInc() {
   const j = inc;
   j.tries++;
-  wholeDay(j.S); // whole days only (the hold below then keeps new days from starting)
+  wholeDay(j.S); // whole days only, and no new day may start before the first slice (sim.update runs first)
+  holdSim(j.S, true);
   j.sig = structSig(j.S);
   j.gen = codec().snapshotGen(j.S, collectExtra(j.S), { speed: storedSpeed(j.S) });
 }
@@ -41188,7 +41218,7 @@ function checkMilestones(S) {
   let idx = from, reward = 0;
   while (idx + 1 < MS.length && peak >= MS[idx + 1].pop) {
     idx++;
-    reward += MS[idx].reward || 0;
+    reward += milestoneReward(MS[idx], S);
   }
   // items unlocked since the previous announcement (never twice: S.adv.announced)
   let items = [];
@@ -41512,6 +41542,16 @@ function onDay() {
 /* ------------------------------------------------------------------ */
 /* Public API                                                           */
 /* ------------------------------------------------------------------ */
+/**
+ * The council's grant for reaching milestone ms in city S: VC.MILESTONES[].reward x the difficulty's rewardMul,
+ * rounded to $500 (0 in sandbox).
+ */
+function milestoneReward(ms, S) {
+  if (!ms || !ms.reward || (S && S.sandbox)) return 0;
+  const d = S && VC.DIFFICULTY[S.difficulty];
+  const mul = d && typeof d.rewardMul === 'number' ? d.rewardMul : 1;
+  return Math.max(500, Math.round((ms.reward * mul) / 500) * 500);
+}
 const A = (VC.advisors = {
   inbox: [],
   news: [],
@@ -41639,6 +41679,8 @@ const A = (VC.advisors = {
   },
   /** Grants an achievement by key (returns true if newly unlocked). */
   grant,
+  /** The grant for reaching milestone ms (VC.MILESTONES entry) in the running city, difficulty included. */
+  milestoneReward: (ms) => milestoneReward(ms, S_()),
   /** Milestone info: {index, current, next, progress 0..1}. */
   milestoneInfo() {
     const S = S_();
@@ -45293,7 +45335,7 @@ KINDS.level3 = {
   text: (g, v) => `${Math.max(0, v - g.base)} / ${g.target - g.base}`,
 };
 KINDS.tourism = {
-  cat: 'grow', cool: 360,
+  cat: 'grow', cool: 360, optional: true,
   score: (c) => (c.pop >= 4000 ? 2 : 0),
   make(c) {
     const t = c.st.tourism || 0;
@@ -45344,14 +45386,37 @@ KINDS.fix_water = {
   doneTitle: () => 'Bring water to every building',
   text: (g, v) => `${num(Math.max(0, g.base - v))} / ${num(g.base)} fixed`,
 };
+/** Empty zoned tiles without road access (indices; at most 4000). */
+function noAccessTiles(S) {
+  const out = [], F = VC.F;
+  for (let i = 0; i < S.N && out.length < 4000; i++) if (S.zone[i] && !S.bld[i] && !(S.flags[i] & F.ACCESS)) out.push(i);
+  return out;
+}
+/**
+ * The goal's own tiles still to fix: a tile is fixed when it is zoned with road access (or built on), or a road
+ * now runs over it (those count for at most 35% of the tiles). Dezoning is NOT a fix, so zoning a remote patch
+ * and dezoning it again cannot farm the reward. Older saves without the tile list count the city-wide number.
+ */
+function accessLeft(g) {
+  const S = S_(), t = g.meta && g.meta.tiles;
+  if (!S || !Array.isArray(t)) return iss().zonedNoAccess || 0;
+  const F = VC.F, roadCap = Math.floor(t.length * 0.35);
+  let left = 0, roads = 0;
+  for (const i of t) {
+    if (S.zone[i] && (S.bld[i] || S.flags[i] & F.ACCESS)) continue;
+    if (!S.zone[i] && S.road[i] && roads < roadCap) { roads++; continue; }
+    left++;
+  }
+  return left;
+}
 KINDS.fix_access = {
   cat: 'fix', cool: 240, persist: 30, hold: HOLD_DAYS,
   score: (c) => ((iss().zonedNoAccess || 0) >= 12 ? 7 : 0),
   make(c) {
-    const n = iss().zonedNoAccess || 0;
-    return { title: 'Connect zones to roads', desc: `${num(n)} zoned tiles are more than ${C.ROAD_ACCESS} tiles from a street, so nothing can grow there. Add roads (or dezone).`, icon: '🚧', target: Math.floor(n * 0.2), base: n, unit: 'left', focus: { group: 'roads', locate: 'noaccess', tool: 'road_street' }, reward: { money: nice(cash(0.8) * M.clamp(n / 60, 0.25, 1)) } };
+    const tiles = noAccessTiles(c.S), n = tiles.length;
+    return { title: 'Connect zones to roads', desc: `${num(n)} zoned tiles are more than ${C.ROAD_ACCESS} tiles from a street, so nothing can grow there. Run streets to them.`, icon: '🚧', target: Math.floor(n * 0.2), base: n, unit: 'left', focus: { group: 'roads', locate: 'noaccess', tool: 'road_street' }, reward: { money: nice(cash(0.8) * M.clamp(n / 60, 0.25, 1)) }, meta: { tiles } };
   },
-  cur: () => iss().zonedNoAccess || 0,
+  cur: (c, g) => accessLeft(g),
   prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
   text: (g, v) => `${num(Math.max(0, v - g.target))} tiles to go`,
 };
@@ -45369,7 +45434,7 @@ KINDS.fix_abandoned = {
   text: (g, v) => `${num(M.clamp(g.base - v, 0, g.base - g.target))} / ${num(g.base - g.target)} done`,
 };
 KINDS.fix_traffic = {
-  cat: 'fix', cool: 180, persist: 30, hold: HOLD_DAYS,
+  cat: 'fix', cool: 180, persist: 30, hold: HOLD_DAYS, optional: true,
   score: (c) => ((iss().jammedRoads || 0) >= 12 ? 5 : 0),
   make(c) {
     const n = iss().jammedRoads || 0;
@@ -45508,7 +45573,7 @@ KINDS.policy = {
   prog: (c, g, v) => (v > 0 ? 1 : 0),
 };
 KINDS.clean_power = {
-  cat: 'build', cool: 540,
+  cat: 'build', cool: 540, optional: true,
   score: (c) => (c.pop >= 3000 && counts().power > 0 && cleanShare() < 0.3 && unlocked('wind_turbine') ? 2 : 0),
   make: (c) => ({ title: 'Go green: 50% clean power', desc: 'Wind, solar and nuclear power keep the lights on without the smog.', icon: '🌬️', target: 0.5, base: cleanShare(), unit: 'pct', focus: { group: 'power', overlay: 'pollution' }, reward: { mods: { happiness: 0.02, landValue: 0.03 }, days: 240, label: 'Green reputation' } }),
   cur: () => cleanShare(),
@@ -45704,12 +45769,16 @@ function generate(S, forceKind, opts) {
   const day = S.time.day;
   rnd = M.rng((S.seed ^ Math.imul(day + 7, 2654435761) ^ (G.seq * 97)) >>> 0);
   const cands = [];
+  // a thin card (fewer than 2 goals) halves the rest of grow/build kinds that completed (not stale ones, not
+  // fixes): late-game cities have few fresh kinds left and the card must not sit empty
+  const thin = G.active.length < 2;
   if (forceKind) { if (KINDS[forceKind]) cands.push({ K: KINDS[forceKind], s: 1 }); }
   else {
     for (const key in KINDS) {
       const K = KINDS[key];
       if (G.active.some((g) => g.kind === key)) continue;
-      if ((G.cool[key] || 0) > day) continue;
+      const cool = G.cool[key] || 0;
+      if (cool > day && !(thin && K.cat !== 'fix' && !G.stale[key] && K.cool < ONCE && cool - day <= K.cool / 2)) continue;
       if (noFix && K.cat === 'fix') continue;
       if (K.persist && !(G.seen[key] != null && day - G.seen[key] >= K.persist)) continue;
       let s = 0;
@@ -45850,7 +45919,9 @@ function swap(id) {
   const i = G.active.findIndex((g) => g.id === id);
   if (i < 0 || G.active[i].done) return false;
   const g = G.active.splice(i, 1)[0];
-  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + 120);
+  const K = KINDS[g.kind];
+  // (at least a full cooldown: the thin-card rule in generate() must not hand the swapped kind straight back)
+  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + Math.max(120, K && K.cool < ONCE ? K.cool : 0));
   const n = generate(S, null, { noFix: true });
   G.next = S.time.day + (n ? NEXT_DAYS : 2);
   if (!n) VC.bus.emit('goalsChanged', G.active);
@@ -50731,7 +50802,7 @@ function cityTip() {
   const ms = VC.MILESTONES[mi], next = VC.MILESTONES[mi + 1];
   let s = `<div class="tt-head"><span class="tt-icon">🏙️</span>${escapeHtml(S.name)}</div><div class="tt-desc">${ms.name} · founded ${VC.fmt.date(90)}</div><div class="tt-grid">`;
   s += `<span>Peak population</span><b>${VC.fmt.num(S.peakPop || 0)}</b>`;
-  if (next) s += `<span>Next: ${next.name}</span><b>${VC.fmt.num(next.pop)}</b><span>Reward</span><b class="good">${VC.fmt.money(next.reward)}</b>`;
+  if (next) s += `<span>Next: ${next.name}</span><b>${VC.fmt.num(next.pop)}</b><span>Reward</span><b class="good">${VC.fmt.money((VC.advisors && VC.advisors.milestoneReward ? VC.advisors.milestoneReward(next) : next.reward))}</b>`;
   const md = VC.MAP_TYPES.find((m) => m.key === S.mapType);
   s += `<span>Map</span><b>${md ? md.icon + ' ' + md.name : S.mapType} · ${S.W}²</b>`;
   const df = VC.DIFFICULTY[S.difficulty];
@@ -51519,7 +51590,7 @@ function refresh() {
 /* ---------------- column layout (see header) ---------------- */
 // COL_FLOOR: the smallest max-height (CSS px) — a card header — even when a block sits right under the top;
 // STORY_MIN: the desk story's min-height (goals.css .dk-story); PEEK_MIN: room wanted for a peeked goals list
-const COL_TOP = 70, COL_W = 324, COL_GAP = 8, COL_FLOOR = 44, STORY_MIN = 60, PEEK_MIN = 110;
+const COL_TOP = 70, COL_W = 324, COL_GAP = 8, COL_FLOOR = 44, STORY_MIN = 52, PEEK_MIN = 110;
 const LANE_BLOCKS = ['.hud-bl', '.hud-toolbar', '.hl-notes', '.hud-dock'];
 // size changes of the blocks around the column (minimap legend, tutorial card, …) re-layout it before the
 // next paint; the 5 Hz poll covers moves without a size change
@@ -53067,7 +53138,7 @@ function closeBanner() {
 function renderBanner(fresh) {
   const S = VC.state;
   const top = MS.list[MS.list.length - 1].ms;
-  const reward = MS.list.reduce((a, x) => a + (x.ms.reward || 0), 0);
+  const reward = MS.list.reduce((a, x) => a + (VC.advisors && VC.advisors.milestoneReward ? VC.advisors.milestoneReward(x.ms) : x.ms.reward || 0), 0);
   const unl = MS.unlocks;
   const chips = h('div', { class: 'ms-unlocks' });
   unl.slice(0, 10).forEach((u, i) => chips.appendChild(h('span', { class: 'ms-chip', style: { animationDelay: 0.6 + i * 0.06 + 's' } }, h('b', null, u.icon), u.name)));
@@ -56778,7 +56849,7 @@ function msLadder(c) {
     const chips = h('div', { class: 'pn-ms-unl' }, un.map((u) => h('span', { class: 'pn-ms-chip', 'data-tip': `<b>${U.esc(u.name)}</b><br>${u.kind} · unlocks at ${U.int(u.unlock)} residents` }, u.icon)));
     const el = h('div', { class: 'pn-ms' }, st,
       h('div', { class: 'pn-ms-main' },
-        h('div', { class: 'pn-ms-top' }, h('span', { class: 'pn-ms-icon' }, RANK_ICONS[i] || '🏆'), h('span', { class: 'pn-ms-name' }, m.name), h('span', { class: 'pn-ms-pop' }, i ? U.int(m.pop) + ' residents' : 'Start'), h('span', { class: 'pn-grow' }), m.reward ? h('span', { class: 'pn-ms-reward' }, '+' + U.money(m.reward)) : null),
+        h('div', { class: 'pn-ms-top' }, h('span', { class: 'pn-ms-icon' }, RANK_ICONS[i] || '🏆'), h('span', { class: 'pn-ms-name' }, m.name), h('span', { class: 'pn-ms-pop' }, i ? U.int(m.pop) + ' residents' : 'Start'), h('span', { class: 'pn-grow' }), m.reward ? h('span', { class: 'pn-ms-reward' }, '+' + U.money((VC.advisors && VC.advisors.milestoneReward ? VC.advisors.milestoneReward(m) : m.reward))) : null),
         un.length ? chips : h('div', { class: 'pn-ms-none' }, 'Bragging rights.'))
     );
     box.appendChild(el);
@@ -56852,7 +56923,7 @@ P.defs.milestones = {
       if (n) {
         const f = M.sat((S.peakPop - m.pop) / Math.max(1, n.pop - m.pop));
         prog.set(f, U.int(S.peakPop) + ' / ' + U.int(n.pop));
-        U.txt(next, `Next: ${RANK_ICONS[i + 1] || '🏆'} ${n.name} — ${U.int(Math.max(0, n.pop - S.peakPop))} more residents · reward ${U.money(n.reward)}`);
+        U.txt(next, `Next: ${RANK_ICONS[i + 1] || '🏆'} ${n.name} — ${U.int(Math.max(0, n.pop - S.peakPop))} more residents · reward ${U.money((VC.advisors && VC.advisors.milestoneReward ? VC.advisors.milestoneReward(n) : n.reward))}`);
       } else {
         prog.set(1, 'MAX');
         U.txt(next, '🌟 You have reached the highest rank. Legendary!');
@@ -57706,7 +57777,9 @@ function tabLoans(c) {
     const btn = VC.ui.button('Borrow', () => {
       const o = el._o;
       if (o.available === false) return;
-      VC.ui.confirm(`Borrow <b>${U.money(o.amount)}</b> at <b>${U.rate(o.rate)}</b> for ${o.months} months?<br>You will pay <b>${U.money(o.monthly)}</b> every month (${U.money(o.total || o.monthly * o.months)} in total).`, () => {
+      const fee = U.num(o.fee);
+      const feeTxt = fee > 0 ? `<br>The bank keeps a ${U.money(fee)} arrangement fee: you receive <b>${U.money(o.amount - fee)}</b>.` : '';
+      VC.ui.confirm(`Borrow <b>${U.money(o.amount)}</b> at <b>${U.rate(o.rate)}</b> for ${o.months} months?<br>You will pay <b>${U.money(o.monthly)}</b> every month (${U.money(o.total || o.monthly * o.months)} in total).${feeTxt}`, () => {
         const ok = U.api('econ', 'takeLoan', [o.amount, o.months], false);
         // a real econ explains refusals itself (toast) and plays the cash sound; only speak up when nobody else will
         if (ok === false) {
@@ -57724,7 +57797,7 @@ function tabLoans(c) {
       U.txt(amt, U.money(o.amount));
       U.txt(terms, `${U.rate(o.rate)} APR · ${o.months >= 24 && o.months % 12 === 0 ? o.months / 12 + ' years' : o.months + ' months'}`);
       U.txt(payMo, U.money(o.monthly) + '/mo');
-      U.txt(payTot, o.total ? U.money(o.total) + ' in total' : '');
+      U.txt(payTot, o.total ? U.money(o.total) + ' in total' + (U.num(o.fee) > 0 ? ' + ' + U.money(o.fee) + ' fee' : '') : '');
       U.show(payTot, !!o.total);
       const na = o.available === false;
       U.cls(el, 'na', na);
@@ -57740,7 +57813,12 @@ function tabLoans(c) {
     const bar = U.meter('Repaid', { small: true, color: '#3ddc84' });
     const btn = VC.ui.button('Repay', () => {
       const l = el._l;
-      VC.ui.confirm(`Pay off the remaining <b>${U.money(l.remaining)}</b> of this loan now?`, () => {
+      const loans0 = (VC.state && VC.state.loans) || [];
+      const p = U.api('econ', 'payoffCost', [loans0.indexOf(l)], null);
+      const ask = p && U.num(p.interest) > 0
+        ? `Pay off the remaining <b>${U.money(p.principal)}</b> of this loan now?<br>With ${U.money(p.interest)} of accrued interest that is <b>${U.money(p.total)}</b>.`
+        : `Pay off the remaining <b>${U.money(p ? p.principal : l.remaining)}</b> of this loan now?`;
+      VC.ui.confirm(ask, () => {
         // loans can be paid off or added while the dialog is open: find THIS loan's index now
         const loans = (VC.state && VC.state.loans) || [];
         const i = loans.indexOf(l);
@@ -57749,10 +57827,11 @@ function tabLoans(c) {
           P.refresh();
           return;
         }
+        const cost = U.api('econ', 'payoffCost', [i], null);
         const ok = U.api('econ', 'repayLoan', [i], false);
         // not enough money: VC.money.spend already raised 'noMoney' (one HUD toast); nothing to add here
         if (ok !== false) VC.ui.toast('Loan repaid. The bank thanks you!', { type: 'good', icon: '🏦' });
-        else if (VC.money && VC.money.canAfford && VC.money.canAfford(Math.ceil(U.num(l.remaining)))) VC.ui.toast('The bank could not process this repayment.', { type: 'bad', icon: '🏦', sfx: 'error' });
+        else if (VC.money && VC.money.canAfford && VC.money.canAfford(Math.ceil(U.num(cost ? cost.total : l.remaining)))) VC.ui.toast('The bank could not process this repayment.', { type: 'bad', icon: '🏦', sfx: 'error' });
         P.refresh();
       }, { title: '🏦 Repay loan', yes: 'Repay' });
     }, { icon: '💸', cls: 'small good' });
@@ -60812,9 +60891,18 @@ function each(fn) {
 
 /* ---------------- game start ---------------- */
 /**
+ * Completes the running city's staged sim day (and its month billing) while it is still VC.state, so the 'leave'
+ * autosave written when the city is replaced holds whole days only.
+ */
+function finishOutgoingDay() {
+  if (!VC.state || !VC.sim || typeof VC.sim.finishDay !== 'function') return;
+  try { VC.sim.finishDay(); } catch (e) { console.error('[main] finishing the sim day failed', e); }
+}
+/**
  * Starts a brand-new game. opts: { name, seed, size (tiles), mapType, difficulty, disasters }
  */
 VC.newGame = function (opts = {}) {
+  finishOutgoingDay();
   const seed = opts.seed != null ? opts.seed >>> 0 : (Math.random() * 4294967295) >>> 0;
   const S = VC.createState(Object.assign({}, opts, { seed }));
   if (opts.disasters === false) S.disastersEnabled = false;
@@ -60827,6 +60915,7 @@ VC.newGame = function (opts = {}) {
 };
 /** Installs a fully-populated state (new or loaded) and resets every module. */
 VC.startState = function (S) {
+  finishOutgoingDay();
   VC.world.setState(S);
   VC.world._dirty = null;
   each((m) => m.reset && m.reset(S));

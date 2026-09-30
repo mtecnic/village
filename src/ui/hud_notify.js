@@ -479,7 +479,7 @@ function closeBanner() {
 function renderBanner(fresh) {
   const S = VC.state;
   const top = MS.list[MS.list.length - 1].ms;
-  const reward = MS.list.reduce((a, x) => a + (x.ms.reward || 0), 0);
+  const reward = MS.list.reduce((a, x) => a + (VC.advisors && VC.advisors.milestoneReward ? VC.advisors.milestoneReward(x.ms) : x.ms.reward || 0), 0);
   const unl = MS.unlocks;
   const chips = h('div', { class: 'ms-unlocks' });
   unl.slice(0, 10).forEach((u, i) => chips.appendChild(h('span', { class: 'ms-chip', style: { animationDelay: 0.6 + i * 0.06 + 's' } }, h('b', null, u.icon), u.name)));

@@ -195,7 +195,7 @@ function msLadder(c) {
     const chips = h('div', { class: 'pn-ms-unl' }, un.map((u) => h('span', { class: 'pn-ms-chip', 'data-tip': `<b>${U.esc(u.name)}</b><br>${u.kind} · unlocks at ${U.int(u.unlock)} residents` }, u.icon)));
     const el = h('div', { class: 'pn-ms' }, st,
       h('div', { class: 'pn-ms-main' },
-        h('div', { class: 'pn-ms-top' }, h('span', { class: 'pn-ms-icon' }, RANK_ICONS[i] || '🏆'), h('span', { class: 'pn-ms-name' }, m.name), h('span', { class: 'pn-ms-pop' }, i ? U.int(m.pop) + ' residents' : 'Start'), h('span', { class: 'pn-grow' }), m.reward ? h('span', { class: 'pn-ms-reward' }, '+' + U.money(m.reward)) : null),
+        h('div', { class: 'pn-ms-top' }, h('span', { class: 'pn-ms-icon' }, RANK_ICONS[i] || '🏆'), h('span', { class: 'pn-ms-name' }, m.name), h('span', { class: 'pn-ms-pop' }, i ? U.int(m.pop) + ' residents' : 'Start'), h('span', { class: 'pn-grow' }), m.reward ? h('span', { class: 'pn-ms-reward' }, '+' + U.money((VC.advisors && VC.advisors.milestoneReward ? VC.advisors.milestoneReward(m) : m.reward))) : null),
         un.length ? chips : h('div', { class: 'pn-ms-none' }, 'Bragging rights.'))
     );
     box.appendChild(el);
@@ -269,7 +269,7 @@ P.defs.milestones = {
       if (n) {
         const f = M.sat((S.peakPop - m.pop) / Math.max(1, n.pop - m.pop));
         prog.set(f, U.int(S.peakPop) + ' / ' + U.int(n.pop));
-        U.txt(next, `Next: ${RANK_ICONS[i + 1] || '🏆'} ${n.name} — ${U.int(Math.max(0, n.pop - S.peakPop))} more residents · reward ${U.money(n.reward)}`);
+        U.txt(next, `Next: ${RANK_ICONS[i + 1] || '🏆'} ${n.name} — ${U.int(Math.max(0, n.pop - S.peakPop))} more residents · reward ${U.money((VC.advisors && VC.advisors.milestoneReward ? VC.advisors.milestoneReward(n) : n.reward))}`);
       } else {
         prog.set(1, 'MAX');
         U.txt(next, '🌟 You have reached the highest rank. Legendary!');

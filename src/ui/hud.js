@@ -627,7 +627,7 @@ function cityTip() {
   const ms = VC.MILESTONES[mi], next = VC.MILESTONES[mi + 1];
   let s = `<div class="tt-head"><span class="tt-icon">🏙️</span>${escapeHtml(S.name)}</div><div class="tt-desc">${ms.name} · founded ${VC.fmt.date(90)}</div><div class="tt-grid">`;
   s += `<span>Peak population</span><b>${VC.fmt.num(S.peakPop || 0)}</b>`;
-  if (next) s += `<span>Next: ${next.name}</span><b>${VC.fmt.num(next.pop)}</b><span>Reward</span><b class="good">${VC.fmt.money(next.reward)}</b>`;
+  if (next) s += `<span>Next: ${next.name}</span><b>${VC.fmt.num(next.pop)}</b><span>Reward</span><b class="good">${VC.fmt.money((VC.advisors && VC.advisors.milestoneReward ? VC.advisors.milestoneReward(next) : next.reward))}</b>`;
   const md = VC.MAP_TYPES.find((m) => m.key === S.mapType);
   s += `<span>Map</span><b>${md ? md.icon + ' ' + md.name : S.mapType} · ${S.W}²</b>`;
   const df = VC.DIFFICULTY[S.difficulty];

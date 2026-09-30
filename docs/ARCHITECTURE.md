@@ -264,7 +264,8 @@ full; this is the index.
 * **Buildings/props**: `VC.bldgfx.setGhost`, `handlesLift`, `warm()`, `inspect(id)`, `eng` (shared instancing engine);
   `VC.props`. Construction/fire/powered/disLift are polled per frame (no `changed()` needed).
 * **Models**: `VC.growKit`, `VC.civicKit`, `VC.natureKit` (`treeFor`, `signalVariant`, `seasonPalette`, `toWorld`);
-  `grid.meta.style`, `meta.rocket`, `meta.wire`, `meta.siren`, `meta.nav`, `meta.feet`; `def.lodMinFill`.
+  `grid.meta.style`, `meta.rocket`, `meta.wire`, `meta.siren`, `meta.nav`, `meta.feet`; `def.lodMinFill`, `def.lod: false`
+  (thin street furniture), `def.farCenter` (slim conifers: trunk-centred 1/4-res mesh), `def.openFoliage` (winter skeletons).
 * **Sim**: `growReason(x,z)`, `issues()`, `trafficStats()`, `trafficVolume`, `trafficParent`, `cityTitle()`,
   `powerInfo().deficit/shortage/unpowered`, building fields `simJobs`, `simReplay`.
 * **Econ**: `forecast()` (+ `taxDetail`, `dept`, `policies`, `venues`), `loanOptions()`, `takeLoan(amount|option, months)`,
@@ -273,7 +274,7 @@ full; this is the index.
   `tempMods()` (stored in `S.tempMods`, folded into `S.mods`). Policies carry a level 0..1 (`levels:false` = on/off).
 * **Disasters**: `trigger(type,x,z,opts)`, `info`, `setEnabled`, `nextIn`, `focus`, `clear`, `S.disasterStats`;
   active entry fields documented in `sim/disasters.js`. Buildings being abducted carry `b.disLift`.
-* **Advisors**: `adviceInfo(key)`, `milestoneInfo()`, `toastAchievements`.
+* **Advisors**: `adviceInfo(key)`, `milestoneInfo()`, `milestoneReward(ms)` (grant incl. difficulty `rewardMul`), `toastAchievements`.
 * **Mayor's Goals** (`sim/goals.js`, HUD `ui/hud_goals.js`): `VC.goals.list()`, `claim(id)`, `swap(id)`,
   `focusOf(goal)`, `rewardText/rewardLong`, `refresh()`, `add(kind)` (debug); state `S.goals`; bus `goalDone`,
   `goalClaimed`, `goalRotated`. Anti-farming rules are documented in the file header.

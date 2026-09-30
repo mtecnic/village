@@ -895,7 +895,7 @@ function checkMilestones(S) {
   let idx = from, reward = 0;
   while (idx + 1 < MS.length && peak >= MS[idx + 1].pop) {
     idx++;
-    reward += MS[idx].reward || 0;
+    reward += milestoneReward(MS[idx], S);
   }
   // items unlocked since the previous announcement (never twice: S.adv.announced)
   let items = [];
@@ -1219,6 +1219,16 @@ function onDay() {
 /* ------------------------------------------------------------------ */
 /* Public API                                                           */
 /* ------------------------------------------------------------------ */
+/**
+ * The council's grant for reaching milestone ms in city S: VC.MILESTONES[].reward x the difficulty's rewardMul,
+ * rounded to $500 (0 in sandbox).
+ */
+function milestoneReward(ms, S) {
+  if (!ms || !ms.reward || (S && S.sandbox)) return 0;
+  const d = S && VC.DIFFICULTY[S.difficulty];
+  const mul = d && typeof d.rewardMul === 'number' ? d.rewardMul : 1;
+  return Math.max(500, Math.round((ms.reward * mul) / 500) * 500);
+}
 const A = (VC.advisors = {
   inbox: [],
   news: [],
@@ -1346,6 +1356,8 @@ const A = (VC.advisors = {
   },
   /** Grants an achievement by key (returns true if newly unlocked). */
   grant,
+  /** The grant for reaching milestone ms (VC.MILESTONES entry) in the running city, difficulty included. */
+  milestoneReward: (ms) => milestoneReward(ms, S_()),
   /** Milestone info: {index, current, next, progress 0..1}. */
   milestoneInfo() {
     const S = S_();

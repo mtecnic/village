@@ -56,9 +56,18 @@ function each(fn) {
 
 /* ---------------- game start ---------------- */
 /**
+ * Completes the running city's staged sim day (and its month billing) while it is still VC.state, so the 'leave'
+ * autosave written when the city is replaced holds whole days only.
+ */
+function finishOutgoingDay() {
+  if (!VC.state || !VC.sim || typeof VC.sim.finishDay !== 'function') return;
+  try { VC.sim.finishDay(); } catch (e) { console.error('[main] finishing the sim day failed', e); }
+}
+/**
  * Starts a brand-new game. opts: { name, seed, size (tiles), mapType, difficulty, disasters }
  */
 VC.newGame = function (opts = {}) {
+  finishOutgoingDay();
   const seed = opts.seed != null ? opts.seed >>> 0 : (Math.random() * 4294967295) >>> 0;
   const S = VC.createState(Object.assign({}, opts, { seed }));
   if (opts.disasters === false) S.disastersEnabled = false;
@@ -71,6 +80,7 @@ VC.newGame = function (opts = {}) {
 };
 /** Installs a fully-populated state (new or loaded) and resets every module. */
 VC.startState = function (S) {
+  finishOutgoingDay();
   VC.world.setState(S);
   VC.world._dirty = null;
   each((m) => m.reset && m.reset(S));

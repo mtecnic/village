@@ -254,7 +254,7 @@ function refresh() {
 /* ---------------- column layout (see header) ---------------- */
 // COL_FLOOR: the smallest max-height (CSS px) — a card header — even when a block sits right under the top;
 // STORY_MIN: the desk story's min-height (goals.css .dk-story); PEEK_MIN: room wanted for a peeked goals list
-const COL_TOP = 70, COL_W = 324, COL_GAP = 8, COL_FLOOR = 44, STORY_MIN = 60, PEEK_MIN = 110;
+const COL_TOP = 70, COL_W = 324, COL_GAP = 8, COL_FLOOR = 44, STORY_MIN = 52, PEEK_MIN = 110;
 const LANE_BLOCKS = ['.hud-bl', '.hud-toolbar', '.hl-notes', '.hud-dock'];
 // size changes of the blocks around the column (minimap legend, tutorial card, …) re-layout it before the
 // next paint; the 5 Hz poll covers moves without a size change

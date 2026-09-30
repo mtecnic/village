@@ -25,7 +25,8 @@
  *   to back — and each instance picks a LOD tier by camera distance (0 full mesh, 1 model.lod, 2 a
  *   1/4-resolution mesh built lazily here from model.grid; props stop at tier 1, models without a distinct
  *   LOD mesh (incl. thin street furniture whose model.lod is the model) stay in one bucket, bare deciduous crowns
- *   use their winter LOD mesh for tier 2 as well, and a model's few 1/4-res instances (<= 3) join its LOD-1
+ *   use a 1/4-res mesh of their wood for tier 2, slim conifers (def.farCenter) a trunk-centred one, and a
+ *   model's few 1/4-res instances (<= 3) join its LOD-1
  *   bucket). The LOD distances are the preset's lodDist on high/ultra (moved closer only by dynamic resolution /
  *   wide FOV); on medium/low the full-mesh range is screen-space (see lodDistance). Tiny/far things are skipped (SKIP_DEF:
  *   props end at 0.9 lodDist, their glows stay), and the visible slot indices are counting-sorted per
@@ -322,6 +323,7 @@ const MWS = [];
 const mwMap = new Map();
 let mwKind = new Uint8Array(64), mwHasL2 = new Uint8Array(64), mwL2State = new Uint8Array(64), mwSameL1 = new Uint8Array(64);
 let mwBareL1 = new Uint8Array(64); // 1: bare-crown tree with a winter LOD mesh (its tier 2 is that mesh while bareSeason())
+let mwHasWL2 = new Uint8Array(64); // 1: bare-crown tree whose 1/4-res wood mesh (lvWinter[2]) is built
 const mwSkip = [new Float32Array(64), new Float32Array(64), new Float32Array(64)]; // (factor * lodDist)^2 per mode (camera, shadow near, shadow far), in units of lodDist^2
 const l2Queue = [];
 // lit slots (model has lights) for the static sprite list
@@ -548,6 +550,7 @@ function ensureMwArrays(n) {
   mwL2State = growU8(mwL2State, len, 0);
   mwSameL1 = growU8(mwSameL1, len, 0);
   mwBareL1 = growU8(mwBareL1, len, 0);
+  mwHasWL2 = growU8(mwHasWL2, len, 0);
   for (let k = 0; k < 3; k++) {
     const a = new Float32Array(len);
     a.set(mwSkip[k]);
@@ -607,9 +610,9 @@ function getMW(m, kind) {
  * (Re)reads the mesh handles of wrapper mw from its model (at creation and after a context restore re-uploaded
  * the model): tier 0 full mesh, tier 1 model.lod (or the full mesh: models without a LOD, and thin street furniture
  * whose model.lod is the model itself), tier 2 the 1/4-res mesh built here lazily (dropped: requested again by
- * gather), winter meshes of open-foliage trees. Bare crowns do not use the 1/4-res mesh (at 1/4 resolution the
- * leaves out-vote the skeleton, and a 2-voxel trunk would become a 4-voxel pillar): their tier 2 is the winter LOD
- * mesh (gather folds those instances into the tier-1 bucket while bareSeason()).
+ * gather), winter meshes of open-foliage trees. Bare crowns do not use the leafy 1/4-res mesh (at 1/4 resolution
+ * the leaves out-vote the skeleton): their tier 2 is lvWinter[2], a 1/4-res mesh of the wood alone on a block grid
+ * centred on the trunk (built by buildL2), or the half-res winter LOD mesh until that exists.
  */
 function meshLevels(mw) {
   const m = mw.m, idx = mw.idx;
@@ -625,6 +628,7 @@ function meshLevels(mw) {
   mwL2State[idx] = l0 ? 0 : 3;
   mwSameL1[idx] = l1 === l0 ? 1 : 0;
   mwBareL1[idx] = wl1 ? 1 : 0;
+  mwHasWL2[idx] = 0; // (rebuilt with the 1/4-res mesh)
 }
 /** Overrides skip distances (in units of quality lodDist; Infinity = never skip, 0 = never draw) for a wrapper. */
 function setSkip(mw, cam, shNear, shFar) {
@@ -673,6 +677,25 @@ function downsample4(g, ox = 0, oz = 0, minN = 6, groundN = 3) {
       }
   return o;
 }
+/** 1/4-res mesh of a tree's wood (non-foliage voxels), block grid centred on the trunk; null when empty. */
+function woodL2Mesh(g) {
+  const pal = VC.voxel.palette, FOL = VC.MAT.FOLIAGE;
+  const w = new VC.VoxelGrid(g.sx, g.sy, g.sz);
+  let any = false;
+  for (let i = 0; i < g.v.length; i++) {
+    const c = g.v[i];
+    if (c && !(pal[c * 4 + 3] & FOL)) { w.v[i] = c; any = true; }
+  }
+  if (!any) return null;
+  const ox = (((2 - (g.sx >> 1)) % 4) + 4) % 4, oz = (((2 - (g.sz >> 1)) % 4) + 4) % 4;
+  const m = VC.voxel.mesh(downsample4(w, ox, oz, 3, 2), 4);
+  if (!m.quads) return null;
+  if (ox || oz) {
+    const p = new Int16Array(m.data.buffer, m.data.byteOffset, m.data.byteLength >> 1);
+    for (let k = 0; k < p.length; k += 4) { p[k] -= ox; p[k + 2] -= oz; }
+  }
+  return m;
+}
 function buildL2(mi) {
   if (mwL2State[mi] !== 1) return; // (dropped by a context restore meanwhile, or already built)
   const mw = MWS[mi];
@@ -692,6 +715,11 @@ function buildL2(mi) {
   }
   mw.lv[2] = VC.voxel.upload(mesh);
   mwHasL2[mi] = 1;
+  // bare crowns: a 1/4-res mesh of the wood alone (block grid centred on the trunk) for their tier 2 in winter
+  if (mw.lvWinter && mwBareL1[mi]) {
+    const wm = woodL2Mesh(g);
+    if (wm) { mw.lvWinter[2] = VC.voxel.upload(wm); mwHasWL2[mi] = 1; }
+  }
   mwL2State[mi] = 2;
   B.stats.l2++;
 }
@@ -1683,9 +1711,10 @@ function gather(set, planes, mode) {
         if (mwL2State[mi] === 0) { mwL2State[mi] = 1; l2Queue.push(mi); }
         tier = 1;
       }
-      // bare crowns: the leafy 1/4-res mesh has no skeleton left, the winter LOD mesh draws their tier 2 (the 1/4-res
-      // mesh is still requested above, so it is ready when the leaves come back)
-      if (tier === 2 && bare && mwBareL1[mi]) tier = 1;
+      // bare crowns: the leafy 1/4-res mesh has no skeleton left; their tier 2 is the 1/4-res WOOD mesh
+      // (lvWinter[2], built with the leafy one, which is ready again when the leaves come back) and, until that is
+      // built, the half-res winter LOD mesh
+      if (tier === 2 && bare && mwBareL1[mi] && !mwHasWL2[mi]) tier = 1;
       if (tier === 1 && mwSameL1[mi]) tier = 0; // no distinct LOD mesh: one bucket, one draw
       const bk = mi * 3 + tier;
       if (bCnt[bk]++ === 0) { used[nUsed++] = bk; bMin[bk] = d2; }

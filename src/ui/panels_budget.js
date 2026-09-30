@@ -838,7 +838,9 @@ function tabLoans(c) {
     const btn = VC.ui.button('Borrow', () => {
       const o = el._o;
       if (o.available === false) return;
-      VC.ui.confirm(`Borrow <b>${U.money(o.amount)}</b> at <b>${U.rate(o.rate)}</b> for ${o.months} months?<br>You will pay <b>${U.money(o.monthly)}</b> every month (${U.money(o.total || o.monthly * o.months)} in total).`, () => {
+      const fee = U.num(o.fee);
+      const feeTxt = fee > 0 ? `<br>The bank keeps a ${U.money(fee)} arrangement fee: you receive <b>${U.money(o.amount - fee)}</b>.` : '';
+      VC.ui.confirm(`Borrow <b>${U.money(o.amount)}</b> at <b>${U.rate(o.rate)}</b> for ${o.months} months?<br>You will pay <b>${U.money(o.monthly)}</b> every month (${U.money(o.total || o.monthly * o.months)} in total).${feeTxt}`, () => {
         const ok = U.api('econ', 'takeLoan', [o.amount, o.months], false);
         // a real econ explains refusals itself (toast) and plays the cash sound; only speak up when nobody else will
         if (ok === false) {
@@ -856,7 +858,7 @@ function tabLoans(c) {
       U.txt(amt, U.money(o.amount));
       U.txt(terms, `${U.rate(o.rate)} APR · ${o.months >= 24 && o.months % 12 === 0 ? o.months / 12 + ' years' : o.months + ' months'}`);
       U.txt(payMo, U.money(o.monthly) + '/mo');
-      U.txt(payTot, o.total ? U.money(o.total) + ' in total' : '');
+      U.txt(payTot, o.total ? U.money(o.total) + ' in total' + (U.num(o.fee) > 0 ? ' + ' + U.money(o.fee) + ' fee' : '') : '');
       U.show(payTot, !!o.total);
       const na = o.available === false;
       U.cls(el, 'na', na);
@@ -872,7 +874,12 @@ function tabLoans(c) {
     const bar = U.meter('Repaid', { small: true, color: '#3ddc84' });
     const btn = VC.ui.button('Repay', () => {
       const l = el._l;
-      VC.ui.confirm(`Pay off the remaining <b>${U.money(l.remaining)}</b> of this loan now?`, () => {
+      const loans0 = (VC.state && VC.state.loans) || [];
+      const p = U.api('econ', 'payoffCost', [loans0.indexOf(l)], null);
+      const ask = p && U.num(p.interest) > 0
+        ? `Pay off the remaining <b>${U.money(p.principal)}</b> of this loan now?<br>With ${U.money(p.interest)} of accrued interest that is <b>${U.money(p.total)}</b>.`
+        : `Pay off the remaining <b>${U.money(p ? p.principal : l.remaining)}</b> of this loan now?`;
+      VC.ui.confirm(ask, () => {
         // loans can be paid off or added while the dialog is open: find THIS loan's index now
         const loans = (VC.state && VC.state.loans) || [];
         const i = loans.indexOf(l);
@@ -881,10 +888,11 @@ function tabLoans(c) {
           P.refresh();
           return;
         }
+        const cost = U.api('econ', 'payoffCost', [i], null);
         const ok = U.api('econ', 'repayLoan', [i], false);
         // not enough money: VC.money.spend already raised 'noMoney' (one HUD toast); nothing to add here
         if (ok !== false) VC.ui.toast('Loan repaid. The bank thanks you!', { type: 'good', icon: '🏦' });
-        else if (VC.money && VC.money.canAfford && VC.money.canAfford(Math.ceil(U.num(l.remaining)))) VC.ui.toast('The bank could not process this repayment.', { type: 'bad', icon: '🏦', sfx: 'error' });
+        else if (VC.money && VC.money.canAfford && VC.money.canAfford(Math.ceil(U.num(cost ? cost.total : l.remaining)))) VC.ui.toast('The bank could not process this repayment.', { type: 'bad', icon: '🏦', sfx: 'error' });
         P.refresh();
       }, { title: '🏦 Repay loan', yes: 'Repay' });
     }, { icon: '💸', cls: 'small good' });

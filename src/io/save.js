@@ -550,7 +550,8 @@ function startInc(S) {
 function restartInc() {
   const j = inc;
   j.tries++;
-  wholeDay(j.S); // whole days only (the hold below then keeps new days from starting)
+  wholeDay(j.S); // whole days only, and no new day may start before the first slice (sim.update runs first)
+  holdSim(j.S, true);
   j.sig = structSig(j.S);
   j.gen = codec().snapshotGen(j.S, collectExtra(j.S), { speed: storedSpeed(j.S) });
 }

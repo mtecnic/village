@@ -344,9 +344,9 @@ for (const p of VC.POLICIES) VC.POLICY[p.key] = p;
 /* ------------------------------------------------------------------ */
 VC.MILESTONES = [
   { pop: 0, name: 'Hamlet', reward: 0 },
-  { pop: 250, name: 'Village', reward: 4000 },
-  { pop: 1000, name: 'Town', reward: 8000 },
-  { pop: 3000, name: 'Small City', reward: 12000 },
+  { pop: 250, name: 'Village', reward: 3000 },
+  { pop: 1000, name: 'Town', reward: 6000 },
+  { pop: 3000, name: 'Small City', reward: 10000 },
   { pop: 10000, name: 'City', reward: 25000 },
   { pop: 25000, name: 'Large City', reward: 40000 },
   { pop: 50000, name: 'Metropolis', reward: 60000 },

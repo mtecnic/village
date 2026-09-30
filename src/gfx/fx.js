@@ -95,6 +95,7 @@ const FXL = (VC.fx = {
       updateWeather(S, rdt);
       updateBolts(S, rdt);
       rainSplashes(S, rdt);
+      fogPuffs(S, rdt);
     }
     FXL.batch.begin();
     FXL.glows.begin();
@@ -385,6 +386,23 @@ function rainSplashes(S, rdt) {
   }
 }
 
+/** Low drifting fog banks near the ground (and hugging water) when the fog is thick. */
+let fogAcc = 0;
+function fogPuffs(S, rdt) {
+  const Pt = VC.particles;
+  if (!Pt || W.fog < 0.3) return;
+  const cam = VC.camera;
+  if (cam.dist > 110) return;
+  fogAcc = Math.min(6, fogAcc + (W.fog - 0.25) * 10 * rdt);
+  const ext = M.clamp(cam.dist * 0.7, 12, 50);
+  while (fogAcc >= 1) {
+    fogAcc -= 1;
+    const x = cam.tx + (rnd() * 2 - 1) * ext, z = cam.tz + (rnd() * 2 - 1) * ext;
+    const y = VC.fxgl.surfaceY(M.clamp(x, 0, S.W - 1), M.clamp(z, 0, S.H - 1)) + 0.3 + rnd() * 0.8;
+    Pt.emit('fog', x, y, z, { vx: 0, vy: 0, vz: 0, size: 1.6 + rnd() * 2.2, alpha: 0.12 + W.fog * 0.12 });
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* GL: precipitation + bolts                                             */
 /* ------------------------------------------------------------------ */
@@ -421,7 +439,8 @@ void main(){
     wp = head - vel * q.y * uRain.w * (0.7 + 0.6 * h.z) + side * (q.x * 2.0 - 1.0) * w;
   }
   vUv = q * 2.0 - 1.0;
-  float edge = 1.0 - smoothstep(ext * 0.6, ext, length(head.xz - uBox.xz));
+  float ground = max(tileData(head.xz).r * 255.0 * 0.25, SEA_Y); // terrain top: no drops inside hills
+  float edge = (1.0 - smoothstep(ext * 0.6, ext, length(head.xz - uBox.xz))) * step(ground, head.y);
   float near = smoothstep(0.6, 2.5, dc);
   float vert = smoothstep(0.0, 1.5, fy) * (1.0 - smoothstep(Hh - 2.0, Hh, fy));
   vA = edge * near * vert * (0.55 + 0.45 * h.x) * uWindV.w;

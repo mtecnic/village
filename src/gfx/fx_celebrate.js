@@ -118,7 +118,6 @@ const Cel = (VC.fxCel = {
       queue.splice(k, 1);
       const gy = VC.fxgl.surfaceY(M.clamp(q.x, 0, S.W - 1), M.clamp(q.z, 0, S.H - 1));
       shells.push({ x: q.x, y: gy + 0.3, z: q.z, vx: (rnd() - 0.5) * 1.4, vy: 9 + rnd() * 3, vz: (rnd() - 0.5) * 1.4, fuse: 0.95 + rnd() * 0.5, c1: Math.floor(rnd() * FW_COLS.length), c2: Math.floor(rnd() * FW_COLS.length), pat: pickPattern() });
-      if (sfxT <= 0) { VC.fxgl.sfx('firework_launch', q.x, q.z, 0.5, 120); sfxT = 0.1; }
     }
     // rising shells
     for (let k = shells.length - 1; k >= 0; k--) {
@@ -142,7 +141,7 @@ const Cel = (VC.fxCel = {
       if (!Pt) continue;
       if (p.kind === 'crackle') {
         Pt.burst('crackle', p.x, p.y, p.z, 28, { jitter: 2.6 });
-        if (sfxT <= 0) { VC.fxgl.sfx('crackle', p.x, p.z, 0.5, 120); sfxT = 0.08; }
+        if (sfxT <= 0) { VC.bus.emit('sfx', { name: 'firework', x: p.x, z: p.z, vol: 0.35, rate: 1.5 }); sfxT = 0.08; }
       } else if (p.kind === 'confetti') Pt.burst('confetti', p.x, p.y, p.z, p.c, { jitter: 1 });
     }
     updateLaunches(S, rdt, Pt);

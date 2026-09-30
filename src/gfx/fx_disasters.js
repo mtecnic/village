@@ -342,6 +342,7 @@ H.monster = function (e, st, dt, S, B, G) {
     const fx = Math.cos(st.h), fz = Math.sin(st.h);
     const px = e.x - fz * side * 0.6 * scale, pz = e.z + fx * side * 0.6 * scale;
     if (inWater) {
+      VC.fxgl.sfx('splash', px, pz, 0.8, 90);
       Pt.burst('splash', px, C.SEA_Y + 0.1, pz, 40, { spread: 3.5 });
       Pt.burst('wake', px, C.SEA_Y + 0.02, pz, 8, { jitter: 1 });
     } else {

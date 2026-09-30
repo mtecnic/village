@@ -19,7 +19,8 @@
  *   building emitters (VC.models emitters: smoke/steam/fire/sparkle/fountain) of built, powered,
  *   non-abandoned buildings; burning buildings (b.fire > 0): flames, embers, smoke column, light pool;
  *   construction dust (and welding sparks at night); debris + dust on bldRemove (bulldoze/disaster/fire)
- *   coloured from the building's model; dust puffs for 'built' events; sparkles on level-ups.
+ *   coloured from the building's model; dust puffs for 'built' events; sparkles on level-ups;
+ *   seasonal ambience (spring petals, autumn leaves, summer-night fireflies, winter chimney smoke).
  */
 const M = VC.M, C = VC.C;
 const MAX = 6000;
@@ -43,6 +44,7 @@ const TYPES = {
   spark: { k: K_ADD, life: [0.5, 1.1], size: [0.035, 0.06], grow: 0.5, col: [5, 2.6, 0.8], a: 1, grav: 6, drag: 0.6, spread: 2.6, vy: 2.2, jit: 0.05 },
   ember: { k: K_ADD, life: [1.2, 2.4], size: [0.03, 0.05], grow: 0.6, col: [4, 1.3, 0.25], a: 1, buoy: 0.9, drag: 0.8, wind: 1, spread: 0.7, vy: 1.3, jit: 0.3, flicker: 1 },
   firework: { k: K_ADD, life: [1.4, 2.4], size: [0.13, 0.18], grow: 0.3, col: [3, 3, 3], a: 1, grav: 1.1, drag: 1.5, spread: 5, jit: 0, flicker: 0.45 },
+  firefly: { k: K_ADD, life: [3, 5], size: [0.05, 0.07], grow: 1, col: [2.2, 3.6, 0.6], a: 1, drag: 1.2, spread: 0.25, vy: 0.05, jit: 0.4, flutter: 0.5, pulse: 2.6 },
   willow: { k: K_ADD, life: [2.4, 3.4], size: [0.07, 0.1], grow: 0.5, col: [4, 2.6, 0.9], a: 1, grav: 2.4, drag: 2.4, spread: 4.5, jit: 0, flicker: 0.7 },
   crackle: { k: K_STAR, life: [0.25, 0.5], size: [0.1, 0.16], grow: 0.4, col: [5, 4.5, 3.5], a: 1, grav: 1, drag: 2, spread: 1.2, jit: 0.8 },
   flash: { k: K_ADD, life: [0.12, 0.22], size: [1.4, 2], grow: 1.6, col: [6, 4, 2.4], a: 1, jit: 0 },
@@ -60,6 +62,8 @@ const TYPE_ID = {};
 TYPE_NAMES.forEach((k, i) => (TYPE_ID[k] = i));
 const CONFETTI_COLS = [[1, 0.2, 0.25], [1, 0.8, 0.1], [0.2, 0.6, 1], [0.3, 0.9, 0.35], [0.9, 0.35, 1], [1, 0.55, 0.1], [1, 1, 1]];
 const LEAF_COLS = [[0.2, 0.42, 0.1], [0.32, 0.5, 0.12], [0.55, 0.45, 0.1], [0.7, 0.32, 0.08]];
+const AUTUMN_COLS = [[0.75, 0.3, 0.05], [0.85, 0.5, 0.08], [0.6, 0.16, 0.05], [0.5, 0.35, 0.12], [0.9, 0.7, 0.15]];
+const PETAL_COLS = [[1, 0.7, 0.8], [1, 0.85, 0.9], [0.98, 0.95, 0.97], [0.95, 0.55, 0.75]];
 
 /* ---------------- SoA pool ---------------- */
 const px = new Float32Array(MAX), py = new Float32Array(MAX), pz = new Float32Array(MAX);
@@ -315,6 +319,7 @@ function buildInstances() {
     let a = ca[i] * Math.min(1, t * 10) * (1 - M.smoothstep(0.55, 1, t));
     if (kind === K_ADD || kind === K_STAR || kind === K_FIRE) {
       if (T.flicker) a *= 1 - T.flicker * (0.5 + 0.5 * Math.sin(TIME * 23 + seed[i] * 50)) * M.smoothstep(0.4, 1, t);
+      if (T.pulse) a *= 0.1 + 0.9 * Math.max(0, Math.sin(TIME * T.pulse + seed[i] * 40));
       const o = nAdd++ * 12, d = addData;
       let r = cr[i], g = cg[i], b = cb[i];
       if (kind === K_FIRE) {
@@ -368,6 +373,8 @@ function buildInstances() {
 /* Automatic effects                                                     */
 /* ------------------------------------------------------------------ */
 const emitList = []; // buildings with emitters near the camera
+const hearthList = []; // winter: small houses with a chimney fire near the camera
+let season = 1, natureAcc = 0;
 const burnList = []; // burning buildings near the camera
 const buildList = []; // buildings under construction
 const emCache = new WeakMap(); // building -> { model, rot, x, z, pts: Float32Array(x,y,z,typeId,rate), acc }
@@ -376,6 +383,19 @@ let scanT = 0;
 const EM_TYPES = { smoke: 0, steam: 1, fire: 2, sparkle: 3, fountain: 4 };
 const EM_NAMES = ['smoke', 'steam', 'fire', 'sparkle', 'fountain'];
 const EM_RATE = [1.4, 1.7, 6, 2, 26];
+
+/** VC.models.forBuilding(b) memoized per building (re-resolved when a model-affecting field changes). */
+const modelMemo = new WeakMap();
+function modelOf(b) {
+  const sig = (b.level | 0) + (b.den | 0) * 4 + (b.zt | 0) * 16 + (b.wealth | 0) * 64 + (b.rot | 0) * 256 + (b.w | 0) * 1024 + (b.d | 0) * 65536 + (b.variant | 0) * 4194304;
+  let e = modelMemo.get(b);
+  if (e && e.sig === sig && e.key === b.key) return e.m;
+  let m = null;
+  try { m = VC.models.forBuilding(b); } catch (err) { m = null; }
+  modelMemo.set(b, { sig, key: b.key, m });
+  return m;
+}
+VC.fxgl.modelOf = modelOf;
 
 function emittersOf(b, m) {
   let c = emCache.get(b);
@@ -389,7 +409,9 @@ function emittersOf(b, m) {
     pts[k * 5 + 3] = EM_TYPES[e.type] != null ? EM_TYPES[e.type] : 0;
     pts[k * 5 + 4] = e.rate == null ? 1 : e.rate;
   }
-  c = { model: m, rot: b.rot, x: b.x, z: b.z, pts, acc: new Float32Array(list.length) };
+  const acc = new Float32Array(list.length);
+  for (let k = 0; k < acc.length; k++) acc[k] = rnd(); // random phase: puffs start right away, unsynchronized
+  c = { model: m, rot: b.rot, x: b.x, z: b.z, pts, acc };
   emCache.set(b, c);
   return c;
 }
@@ -400,6 +422,9 @@ function scan(S) {
   const R2 = R * R;
   emitList.length = 0;
   burnList.length = 0;
+  hearthList.length = 0;
+  season = VC.fxgl.season(S);
+  const H2 = R2 * 0.3;
   for (const b of S.buildings.values()) {
     const bx = b.x + b.w * 0.5, bz = b.z + b.d * 0.5;
     const dx = bx - cam.tx, dz = bz - cam.tz;
@@ -409,7 +434,8 @@ function scan(S) {
       continue;
     }
     if (d2 > R2 || b.built < 1 || b.abandoned || b.powered === false || b.key === 'rubble') continue;
-    const m = VC.models.forBuilding(b);
+    if (season === 3 && d2 < H2 && b.key === 'grow' && b.zt === 1 && (b.den === 1 || b.level === 1) && hearthList.length < 48) hearthList.push(b);
+    const m = modelOf(b);
     if (!m || !m.emitters || !m.emitters.length) continue;
     if (!F.sphere(bx, VC.world.topY(b.x, b.z) + m.height * 0.5, bz, m.height + Math.max(b.w, b.d) + 3)) continue;
     emitList.push(b);
@@ -441,7 +467,7 @@ function autoEffects(S, dt) {
     for (let n = 0; n < emitList.length; n++) {
       const b = emitList[n];
       if (!VC.state.buildings.has(b.id)) continue;
-      const m = VC.models.forBuilding(b);
+      const m = modelOf(b);
       if (!m) continue;
       const c = emittersOf(b, m);
       const pts = c.pts;
@@ -468,7 +494,7 @@ function autoEffects(S, dt) {
   for (let n = 0; n < burnList.length; n++) {
     const b = burnList[n];
     if (!(b.fire > 0) || !VC.state.buildings.has(b.id)) continue;
-    const m = VC.models.forBuilding(b);
+    const m = modelOf(b);
     const hgt = Math.max(0.4, (m && m.height) || b.hgt || 1);
     const gy = VC.world.topY(b.x, b.z);
     const area = b.w * b.d;
@@ -494,6 +520,8 @@ function autoEffects(S, dt) {
     }
     if (r() < 2.5 * lod * dt * f) spawn(TYPE_ID.ember, cxw + (r() - 0.5) * b.w, gy + hgt * r(), czw + (r() - 0.5) * b.d, null, true);
   }
+  // ---- seasonal ambience ----
+  if (room) nature(S, dt, night);
   // ---- construction sites ----
   if (room && buildList.length) {
     for (let n = 0; n < buildList.length; n++) {
@@ -509,12 +537,60 @@ function autoEffects(S, dt) {
         spawn(TYPE_ID.dust, x, gy + 0.1, z, { vx: (r() - 0.5) * 0.4, vy: 0.25, vz: (r() - 0.5) * 0.4, size: 0.25, alpha: 0.35 }, false);
       }
       if (night > 0.3 && r() < 0.7 * dt) {
-        const m = VC.models.forBuilding(b);
+        const m = modelOf(b);
         const top = gy + Math.max(0.3, (m ? m.height : 1) * b.built);
         spawn(TYPE_ID.spark, b.x + r() * b.w, top, b.z + r() * b.d, { spread: 1.4 }, true);
         spawn(TYPE_ID.spark, b.x + r() * b.w, top, b.z + r() * b.d, { spread: 1.4 }, true);
       }
     }
+  }
+}
+
+/**
+ * Seasonal touches around the camera: cherry petals in spring, falling leaves in autumn (more in wind),
+ * fireflies on summer nights, wood smoke from small houses in winter.
+ */
+function nature(S, dt, night) {
+  const cam = VC.camera;
+  if (cam.dist > 75) return;
+  const r = rnd, wx = S.weather || {};
+  const wet = wx.type === 'rain' || wx.type === 'storm' || wx.type === 'snow';
+  const wa = wx.windDir || 0, ws = 0.3 + (wx.wind || 0.3) * 1.5;
+  // winter hearths
+  if (season === 3) {
+    for (let n = 0; n < hearthList.length; n++) {
+      if (r() > 0.4 * dt) continue;
+      const b = hearthList[n];
+      if (!S.buildings.has(b.id)) continue;
+      const m = modelOf(b);
+      const y = VC.world.topY(b.x, b.z) + ((m && m.height) || b.hgt || 1) + 0.05;
+      spawn(TYPE_ID.smoke, b.x + b.w * (0.3 + r() * 0.4), y, b.z + b.d * (0.3 + r() * 0.4), { vx: 0, vy: 0.5, vz: 0, size: 0.1, life: 4 + r() * 2, color: [0.55, 0.55, 0.58], alpha: 0.28 }, false);
+    }
+    return;
+  }
+  let rate = 0;
+  if (season === 0 && !wet && night < 0.5) rate = 8;
+  else if (season === 2 && night < 0.6) rate = 10 + (wx.wind || 0) * 14;
+  else if (season === 1 && night > 0.55 && !wet) rate = 22;
+  if (!rate) return;
+  natureAcc = Math.min(12, natureAcc + rate * dt);
+  const R = M.clamp(cam.dist * 0.5, 8, 26);
+  let guard = 0;
+  while (natureAcc >= 1 && guard++ < 24) {
+    natureAcc -= 1;
+    const x = cam.tx + (r() * 2 - 1) * R, z = cam.tz + (r() * 2 - 1) * R;
+    if (x < 0 || z < 0 || x >= S.W || z >= S.H) continue;
+    const i = Math.floor(z) * S.W + Math.floor(x);
+    if (S.height[i] < C.SEA) continue;
+    const gy = S.height[i] * C.STEP;
+    if (season === 1) {
+      if (S.bld[i] || S.road[i]) continue;
+      spawn(TYPE_ID.firefly, x, gy + 0.2 + r() * 0.7, z, null, true);
+      continue;
+    }
+    if (!S.trees[i]) continue;
+    const cols = season === 0 ? PETAL_COLS : AUTUMN_COLS;
+    spawn(TYPE_ID.leaf, x, gy + 0.9 + r() * 0.6, z, { vx: Math.cos(wa) * ws * 0.4, vy: -0.1, vz: Math.sin(wa) * ws * 0.4, colors: cols, size: season === 0 ? 0.04 : 0.055, life: 5 + r() * 3 }, false);
   }
 }
 

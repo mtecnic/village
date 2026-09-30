@@ -741,6 +741,15 @@ function leaderGap(i) {
   return best;
 }
 
+/** Impatient drivers: an occasional horn in jams close to the camera (globally throttled). */
+let lastHonk = -1e9;
+function honk(i) {
+  const cam = VC.camera;
+  if (A.clock - lastHonk < 5 || rnd() > 0.35 || Math.hypot(posX[i] - cam.tx, posZ[i] - cam.tz) > 25 || cam.dist > 45) return;
+  lastHonk = A.clock;
+  VC.bus.emit('sfx', { name: 'horn', x: posX[i], z: posZ[i], vol: 0.5 });
+}
+
 /** True if a vehicle travelling on the other axis is currently inside intersection tile n. */
 function crossTraffic(n, d) {
   const xAxis = d < 2;
@@ -793,6 +802,7 @@ function step(dt) {
     brake[i] = dv < -0.02 || spd[i] < 0.05 ? Math.min(1, brake[i] + dt * 6) : Math.max(0, brake[i] - dt * 3);
     if (spd[i] < 0.03 && want < 0.03) {
       wait[i] += dt;
+      if (wait[i] > 3.5 && wait[i] - dt <= 3.5 && !isD) honk(i);
       if (wait[i] > (isD ? 1.5 : 7) && !(stopT[i] <= 1)) { ghost[i] = 1.6; wait[i] = 0; }
     } else wait[i] = 0;
     let nt = t + (spd[i] * dt) / len;

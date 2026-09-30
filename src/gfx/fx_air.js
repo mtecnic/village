@@ -279,7 +279,6 @@ function startAirportMove(b, takeoff) {
     Object.assign(p, { phase: 'approach', x: r.cx - ux * (r.L + D), z: r.cz - uz * (r.L + D), y: r.y + D * 0.075, speed: 6.5, onGround: false });
   }
   planes.push(p);
-  VC.fxgl.sfx('plane', r.cx, r.cz, 0.7, 120);
 }
 function stepAirportPlane(p, dt) {
   const r = p.rw;
@@ -679,7 +678,8 @@ function newFlock(gull, cam) {
 function updateBirds(dt) {
   const cam = VC.camera, env = VC.gfx.env || {}, wx = S.weather || {};
   const ok = (env.night || 0) < 0.5 && wx.type !== 'rain' && wx.type !== 'storm' && wx.type !== 'snow';
-  const land = flocks.filter((f) => !f.gull && !f.leave).length, gulls = flocks.filter((f) => f.gull && !f.leave).length;
+  let land = 0, gulls = 0;
+  for (let k = 0; k < flocks.length; k++) if (!flocks[k].leave) flocks[k].gull ? gulls++ : land++;
   if (ok && cam.dist < 120) {
     if (land < 3 && rnd() < dt * 0.3) newFlock(false, cam);
     if (gulls < 1 && waterTiles > 60 && rnd() < dt * 0.2) newFlock(true, cam);
@@ -773,7 +773,7 @@ function updateBalloons(dt) {
     if (b.burnT <= 0) {
       b.burn = 1.2;
       b.burnT = 4 + rnd() * 6;
-      VC.fxgl.sfx('burner', b.x, b.z, 0.4, 50);
+      VC.fxgl.sfx('fire', b.x, b.z, 0.3, 50);
     }
     if (b.burn > 0) {
       b.burn -= dt;

@@ -149,7 +149,11 @@ const hud = (VC.hud = {
     tAcc += rdt;
     if (tAcc >= 0.2) { tAcc = 0; safe(() => refreshTop(false), 'refreshTop'); }
     slowAcc += rdt;
-    if (slowAcc >= 1) { slowAcc = 0; safe(refreshDockBadges, 'badges'); }
+    if (slowAcc >= 1) {
+      slowAcc = 0;
+      safe(refreshDockBadges, 'badges');
+      if (T.bar.scrollWidth > T.bar.clientWidth + 1) layoutTop(); // numbers grew: compact further
+    }
     fpsAcc += rdt;
     if (fpsAcc >= 0.5) { fpsAcc = 0; refreshFps(); }
     infoAcc += rdt;
@@ -343,6 +347,8 @@ function renameCity() {
     S.name = v.slice(0, 40);
     cache.delete(T.name);
     refreshTop(true);
+    layoutTop();
+    VC.bus.emit('cityRenamed', S.name);
     VC.bus.emit('toast', { text: `Welcome to <b>${escapeHtml(S.name)}</b>!`, type: 'good', icon: '🏙️' });
   }, { placeholder: 'City name', maxLength: 40, ok: 'Rename' });
 }
@@ -392,6 +398,11 @@ function weatherIcon(S) {
     }
   }
 }
+/** Day-phase glyph for the clock: sunrise, day, sunset, night. */
+function todIcon(S) {
+  const t = todOf(S);
+  return t > 0.2 && t < 0.3 ? '🌅' : t >= 0.3 && t <= 0.7 ? '☀️' : t > 0.7 && t < 0.8 ? '🌇' : '🌙';
+}
 function clock(S) {
   const t = todOf(S);
   const mins = Math.floor((t * 24 * 60) / 10) * 10;
@@ -439,7 +450,7 @@ function refreshTop(force) {
   setText(T.date, VC.fmt.fullDate(S.time.day));
   const month = Math.floor(S.time.day / VC.C.DAYS_PER_MONTH) % 12;
   const season = SEASONS[month];
-  setText(T.dsub, season.icon + ' ' + season.name + ' · ' + clock(S));
+  setText(T.dsub, season.icon + ' ' + season.name + ' · ' + todIcon(S) + ' ' + clock(S));
   setText(T.wx, weatherIcon(S));
   setCls(T.dateSeg, 'paused', S.time.speed === 0);
   // funds
@@ -677,8 +688,16 @@ function refreshDockBadges() {
   }
   refreshDockActive();
 }
+/** Top bar: progressively hides secondary details (c1..c4) until everything fits the width. */
+function layoutTop() {
+  const bar = T.bar;
+  if (!bar || !hud.visible) return;
+  bar.classList.remove('c1', 'c2', 'c3', 'c4');
+  for (let lv = 1; lv <= 4 && bar.scrollWidth > bar.clientWidth + 1; lv++) bar.classList.add('c' + lv);
+}
 /** Fits the dock between the top bar and the ticker: normal -> compact -> two columns. */
 function layoutDock() {
+  layoutTop();
   if (!D.el) return;
   const s = VC.ui.scale();
   const avail = window.innerHeight - 66 - 40;
@@ -702,7 +721,9 @@ function buildReadout() {
   refreshReadoutVis();
 }
 function refreshReadoutVis() {
-  if (T.fps) T.fps.style.display = VC.settings && VC.settings.showFps ? '' : 'none';
+  if (!T.fps) return;
+  T.fps.style.display = VC.settings && VC.settings.showFps ? '' : 'none';
+  refreshFps();
 }
 function refreshFps() {
   if (!T.fps || !(VC.settings && VC.settings.showFps)) return;
@@ -797,7 +818,7 @@ function onKeyCapture(e) {
   if (e.code === 'Escape' || (e.code === 'KeyH' && !e.ctrlKey && !e.metaKey)) {
     if (hud.photo) hud.photoMode(false);
     else hud.toggleUI(true);
-    e.stopPropagation();
+    e.stopImmediatePropagation();
     e.preventDefault();
   }
 }

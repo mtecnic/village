@@ -183,7 +183,7 @@ function buildToolbar(root) {
   window.addEventListener('keydown', (e) => {
     if ((e.code === 'Escape' || e.key === 'Escape') && TB.palGroup) {
       closePalette();
-      e.stopPropagation();
+      e.stopImmediatePropagation();
       e.preventDefault();
     }
   }, true);
@@ -264,7 +264,7 @@ function toolCard(t, cls, disp) {
   const meta = h('span', { class: 'tc-meta' }, h('span', { class: 'tc-cost' }, costText(t)));
   if (t.def) meta.appendChild(h('span', { class: 'tc-size' }, t.def.size[0] + '×' + t.def.size[1]));
   card.appendChild(meta);
-  if (t.locked) card.appendChild(h('span', { class: 'tc-lock' }, '🔒 ' + VC.fmt.short(t.unlock || 0)));
+  if (t.locked) card.appendChild(h('span', { class: 'tc-lock' }, '🔒 ' + VC.fmt.num(t.unlock || 0) + ' pop'));
   else if (t.needsPolicy) card.appendChild(h('span', { class: 'tc-lock' }, '📜 Policy'));
   else if (t.built) card.appendChild(h('span', { class: 'tc-badge' }, '✔ Built'));
   if (t.def && t.def.unique && !t.built && !t.locked) card.appendChild(h('span', { class: 'tc-star', 'data-tip': 'Unique' }, '⭐'));
@@ -328,6 +328,30 @@ function positionPalette() {
   if (notch) notch.style.left = Math.round(VC.M.clamp(bc - x, 18, w - 18)) + 'px';
 }
 
+/**
+ * Keeps the toolbar clear of the minimap: centred on screen when there is room, otherwise centred in the
+ * free space between minimap and dock, and as a last resort compacted (smaller buttons).
+ */
+function layoutToolbar() {
+  const wrap = TB.wrap;
+  if (!wrap || !VC.hud.visible) return;
+  const bl = VC.hud.root.querySelector('.hud-bl');
+  if (!bl) return;
+  // layout math (offset sizes x scale) instead of rects: rects include the slide-in transforms
+  const s = VC.ui.scale(), W = window.innerWidth;
+  const blRight = 10 + bl.offsetWidth * s + 8;
+  const padR = 64 * s;
+  const leftOf = (padL) => padL + (W - padL - (padL ? padR : 0)) / 2 - (TB.bar.offsetWidth * s) / 2;
+  TB.bar.classList.remove('compact');
+  let padL = 0;
+  if (leftOf(0) < blRight) {
+    padL = blRight;
+    if (leftOf(padL) < blRight) TB.bar.classList.add('compact');
+  }
+  wrap.style.paddingLeft = padL ? Math.round(padL) + 'px' : '';
+  wrap.style.paddingRight = padL ? Math.round(padR) + 'px' : '';
+}
+
 /* ---------------- highlight + active tool chip ---------------- */
 function refreshToolHighlight() {
   const cur = (VC.tools && VC.tools.current) || 'select';
@@ -381,15 +405,18 @@ VC.hud.register({
       if (TB.palGroup === e.key) closePalette();
       else openPalette(e.key);
     });
-    VC.bus.on('settings', () => { if (TB.palGroup) requestAnimationFrame(positionPalette); });
-    window.addEventListener('resize', () => { if (TB.palGroup) positionPalette(); });
+    VC.bus.on('settings', () => { layoutToolbar(); if (TB.palGroup) positionPalette(); });
+    window.addEventListener('resize', () => { layoutToolbar(); if (TB.palGroup) positionPalette(); });
   },
   reset() {
     TB.keyGroup.clear();
     closePalette();
     refreshToolHighlight();
   },
-  onShow: refreshToolHighlight,
+  onShow() {
+    refreshToolHighlight();
+    layoutToolbar();
+  },
   onHide: closePalette,
 });
 

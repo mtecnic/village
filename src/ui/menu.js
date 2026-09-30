@@ -14,7 +14,7 @@
  */
 const h = VC.h;
 const MN = { built: false, sub: null, demoCenter: null, tipIdx: 0, tipTimer: 0, logoW: 0 };
-const PZ = { open: false, prev: 1, el: null };
+const PZ = { open: false, prev: 1, el: null, t: 0 };
 
 /* ---------------- 5x7 voxel font ---------------- */
 const FONT = {
@@ -311,9 +311,11 @@ function fade(fn, text) {
 }
 
 /* ---------------- game start / load ---------------- */
-function enterGame() {
+/** Leaves the title screen. instant: no fade (used under the full-screen transition). */
+function enterGame(instant) {
   menu.active = false;
   closeSub();
+  MN.el.classList.toggle('now', !!instant);
   MN.el.classList.remove('show');
   clearInterval(MN.tipTimer);
   VC.camera.cinematic = false;
@@ -321,7 +323,7 @@ function enterGame() {
 /** Starts a real game (used by the new-city dialog). opts as VC.newGame. */
 function startGame(opts) {
   fade(() => {
-    enterGame();
+    enterGame(true);
     VC.ui.closeAll();
     const S = VC.newGame(opts);
     if (VC.tools && VC.tools.select) VC.tools.select('select');
@@ -334,14 +336,16 @@ function startGame(opts) {
 }
 function loadGame(slot) {
   fade(() => {
-    enterGame();
+    enterGame(true);
     VC.ui.closeAll();
     let r;
     try { r = VC.save && VC.save.load ? VC.save.load(slot) : false; } catch (e) { console.error('[menu] load', e); r = false; }
-    Promise.resolve(r).then((ok) => {
-      if (ok === false || ok == null) {
+    // success = a real (non-demo) state is now running, whatever load() returned
+    Promise.resolve(r).catch(() => false).then(() => {
+      if (!VC.state || VC.state.demo) {
         // stay on (or return to) the title screen
         menu.active = true;
+        MN.el.classList.remove('now');
         MN.el.classList.add('show');
         VC.camera.cinematic = true;
         VC.hud.hide();
@@ -380,6 +384,7 @@ function pause() {
   if (!S || menu.active || PZ.open || S.demo) return;
   if (!PZ.el) buildPause();
   PZ.open = true;
+  PZ.t = performance.now(); // the key event that opened the menu must not also close it
   PZ.prev = S.time.speed;
   VC.setSpeed(0);
   VC.ui.closePopovers && VC.ui.closePopovers();
@@ -413,6 +418,7 @@ function onKey(e) {
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
   if (VC.ui.modalCount && VC.ui.modalCount()) return;
   if (e.code === 'Escape') {
+    if (PZ.open && performance.now() - PZ.t < 120) { e.stopImmediatePropagation(); return; }
     if (VC.ui.closeTop()) { /* closed a window */ }
     else if (menu.active && menu.dialogOpen && menu.dialogOpen()) menu.closeDialog();
     else if (menu.active && MN.sub) closeSub();
@@ -420,7 +426,7 @@ function onKey(e) {
     e.preventDefault();
   }
   if (e.code === 'F11' || e.code === 'F12' || e.ctrlKey || e.metaKey) return; // browser keys pass through
-  e.stopPropagation(); // no game hotkeys behind menus
+  e.stopImmediatePropagation(); // no game hotkeys behind menus
 }
 
 const menu = (VC.menu = {
@@ -457,7 +463,7 @@ const menu = (VC.menu = {
     if (VC.gfx && VC.gfx.setOverlay) VC.gfx.setOverlay('none');
     MN.startingDemo = true;
     try { startDemo(); } finally { MN.startingDemo = false; }
-    MN.el.classList.remove('show');
+    MN.el.classList.remove('show', 'now');
     void MN.el.offsetWidth; // restart entrance animations
     MN.el.classList.add('show');
     MN.logoW = 0;
@@ -479,5 +485,9 @@ const menu = (VC.menu = {
   loadGame,
   fade,
   saves,
+  /** Re-reads the save list (Continue button / counts). */
+  refresh: refreshButtons,
+  openLoad,
+  openCredits,
   _root: () => MN.el,
 });

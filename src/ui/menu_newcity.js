@@ -182,19 +182,18 @@ function newCity() {
   const sizes = ui.segmented({ options: Object.keys(VC.MAP_SIZES).map((k) => { const v = VC.MAP_SIZES[k]; return { value: v, label: (SIZE_INFO[v] || { label: k }).label, tip: `${v} × ${v} tiles` }; }), value: o.size, cls: 'nc-sizes', onChange: (v) => { o.size = v; sizeNote.textContent = (SIZE_INFO[v] || {}).note || ''; refreshPreviews(); } });
 
   const toggles = h('div', { class: 'nc-toggles' },
-    ui.toggle({ label: 'Disasters', desc: 'Random fires, tornadoes, meteors…', value: o.disasters, onChange: (v) => (o.disasters = v) }),
-    ui.toggle({ label: 'Tutorial', desc: 'Step-by-step hints', value: o.tutorial, onChange: (v) => (o.tutorial = v) }));
+    ui.toggle({ label: 'Natural disasters', desc: 'Fires, tornadoes, meteors… and worse', value: o.disasters, onChange: (v) => (o.disasters = v) }),
+    ui.toggle({ label: 'Tutorial', desc: 'Friendly step-by-step hints', value: o.tutorial, onChange: (v) => (o.tutorial = v) }));
 
   const lbl = (t) => h('div', { class: 'nc-label' }, t);
   const dialog = h('div', { class: 'nc-dialog' },
     h('div', { class: 'nc-head' }, h('span', { class: 'nc-hicon' }, '🏗️'), h('div', null, h('b', null, 'Found a New City'), h('small', null, 'Choose your land, your name and your challenge')), h('button', { class: 'win-btn', title: 'Back (Esc)', onclick: () => closeDialog() }, '×')),
     h('div', { class: 'nc-body' },
-      h('div', { class: 'nc-left' }, lbl('City name'), nameRow, lbl('Landscape'), maps, lbl('Difficulty'), diff),
+      h('div', { class: 'nc-left' }, lbl('City name'), nameRow, lbl('Landscape'), maps, lbl('Difficulty'), diff, lbl('Options'), toggles),
       h('div', { class: 'nc-right' },
         h('div', { class: 'nc-pv' }, NC.big, NC.bigLabel),
         lbl('Map seed'), seedRow,
-        lbl('Map size'), sizes, sizeNote,
-        toggles)),
+        lbl('Map size'), sizes, sizeNote)),
     h('div', { class: 'nc-foot' },
       VC.ui.button('Back', () => closeDialog(), { cls: 'ghost' }),
       h('span', { class: 'nc-flex' }),

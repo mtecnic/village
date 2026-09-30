@@ -541,13 +541,13 @@ function onKeyCapture(e) {
   if (e.key !== 'Escape' && e.code !== 'Escape') return;
   if (modals.length) {
     modals[modals.length - 1]();
-    e.stopPropagation();
+    e.stopImmediatePropagation();
     e.preventDefault();
     return;
   }
   if (popovers.size) {
     ui.closePopovers();
-    e.stopPropagation();
+    e.stopImmediatePropagation();
     e.preventDefault();
   }
 }

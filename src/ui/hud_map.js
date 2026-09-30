@@ -11,7 +11,7 @@
  * Also exports VC.hud.OVERLAY_DESC {key: text} and VC.hud.overlayGradient(rampKind) -> CSS gradient.
  */
 const h = VC.h, M = VC.M;
-const MM = { size: 184, base: null, bctx: null, img: null, px: null, W: 0, H: 0, dirty: null, full: true, lastBase: 0, camSig: '', drawn: false, open: true, drag: false, bcol: new Map() };
+const MM = { size: 184, base: null, bctx: null, img: null, px: null, W: 0, H: 0, dirty: null, full: true, lastBase: 0, redraw: true, drawn: false, open: true, drag: false, bcol: new Map() };
 
 const OVERLAY_DESC = {
   none: 'The plain city view.',
@@ -119,7 +119,7 @@ function toggleOpen() {
   MM.open = !MM.open;
   MM.el.classList.toggle('collapsed', !MM.open);
   if (VC.settings) { VC.settings.minimapOpen = MM.open; try { localStorage.setItem('voxelpolis.settings', JSON.stringify(VC.settings)); } catch (e) { /* ignore */ } }
-  if (MM.open) { MM.full = true; MM.camSig = ''; }
+  if (MM.open) { MM.full = true; MM.redraw = true; }
 }
 
 /* ---------------- base image ---------------- */
@@ -239,6 +239,16 @@ function updateBase(force) {
 
 /* ---------------- view frustum ---------------- */
 const corner = [0, 0];
+const quad = new Float32Array(8); // frustum corners in minimap px
+const camLast = new Float64Array(7); // last drawn camera state (tx, tz, yaw, pitch, dist, W, H)
+/** True if the camera moved enough since the last minimap draw (no allocations). */
+function camChanged() {
+  const c = VC.camera, g = VC.gfx;
+  const v0 = c.tx, v1 = c.tz, v2 = c.yaw, v3 = c.pitch, v4 = c.dist, v5 = g.W, v6 = g.H;
+  const ch = Math.abs(v0 - camLast[0]) > 0.02 || Math.abs(v1 - camLast[1]) > 0.02 || Math.abs(v2 - camLast[2]) > 0.002 || Math.abs(v3 - camLast[3]) > 0.002 || Math.abs(v4 - camLast[4]) > 0.02 || v5 !== camLast[5] || v6 !== camLast[6];
+  if (ch) { camLast[0] = v0; camLast[1] = v1; camLast[2] = v2; camLast[3] = v3; camLast[4] = v4; camLast[5] = v5; camLast[6] = v6; }
+  return ch;
+}
 function groundPoint(px, py, Y, maxT) {
   const r = VC.camera.screenRay(px, py);
   const o = r.o, d = r.d;
@@ -272,9 +282,16 @@ function draw() {
   const w = gc.clientWidth, hh = gc.clientHeight;
   const Y = cam.ty || VC.C.SEA_Y;
   const maxT = cam.dist * 5 + 40;
-  const pts = [[0, 0], [w, 0], [w, hh], [0, hh]].map(([x, y]) => { const p = groundPoint(x, y, Y, maxT); return [p[0] * sx, p[1] * sz]; });
+  for (let k = 0; k < 4; k++) {
+    const p = groundPoint(k === 1 || k === 2 ? w : 0, k >= 2 ? hh : 0, Y, maxT);
+    quad[k * 2] = p[0] * sx;
+    quad[k * 2 + 1] = p[1] * sz;
+  }
   ctx.beginPath();
-  pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+  ctx.moveTo(quad[0], quad[1]);
+  ctx.lineTo(quad[2], quad[3]);
+  ctx.lineTo(quad[4], quad[5]);
+  ctx.lineTo(quad[6], quad[7]);
   ctx.closePath();
   ctx.fillStyle = 'rgba(255,255,255,0.12)';
   ctx.fill();
@@ -343,11 +360,11 @@ VC.hud.register({
     bus.on('mapsUpdated', refull);
     bus.on('flagsUpdated', refull);
     bus.on('overlay', () => { MM.full = true; MM.lastBase = 0; refreshLegend(); VC.hud.refreshDock && VC.hud.refreshDock(); });
-    bus.on('settings', () => { MM.camSig = ''; });
+    bus.on('settings', () => { MM.redraw = true; });
   },
   reset(S) {
     alloc(S);
-    MM.camSig = '';
+    MM.redraw = true;
     refreshLegend();
   },
   update() {
@@ -355,14 +372,24 @@ VC.hud.register({
     if (!S || !MM.open || VC.hud.uiHidden) return;
     if (MM.W !== S.W || MM.H !== S.H || !MM.px) alloc(S);
     const changed = updateBase(false);
-    const c = VC.camera;
-    const sig = c.tx.toFixed(2) + c.tz.toFixed(2) + c.yaw.toFixed(3) + c.pitch.toFixed(3) + c.dist.toFixed(2) + VC.gfx.W + VC.gfx.H;
-    if (changed || sig !== MM.camSig || !MM.drawn) {
-      MM.camSig = sig;
+    if (camChanged() || changed || MM.redraw || !MM.drawn) {
+      MM.redraw = false;
       draw();
     }
   },
-  onShow() { MM.full = true; MM.camSig = ''; refreshLegend(); },
+  onShow() { MM.full = true; MM.redraw = true; refreshLegend(); },
 });
 
 Object.assign(VC.hud, { openOverlayPicker, OVERLAY_DESC, overlayGradient, overlayLUT: LUT });
+/** Benchmark hook: ms for one full minimap repaint + draw (tests / perf checks). */
+VC.hud.debugMinimap = function () {
+  const S = VC.state;
+  if (!S) return null;
+  if (!MM.px || MM.W !== S.W) alloc(S);
+  const t0 = performance.now();
+  paint(0, 0, S.W - 1, S.H - 1);
+  MM.bctx.putImageData(MM.img, 0, 0);
+  const t1 = performance.now();
+  draw();
+  return { paintMs: +(t1 - t0).toFixed(2), drawMs: +(performance.now() - t1).toFixed(2), size: S.W + 'x' + S.H, buildings: S.buildings.size };
+};

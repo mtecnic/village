@@ -62,6 +62,8 @@ const TYPE_ID = {};
 TYPE_NAMES.forEach((k, i) => (TYPE_ID[k] = i));
 const CONFETTI_COLS = [[1, 0.2, 0.25], [1, 0.8, 0.1], [0.2, 0.6, 1], [0.3, 0.9, 0.35], [0.9, 0.35, 1], [1, 0.55, 0.1], [1, 1, 1]];
 const LEAF_COLS = [[0.2, 0.42, 0.1], [0.32, 0.5, 0.12], [0.55, 0.45, 0.1], [0.7, 0.32, 0.08]];
+const SMOKE_DARK = [0.1, 0.095, 0.09], SMOKE_WOOD = [0.55, 0.55, 0.58];
+const WELD_OPT = { spread: 1.4 };
 const AUTUMN_COLS = [[0.75, 0.3, 0.05], [0.85, 0.5, 0.08], [0.6, 0.16, 0.05], [0.5, 0.35, 0.12], [0.9, 0.7, 0.15]];
 const PETAL_COLS = [[1, 0.7, 0.8], [1, 0.85, 0.9], [0.98, 0.95, 0.97], [0.95, 0.55, 0.75]];
 
@@ -372,6 +374,19 @@ function buildInstances() {
 /* ------------------------------------------------------------------ */
 /* Automatic effects                                                     */
 /* ------------------------------------------------------------------ */
+/** Reusable spawn options for internal emitters (no per-particle object allocation). */
+const SO = { vx: 0, vy: 0, vz: 0, size: null, life: null, alpha: null, color: null, colors: null, emissive: 0, spread: null, jitter: null, grow: null };
+function so(vx, vy, vz, size, life, alpha, color, emissive) {
+  SO.vx = vx; SO.vy = vy; SO.vz = vz;
+  SO.size = size == null ? null : size;
+  SO.life = life == null ? null : life;
+  SO.alpha = alpha == null ? null : alpha;
+  SO.color = color || null;
+  SO.colors = null;
+  SO.emissive = emissive || 0;
+  SO.spread = null; SO.jitter = null; SO.grow = null;
+  return SO;
+}
 const emitList = []; // buildings with emitters near the camera
 const hearthList = []; // winter: small houses with a chimney fire near the camera
 let season = 1, natureAcc = 0;
@@ -483,8 +498,8 @@ function autoEffects(S, dt) {
           if (ty === 4) spawn(TYPE_ID.fountain, x, y, z, null, true);
           else if (ty === 3) spawn(TYPE_ID.sparkle, x, y, z, null, true);
           else if (ty === 2) {
-            spawn(TYPE_ID.fire, x, y, z, { vx: (r() - 0.5) * 0.3, vy: 0.6, vz: (r() - 0.5) * 0.3, size: 0.16 }, false);
-          } else spawn(ty === 1 ? TYPE_ID.steam : TYPE_ID.smoke, x, y, z, { vx: (r() - 0.5) * 0.2, vy: ty === 1 ? 1.1 : 0.8, vz: (r() - 0.5) * 0.2, size: ty === 1 ? 0.3 : 0.26, alpha: ty === 1 ? 0.45 : 0.38 }, false);
+            spawn(TYPE_ID.fire, x, y, z, so((r() - 0.5) * 0.3, 0.6, (r() - 0.5) * 0.3, 0.16), false);
+          } else spawn(ty === 1 ? TYPE_ID.steam : TYPE_ID.smoke, x, y, z, so((r() - 0.5) * 0.2, ty === 1 ? 1.1 : 0.8, (r() - 0.5) * 0.2, ty === 1 ? 0.3 : 0.26, null, ty === 1 ? 0.45 : 0.38), false);
         }
       }
     }
@@ -512,11 +527,11 @@ function autoEffects(S, dt) {
     for (let k = 0; k < 6 && (k < Math.floor(nFire) || r() < nFire - k); k++) {
       const x = b.x + 0.1 + r() * (b.w - 0.2), z = b.z + 0.1 + r() * (b.d - 0.2);
       const y = gy + hgt * (0.3 + 0.75 * Math.sqrt(r()));
-      spawn(TYPE_ID.fire, x, y, z, { vx: 0, vy: 0.8 + r() * 0.6, vz: 0, size: 0.25 + 0.2 * Math.sqrt(area) * r() }, false);
+      spawn(TYPE_ID.fire, x, y, z, so(0, 0.8 + r() * 0.6, 0, 0.25 + 0.2 * Math.sqrt(area) * r()), false);
     }
     const nSmoke = (3 + 4 * Math.sqrt(area)) * f * lod * dt;
     for (let k = 0; k < 3 && (k < Math.floor(nSmoke) || r() < nSmoke - k); k++) {
-      spawn(TYPE_ID.smoke, cxw + (r() - 0.5) * b.w * 0.6, gy + hgt + 0.1, czw + (r() - 0.5) * b.d * 0.6, { vx: 0, vy: 1.3 + r() * 0.4, vz: 0, size: 0.3 + 0.14 * Math.sqrt(area), life: 5 + r() * 3, color: [0.1, 0.095, 0.09], alpha: 0.7, emissive: 0.22 }, false);
+      spawn(TYPE_ID.smoke, cxw + (r() - 0.5) * b.w * 0.6, gy + hgt + 0.1, czw + (r() - 0.5) * b.d * 0.6, so(0, 1.3 + r() * 0.4, 0, 0.3 + 0.14 * Math.sqrt(area), 5 + r() * 3, 0.7, SMOKE_DARK, 0.22), false);
     }
     if (r() < 2.5 * lod * dt * f) spawn(TYPE_ID.ember, cxw + (r() - 0.5) * b.w, gy + hgt * r(), czw + (r() - 0.5) * b.d, null, true);
   }
@@ -534,13 +549,13 @@ function autoEffects(S, dt) {
         const side = r() * 4 | 0;
         const x = side < 2 ? b.x + r() * b.w : side === 2 ? b.x : b.x + b.w;
         const z = side >= 2 ? b.z + r() * b.d : side === 0 ? b.z : b.z + b.d;
-        spawn(TYPE_ID.dust, x, gy + 0.1, z, { vx: (r() - 0.5) * 0.4, vy: 0.25, vz: (r() - 0.5) * 0.4, size: 0.25, alpha: 0.35 }, false);
+        spawn(TYPE_ID.dust, x, gy + 0.1, z, so((r() - 0.5) * 0.4, 0.25, (r() - 0.5) * 0.4, 0.25, null, 0.35), false);
       }
       if (night > 0.3 && r() < 0.7 * dt) {
         const m = modelOf(b);
         const top = gy + Math.max(0.3, (m ? m.height : 1) * b.built);
-        spawn(TYPE_ID.spark, b.x + r() * b.w, top, b.z + r() * b.d, { spread: 1.4 }, true);
-        spawn(TYPE_ID.spark, b.x + r() * b.w, top, b.z + r() * b.d, { spread: 1.4 }, true);
+        spawn(TYPE_ID.spark, b.x + r() * b.w, top, b.z + r() * b.d, WELD_OPT, true);
+        spawn(TYPE_ID.spark, b.x + r() * b.w, top, b.z + r() * b.d, WELD_OPT, true);
       }
     }
   }
@@ -564,7 +579,7 @@ function nature(S, dt, night) {
       if (!S.buildings.has(b.id)) continue;
       const m = modelOf(b);
       const y = VC.world.topY(b.x, b.z) + ((m && m.height) || b.hgt || 1) + 0.05;
-      spawn(TYPE_ID.smoke, b.x + b.w * (0.3 + r() * 0.4), y, b.z + b.d * (0.3 + r() * 0.4), { vx: 0, vy: 0.5, vz: 0, size: 0.1, life: 4 + r() * 2, color: [0.55, 0.55, 0.58], alpha: 0.28 }, false);
+      spawn(TYPE_ID.smoke, b.x + b.w * (0.3 + r() * 0.4), y, b.z + b.d * (0.3 + r() * 0.4), so(0, 0.5, 0, 0.1, 4 + r() * 2, 0.28, SMOKE_WOOD), false);
     }
     return;
   }
@@ -590,7 +605,9 @@ function nature(S, dt, night) {
     }
     if (!S.trees[i]) continue;
     const cols = season === 0 ? PETAL_COLS : AUTUMN_COLS;
-    spawn(TYPE_ID.leaf, x, gy + 0.9 + r() * 0.6, z, { vx: Math.cos(wa) * ws * 0.4, vy: -0.1, vz: Math.sin(wa) * ws * 0.4, colors: cols, size: season === 0 ? 0.04 : 0.055, life: 5 + r() * 3 }, false);
+    const o = so(Math.cos(wa) * ws * 0.4, -0.1, Math.sin(wa) * ws * 0.4, season === 0 ? 0.04 : 0.055, 5 + r() * 3);
+    o.colors = cols;
+    spawn(TYPE_ID.leaf, x, gy + 0.9 + r() * 0.6, z, o, false);
   }
 }
 

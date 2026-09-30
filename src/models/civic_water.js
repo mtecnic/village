@@ -52,6 +52,7 @@ VC.models.define('water_tower', {
     const g = K.grid(1, 1, 40);
     const leg = v === 2 ? P.RUST : v === 1 ? P.STEEL_BLUE : P.METAL_D;
     const legs = [[1, 1], [6, 1], [1, 6], [6, 6]];
+    for (const [x, z] of legs) g.box(x - (x > 3 ? 0 : 1), 0, z - (z > 3 ? 0 : 1), 2, 1, 2, P.CONCRETE);
     for (const [x, z] of legs) g.box(x, 0, z, 1, 22, 1, leg);
     // X-bracing on each side
     for (const [ya, yb] of [[3, 11], [11, 19]]) {

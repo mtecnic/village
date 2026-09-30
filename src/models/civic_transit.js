@@ -169,7 +169,7 @@ VC.models.define('seaport', {
 /* ------------------------------------------------------------------ */
 /* airport (6x4) + rotating radar antenna                              */
 /* ------------------------------------------------------------------ */
-const RADAR = [45.5, 11, 16.5]; // antenna pivot (top of the mast at voxel column 45,16)
+const RADAR = [42.5, 11, 16.5]; // antenna pivot (top of the mast at voxel column 42,16)
 VC.models.define('radar_antenna', {
   gen() {
     const g = new VC.VoxelGrid(9, 4, 3);
@@ -205,7 +205,7 @@ VC.models.define('airport', {
     g.hcyl('x', 3, 34, 6, 24.5, 4.6, (a, y) => (y < 7 ? 0 : a % 4 === 0 ? P.CHROME : P.WHITE));
     K.block(g, 4, 1, 22, 32, 7, 6, { wall: P.CONCRETE_L, win: P.WIN_OFFICE, ribbon: true, floorH: 7, winH: 5, y0: 1, top: 1, margin: 0, faces: 'ns' });
     for (let x = 4; x < 36; x += 4) { g.box(x, 1, 21, 1, 6, 1, P.CHROME); g.box(x, 1, 28, 1, 6, 1, P.CHROME); }
-    for (const [gx, liv] of [[8, P.BLUE], [20, P.RED], [32, P.GREEN]]) {
+    for (const [gx, liv] of [[5, P.BLUE], [17, P.RED], [29, P.GREEN]]) {
       K.vehicle(g, 'jet', gx, 1, 10, 0, liv);
       g.box(gx + 7, 2, 18, 2, 2, 4, P.CONCRETE_L);
       g.box(gx + 8, 1, 18, 1, 1, 1, P.METAL_D);
@@ -223,9 +223,9 @@ VC.models.define('airport', {
     K.beacon(g, 41, 39, 25, 1);
     g.light(42, 34.6, 25.5, K.LC.green, 1.6, true);
     // radar mast (the antenna spins as a part)
-    g.box(44, 0, 15, 3, 1, 3, P.CONCRETE_D);
-    g.box(45, 1, 16, 1, RADAR[1] - 1, 1, P.METAL);
-    g.box(44, RADAR[1] - 1, 15, 3, 1, 3, P.METAL_D);
+    g.box(41, 0, 15, 3, 1, 3, P.CONCRETE_D);
+    g.box(42, 1, 16, 1, RADAR[1] - 1, 1, P.METAL);
+    g.box(41, RADAR[1] - 1, 15, 3, 1, 3, P.METAL_D);
     // landside: drop-off road, taxis, bus
     g.box(0, 0, 29, 48, 1, 3, P.ASPHALT);
     for (let x = 1; x < 48; x += 4) g.box(x, 0, 30, 2, 1, 1, P.ROAD_MARK);

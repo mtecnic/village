@@ -5,6 +5,17 @@
  * sliders, cost, effectiveness, presets), Loans (offers + outstanding), History (charts with range).
  * All numbers come from VC.econ (forecast/deptUpkeep/effectiveness/taxEffect/loanOptions) with
  * fallbacks to S.ledger / catalog upkeep so the window stays meaningful before econ is present.
+ *
+ * WHAT-IF PREVIEW (Taxes + Departments tabs): grabbing a tax or funding slider (pointer or keyboard)
+ * snapshots the city (forecast net, tax effects, funding, power/water supply); while it moves — the
+ * settings apply live, as before — a glass card pinned to the bottom of the tab compares now vs.
+ * that snapshot: monthly net change, R/C/I demand arrows (VC.econ.taxEffect deltas), citizens' mood
+ * and approval, service effectiveness (VC.econ.effectivenessAt, strikes included), the likely knock-on
+ * effects per department (crime, fires, traffic, brownouts…) and strike / diminishing-returns
+ * warnings. It lingers ~2.5 s after release; grabbing the same slider again keeps the snapshot.
+ * The Presets buttons show the same card for the whole budget. Departments also show the city
+ * wage level (forecast().wageMul) and per-row cost breakdown tooltips; the Overview's income and
+ * expense rows explain the state grant, wages and policies in tooltips.
  */
 const P = VC.panels, U = P.util, h = VC.h, M = VC.M;
 const ZK = ['R', 'C', 'I'];
@@ -118,6 +129,289 @@ function effectiveness(key) {
   const f = S.budget[key] != null ? S.budget[key] : 1;
   return U.num(U.api('econ', 'effectiveness', [key], f), f);
 }
+const fundOf = (key) => {
+  const S = VC.state;
+  return S.budget && S.budget[key] != null ? S.budget[key] : 1;
+};
+/** Effectiveness at a funding level (VC.econ curve) incl. the strike penalty if the dept is out. */
+function effAt(key, f) {
+  let e = U.api('econ', 'effectivenessAt', [f], null);
+  if (typeof e !== 'number' || !isFinite(e)) e = f <= 1 ? Math.pow(Math.max(0, f), 0.8) : 1 + 0.4 * (1 - Math.exp(-(f - 1) * 3));
+  if (U.api('econ', 'onStrike', [key], false)) e *= U.num(VC.econ && VC.econ.STRIKE_MUL, 0.7);
+  return e;
+}
+/** Demand / happiness effect of a zone's taxes (VC.econ.taxEffect, else the documented curve). */
+function taxEff(z) {
+  const avg = taxAvg(z);
+  let e = U.api('econ', 'taxEffect', [z], null);
+  if (typeof e !== 'number' || !isFinite(e) || (e === 0 && Math.abs(avg - 9) > 0.5)) e = taxCurve(avg);
+  return e;
+}
+const fmtRate = (r) => (Math.round(U.num(r) * 10) / 10).toString().replace(/\.0$/, '') + '%';
+/** ▲ / ▲▲ / ▲▲▲ (▼ for negative) by magnitude thresholds; '–' when negligible. */
+function arrows(d, t1, t2, t3) {
+  const a = Math.abs(d);
+  if (!(a >= t1)) return '–';
+  return (d > 0 ? '▲' : '▼').repeat(a < t2 ? 1 : a < t3 ? 2 : 3);
+}
+const toneOf = (good) => (good > 0 ? 'good' : good < 0 ? 'bad' : 'muted');
+const span = (cls, text) => `<span class="${cls}">${text}</span>`;
+/** Utilities output multiplier for an effectiveness level (same curve as the sim's plant output). */
+const utilMul = (e) => M.clamp(0.15 + 0.85 * e, 0.15, 1.1);
+/** Departments that pay city wages (VC.econ.WAGE_DEPTS; utilities and roads do not). */
+const WAGE = (VC.econ && VC.econ.WAGE_DEPTS) || { police: 1, fire: 1, health: 1, education: 1, transit: 1, parks: 1, waste: 1 };
+/** What funding changes do to the city, per department (dir: +1 = the metric rises with funding). */
+const DEPT_FX = {
+  police: [{ icon: '🦹', label: 'Crime', dir: -1 }],
+  fire: [{ icon: '🔥', label: 'Fire risk', dir: -1 }],
+  health: [{ icon: '🩺', label: 'Health', dir: 1 }],
+  education: [{ icon: '🎓', label: 'Education', dir: 1 }],
+  transit: [{ icon: '🚗', label: 'Traffic', dir: -1 }],
+  parks: [{ icon: '🌳', label: 'Park appeal', dir: 1 }, { icon: '📸', label: 'Tourism', dir: 1 }],
+  utilities: [],
+  waste: [{ icon: '🗑️', label: 'Garbage', dir: -1 }],
+  roads: [{ icon: '🚗', label: 'Road capacity', dir: 1 }, { icon: '🕳️', label: 'Potholes', dir: -1 }],
+};
+/** VC.econ.forecast() as-is (cached by econ), or {} without econ. */
+const forecastRaw = () => U.api('econ', 'forecast', [], null) || {};
+/** Ledger-category explanations for the Overview breakdown rows. */
+function catTip(cat) {
+  if (cat === 'grant') return '<b>State grant</b><br>Young towns get monthly help from the state. It peaks around 1,500 residents and fades out by ~8,000 — grow your tax base before it ends.';
+  if (cat === 'policy') return '<b>Policies</b><br>Monthly cost of every active policy at its current level. Adjust levels in the Policies window.';
+  if (cat === 'income') return "<b>Venues</b><br>Ticket and casino income. Rises with happiness and the venues' department funding.";
+  if (cat === 'tourism') return '<b>Tourism</b><br>Visitors drawn by landmarks, parks and the Tourism Campaign.';
+  if (cat === 'loanPayment') return '<b>Loan payments</b><br>Interest + principal of every outstanding loan.';
+  if (cat.startsWith('upkeep:') && WAGE[cat.slice(7)]) {
+    const w = U.num(forecastRaw().wageMul, 1);
+    return w > 1.005 ? `<b>Includes city wages ×${w.toFixed(2)}</b><br>Service staff earn more as the city grows.` : null;
+  }
+  return null;
+}
+
+/* ---------------- What-if preview ---------------- */
+const LINGER = 2500; // ms the card stays after a slider is released
+/** Mood label for a tax effect value (positive = citizens like it). */
+function moodOf(e) {
+  if (e > 0.12) return ['😄 happy', 'good'];
+  if (e > -0.12) return ['🙂 fine', 'info'];
+  if (e > -0.45) return ['😠 grumbling', 'warn'];
+  return ['🔥 revolt', 'bad'];
+}
+function snapshot() {
+  const f = forecastRaw();
+  const s = { net: typeof f.net === 'number' ? f.net : forecast().net, tax: {}, rate: {}, rateW: {}, fund: {}, eff: {}, power: null, water: null };
+  for (const z of ZK) {
+    s.tax[z] = taxEff(z);
+    s.rate[z] = taxAvg(z);
+    s.rateW[z] = [taxGet(z, 0), taxGet(z, 1), taxGet(z, 2)];
+  }
+  for (const d of VC.DEPARTMENTS) {
+    s.fund[d.key] = fundOf(d.key);
+    s.eff[d.key] = effAt(d.key, s.fund[d.key]);
+  }
+  const pi = U.api('sim', 'powerInfo', [], null), wi = U.api('sim', 'waterInfo', [], null);
+  if (pi && pi.demand > 0) s.power = { supply: U.num(pi.supply), demand: U.num(pi.demand) };
+  if (wi && wi.demand > 0) s.water = { supply: U.num(wi.supply), demand: U.num(wi.demand) };
+  return s;
+}
+/**
+ * The what-if card of a tab. o.inline: an always-visible, fixed-height panel in the tab's flow at
+ * the current position (idle it shows the live readout; while a slider moves, the comparison) —
+ * used where the tab is short. Otherwise a floating card inside the window, shown only while
+ * comparing, on the half of the window away from the grabbed slider so it never hides it.
+ * API: wi.hook(sliderEl, kind, key) (kind 'tax': key 'R' or 'R:1' for a wealth bracket; kind
+ * 'dept': key = department), wi.begin(kind, key, el?) / wi.release() around button actions
+ * (kind 'all' = every department), wi.update() from the tab updater.
+ */
+function makeWhatIf(c, o = {}) {
+  const inline = !!o.inline;
+  const title = h('span', { class: 'pn-wi-title' });
+  const rows = [];
+  for (let i = 0; i < 4; i++) {
+    const l = h('span', { class: 'pn-wi-l' });
+    const v = h('span', { class: 'pn-wi-v' });
+    const el = h('div', { class: 'pn-wi-row' }, l, v);
+    el.set = (label, html) => {
+      // inline cards keep their height (the sliders below must not move while one is dragged)
+      if (inline) U.css(el, 'visibility', label ? '' : 'hidden');
+      else U.show(el, !!label);
+      if (!label) return;
+      U.txt(l, label);
+      U.html(v, html);
+    };
+    rows.push(el);
+  }
+  const card = h('div', { class: 'pn-wi ' + (inline ? 'inline' : 'float'), role: 'status' }, h('div', { class: 'pn-wi-head' }, h('span', { class: 'pn-wi-badge' }, '🔮 What if'), title), ...rows);
+  if (inline) c.appendChild(card);
+  let st = null; // {kind, key, base, live, until}
+
+  /** Floating card: attach to the window and pick the half away from the grabbed element. */
+  function place(el) {
+    const win = c.closest('.win');
+    if (!win) return;
+    if (card.parentNode !== win) {
+      for (const old of win.querySelectorAll('.pn-wi.float')) if (old !== card) old.remove();
+      win.appendChild(card);
+    }
+    const wr = win.getBoundingClientRect();
+    const sc = win.offsetWidth > 0 ? wr.width / win.offsetWidth : 1;
+    let top = false;
+    if (el) {
+      const r = el.getBoundingClientRect();
+      top = (r.top + r.bottom) / 2 > wr.top + wr.height * 0.52;
+    }
+    if (top) {
+      const head = win.querySelector('.tabs-head') || win.querySelector('.win-head');
+      const hb = head ? head.getBoundingClientRect().bottom : wr.top + 90 * sc;
+      U.css(card, 'top', Math.round((hb - wr.top) / sc + 8) + 'px');
+      U.css(card, 'bottom', 'auto');
+    } else {
+      U.css(card, 'top', 'auto');
+      U.css(card, 'bottom', '12px');
+    }
+    U.cls(card, 'at-top', top);
+  }
+
+  function taxRows(b) {
+    const parts = st.key.split(':');
+    const z = parts[0], w = parts.length > 1 ? +parts[1] : -1;
+    const from = w >= 0 ? b.rateW[z][w] : b.rate[z], to = w >= 0 ? taxGet(z, w) : taxAvg(z);
+    U.txt(title, `${ZICON[z]} ${ZNAME[z]} tax${w >= 0 ? ' · ' + ['low', 'middle', 'high'][w] + ' wealth' : ''}  ${fmtRate(from)} → ${fmtRate(to)}`);
+    // demand: each zone's tax effect feeds its demand (and happiness) directly
+    let dem = '', sum = 0;
+    for (const zz of ZK) {
+      const d = taxEff(zz) - b.tax[zz];
+      sum += d;
+      dem += span('pn-wi-z z' + zz, zz) + span('pn-wi-ar t-' + toneOf(Math.abs(d) >= 0.01 ? d : 0), arrows(d, 0.01, 0.06, 0.15));
+    }
+    rows[1].set('Demand', dem);
+    const m0 = moodOf(b.tax[z]), m1 = moodOf(taxEff(z));
+    const who = z === 'R' ? 'Residents' : 'Businesses';
+    rows[2].set('Mood', `${who} ` + (m0[0] === m1[0] ? span('t-' + m1[1], m1[0]) : `${m0[0]} → ${span('t-' + m1[1], m1[0])}`) + ' · approval ' + span('pn-wi-ar t-' + toneOf(Math.abs(sum) >= 0.01 ? sum : 0), arrows(sum / 3, 0.004, 0.04, 0.1)));
+    const hi = to > 12, lo = to < 5;
+    rows[3].set(hi || lo ? 'Heads-up' : '', hi ? span('t-warn', 'Above 12% growth stalls and citizens start moving out.') : span('t-info', 'Very low taxes attract growth but thin the coffers.'));
+  }
+  /** Inline idle readout: the city as it stands (what the next drag will be compared with). */
+  function idleRows() {
+    U.txt(title, 'Drag a slider to preview its effect');
+    const f = forecastRaw();
+    const net = typeof f.net === 'number' ? f.net : forecast().net;
+    rows[0].set('Monthly net', `<b>${U.smoney(net)}</b>/mo <small>forecast</small>`);
+    let dem = '';
+    for (const zz of ZK) {
+      const e = taxEff(zz);
+      dem += span('pn-wi-z z' + zz, zz) + span('pn-wi-ar t-' + toneOf(Math.abs(e) >= 0.01 ? e : 0), arrows(e, 0.01, 0.06, 0.15));
+    }
+    rows[1].set('Tax pull', dem + ' <small>vs. a neutral 9%</small>');
+    const S = VC.state;
+    const ap = S.stats && typeof S.stats.approval === 'number' ? Math.round(S.stats.approval * 100) + '%' : '—';
+    const avg = (taxEff('R') + taxEff('C') + taxEff('I')) / 3, m = moodOf(avg);
+    rows[2].set('Mood', `Taxpayers ${span('t-' + m[1], m[0])} · approval <b>${ap}</b>`);
+    rows[3].set(wi.warnHigh ? 'Heads-up' : 'Tip', wi.warnHigh ? span('t-warn', '⚠️ Rates above 12% noticeably slow growth and hurt happiness.') : span('t-muted', 'Around 9% is neutral; every point above 12% slows growth noticeably.'));
+  }
+  function deptRows(b) {
+    const all = st.kind === 'all';
+    const list = all ? VC.DEPARTMENTS.map((d) => d.key) : [st.key];
+    const key = all ? null : st.key;
+    let e0 = 0, e1 = 0, f0 = 0, f1 = 0;
+    for (const k of list) {
+      e0 += b.eff[k];
+      e1 += effAt(k, fundOf(k));
+      f0 += b.fund[k];
+      f1 += fundOf(k);
+    }
+    const n = list.length || 1;
+    e0 /= n; e1 /= n; f0 /= n; f1 /= n;
+    const de = e1 - e0;
+    if (all) U.txt(title, `🏛️ All departments  ${Math.round(f0 * 100)}% → ${Math.round(f1 * 100)}%`);
+    else {
+      const d = VC.DEPARTMENTS.find((x) => x.key === key) || { icon: '🏛️', name: key };
+      U.txt(title, `${d.icon} ${d.name} funding  ${Math.round(f0 * 100)}% → ${Math.round(f1 * 100)}%`);
+    }
+    const tn = 'pn-wi-ar t-' + toneOf(Math.abs(de) >= 0.005 ? de : 0);
+    rows[1].set('Service', `${Math.round(e0 * 100)}% → <b>${Math.round(e1 * 100)}%</b> effective ` + span(tn, arrows(de, 0.005, 0.08, 0.2)));
+    // knock-on effects
+    const fx = [];
+    if (all) fx.push('city services ' + span(tn, de > 0.004 ? 'improve' : de < -0.004 ? 'weaken' : 'unchanged'));
+    else for (const x of DEPT_FX[key] || []) fx.push(`${x.icon} ${x.label} ` + span(tn, arrows(de * x.dir, 0.005, 0.08, 0.2)));
+    let supply = '';
+    if (all || key === 'utilities') {
+      // plant output follows utilities funding: predict supply from the snapshot
+      const r = utilMul(effAt('utilities', fundOf('utilities'))) / Math.max(0.01, utilMul(b.eff.utilities));
+      const parts = [];
+      for (const [nm, s, u, ic] of [['power', b.power, 'MW', '⚡'], ['water', b.water, 'kL', '💧']]) {
+        if (!s) continue;
+        const now = s.supply * r;
+        const short = now < s.demand;
+        parts.push(`${ic} ${U.short(Math.round(s.supply))} → ` + span(short ? 't-bad' : 't-good', U.short(Math.round(now)) + ' ' + u) + ` <small>(need ${U.short(Math.round(s.demand))})</small>`);
+        if (short && !supply && !(s.supply < s.demand)) supply = span('t-bad', `⚠️ ${nm === 'power' ? 'Brownouts' : 'Dry taps'} — supply would drop below demand.`);
+      }
+      if (parts.length) fx.push(parts.join(' · '));
+      else if (key === 'utilities') fx.push('⚡💧 plant output ' + span(tn, '×' + r.toFixed(2)));
+    }
+    if (all || WAGE[key]) fx.push('😊 approval ' + span(tn, arrows(de, 0.01, 0.1, 0.25)));
+    rows[2].set('Likely', fx.join(' · '));
+    // warnings
+    let warn = supply;
+    if (!warn) {
+      const lowF = list.some((k) => fundOf(k) < 0.5);
+      const sm = U.num(VC.econ && VC.econ.STRIKE_MONTHS, 3);
+      if (lowF) warn = span('t-bad', `📢 Below 50% for ${sm} months and workers go on strike.`);
+      else if (f1 > 1.1) warn = span('t-info', 'Diminishing returns above 110% — each extra dollar buys less service.');
+      else if (key === 'roads' && e1 < 0.6) warn = span('t-warn', '🕳️ Potholes below 60% effectiveness cost happiness.');
+    }
+    rows[3].set(warn ? 'Heads-up' : '', warn);
+  }
+
+  const wi = {
+    begin(kind, key, el) {
+      if (!(st && st.kind === kind && st.key === key && (st.live || performance.now() < st.until))) st = { kind, key, base: snapshot(), live: true, until: 0 };
+      st.live = true;
+      if (!inline) place(el);
+      wi.update();
+    },
+    release() {
+      if (!st || !st.live) return;
+      st.live = false;
+      st.until = performance.now() + LINGER;
+      setTimeout(() => wi.update(), LINGER + 40);
+    },
+    hook(sl, kind, key) {
+      const inp = sl.input;
+      inp.addEventListener('pointerdown', () => {
+        wi.begin(kind, key, inp);
+        window.addEventListener('pointerup', () => wi.release(), { once: true });
+        window.addEventListener('pointercancel', () => wi.release(), { once: true });
+      });
+      inp.addEventListener('keydown', (e) => {
+        if (/^(Arrow|Page|Home|End)/.test(e.key)) wi.begin(kind, key, inp);
+      });
+      inp.addEventListener('change', () => wi.release());
+    },
+    update() {
+      if (!c.isConnected) {
+        // the tab was switched away: a floating card lives on the window, take it down
+        st = null;
+        if (!inline) card.remove();
+        return;
+      }
+      if (st && !st.live && performance.now() > st.until) st = null;
+      U.cls(card, 'on', !!st);
+      if (!st) {
+        if (inline) idleRows();
+        return;
+      }
+      const b = st.base;
+      const f = forecastRaw();
+      const net = typeof f.net === 'number' ? f.net : forecast().net;
+      const dn = net - b.net;
+      rows[0].set('Monthly net', `${U.smoney(b.net)} → <b>${U.smoney(net)}</b> ` + span('pn-wi-d t-' + (dn > 0.5 ? 'good' : dn < -0.5 ? 'bad' : 'muted'), (dn > 0.5 ? '▲ ' : dn < -0.5 ? '▼ ' : '') + U.smoney(dn) + '/mo'));
+      if (st.kind === 'tax') taxRows(b);
+      else deptRows(b);
+    },
+  };
+  return wi;
+}
 
 /* ---------------- Overview ---------------- */
 function tabOverview(c) {
@@ -160,7 +454,8 @@ function tabOverview(c) {
     el.set = (cat, v, tot) => {
       const ci = U.catInfo(cat);
       U.txt(icon, ci[0]);
-      U.txt(lab, ci[1]);
+      U.txt(lab, cat === 'grant' && /^grant$/i.test(ci[1]) ? 'State grant (young towns)' : ci[1]);
+      U.attr(el, 'data-tip', catTip(cat));
       U.txt(amt, U.money(v));
       U.css(fill, 'width', (tot > 0 ? (v / tot) * 100 : 0).toFixed(1) + '%');
     };
@@ -219,8 +514,9 @@ function tabOverview(c) {
 /* ---------------- Taxes ---------------- */
 let advOpen = false;
 function tabTaxes(c) {
-  c.appendChild(h('div', { class: 'note lead' }, 'Taxes are collected monthly from residents and businesses. Low taxes attract growth; high taxes fill the coffers but slow demand and anger citizens.'));
+  c.appendChild(h('div', { class: 'note lead' }, 'Taxes are collected monthly from residents and businesses. Low taxes attract growth; high taxes fill the coffers but slow demand and anger citizens. Drag a slider to preview the effect.'));
   const zones = {};
+  const hooks = []; // [slider, what-if key]
   const grid = h('div', { class: 'pn-tax-grid' });
   for (const z of ZK) {
     const big = h('div', { class: 'pn-tax-rate' });
@@ -228,6 +524,7 @@ function tabTaxes(c) {
       U.api('econ', 'setTax', [z, null, v]);
       P.refresh();
     } });
+    hooks.push([sl, z]);
     const revV = h('b');
     const rev = h('div', { class: 'pn-tax-rev', 'data-tip': 'Estimated monthly tax revenue from this zone.' }, '💵 ', revV, h('span', null, ' /mo'));
     rev.set = (t) => U.txt(revV, t);
@@ -237,8 +534,7 @@ function tabTaxes(c) {
     zones[z] = { big, sl, rev, mood, adv: [] };
   }
   c.appendChild(grid);
-  const warn = h('div', { class: 'pn-banner t-warn' }, '⚠️ Rates above 12% noticeably slow growth and hurt happiness.');
-  c.appendChild(warn);
+  const wi = makeWhatIf(c, { inline: true });
 
   // advanced: 3 zones × 3 wealth levels
   const advBody = h('div', { class: 'pn-adv-grid' });
@@ -259,6 +555,7 @@ function tabTaxes(c) {
         U.api('econ', 'setTax', [z, w, v]);
         P.refresh();
       } });
+      hooks.push([sl, z + ':' + w]);
       const det = h('div', { class: 'pn-adv-det' });
       col.append(sl, det);
       sl.det = det;
@@ -268,6 +565,7 @@ function tabTaxes(c) {
   }
   c.appendChild(h('div', { class: 'pn-adv' }, advBtn, advBody));
   sync();
+  for (const [sl, key] of hooks) wi.hook(sl, 'tax', key);
 
   return () => {
     const f = forecast();
@@ -294,24 +592,52 @@ function tabTaxes(c) {
       }
       if (avg > 12) hi = true;
     }
-    U.show(warn, hi);
+    wi.warnHigh = hi; // the idle what-if readout carries the 'above 12%' warning (no banner to shift the sliders)
+    wi.update();
   };
 }
 
 /* ---------------- Departments ---------------- */
+/** Live tooltip: how a department's monthly cost is made up. */
+function costTip(d) {
+  const S = VC.state;
+  const f = forecastRaw();
+  const k = d.key;
+  const w = WAGE[k] ? U.num(f.wageMul, 1) : 1;
+  const um = U.num(f.upkeepMul, 1);
+  let base = U.deptStats().up[k] || 0;
+  if (k === 'roads') {
+    const rc = U.roadCounts();
+    for (let t = 1; t <= 3; t++) base += rc[t] * ((VC.ROADS[t] && VC.ROADS[t].upkeep) || 0);
+  }
+  const g = [`<span>Base upkeep</span><b>${U.money(base)}</b>`, `<span>× funding</span><b>${Math.round(fundOf(k) * 100)}%</b>`];
+  if (w > 1.005) g.push(`<span>× city wages</span><b>×${w.toFixed(2)}</b>`);
+  if (Math.abs(um - 1) > 0.005 && !S.sandbox) g.push(`<span>× difficulty</span><b>×${um.toFixed(2)}</b>`);
+  g.push(`<span>= per month</span><b>${U.money(deptCost(k))}</b>`);
+  return `<div class="tt-head"><span class="tt-icon">${d.icon}</span>${U.esc(d.name)} upkeep</div><div class="tt-grid">${g.join('')}</div>`;
+}
 function tabDepartments(c) {
+  let wi = null;
   const setAll = (f) => {
+    if (wi) wi.begin('all', 'all');
     for (const d of VC.DEPARTMENTS) U.api('econ', 'setFunding', [d.key, f]);
     VC.ui.toast(`All departments funded at <b>${Math.round(f * 100)}%</b>`, { type: 'info', icon: '🏛️' });
+    if (wi) wi.release();
     P.refresh();
   };
   const total = h('span', { class: 'pn-dept-total' });
+  const wage = h('span', { class: 'pn-pill pn-wage', 'data-tip': 'City wages' });
+  wage._tip = () => {
+    const w = U.num(forecastRaw().wageMul, 1);
+    return `<b>👷 City wages ×${w.toFixed(2)}</b><br>Police, fire, health, education, transit, parks and sanitation staff earn more as the city grows (×1 up to ~4,000 residents, ~×1.8 at 25k, ~×2.3 at 100k). Power &amp; water and roads are not affected.<br><small>Each service building also serves a limited number of residents, so big cities need more of them.</small>`;
+  };
   c.appendChild(h('div', { class: 'pn-toolbar' },
     h('span', { class: 'pn-toolbar-label' }, 'Presets'),
-    VC.ui.button('Austerity', () => setAll(0.8), { icon: '🪙', cls: 'small', tip: 'Fund every department at <b>80%</b>. Saves money, services suffer.' }),
+    VC.ui.button('Austerity', () => setAll(0.8), { icon: '💰', cls: 'small', tip: 'Fund every department at <b>80%</b>. Saves money, services suffer.' }),
     VC.ui.button('Balanced', () => setAll(1), { icon: '⚖️', cls: 'small', tip: 'Fund every department at <b>100%</b>.' }),
     VC.ui.button('Generous', () => setAll(1.2), { icon: '💎', cls: 'small', tip: 'Fund every department at <b>120%</b>. Better services with diminishing returns.' }),
     h('span', { class: 'pn-grow' }),
+    wage,
     total
   ));
   const rows = [];
@@ -324,6 +650,8 @@ function tabDepartments(c) {
       U.api('econ', 'setFunding', [d.key, v / 100]);
       P.refresh();
     } });
+    U.attr(cost, 'data-tip', d.name);
+    cost._tip = () => costTip(d);
     const effFill = h('i');
     const effTxt = h('span', { class: 'pn-dept-eff' });
     const eff = h('div', { class: 'pn-dept-effbar', 'data-tip': 'Service effectiveness at the current funding level (diminishing returns above 100%).' }, effFill);
@@ -336,9 +664,16 @@ function tabDepartments(c) {
     rows.push({ d, el, count, cost, warn, sl, effFill, effTxt });
   }
   c.appendChild(list);
+  wi = makeWhatIf(c);
+  for (const r of rows) wi.hook(r.sl, 'dept', r.d.key);
   return () => {
     const S = VC.state;
     const st = U.deptStats();
+    wi.update();
+    const wm = U.num(forecastRaw().wageMul, 1);
+    U.txt(wage, '👷 City wages ×' + wm.toFixed(2));
+    U.show(wage, wm > 1.005);
+    U.tone(wage, wm >= 1.6 ? 'warn' : 'info');
     let sum = 0;
     for (const r of rows) {
       const k = r.d.key;
@@ -364,7 +699,7 @@ function tabDepartments(c) {
       const strike = !!U.api('econ', 'onStrike', [k], false);
       const lowM = U.num(U.api('econ', 'lowFundingMonths', [k], 0));
       const sm = U.num(VC.econ && VC.econ.STRIKE_MONTHS, 3);
-      U.txt(r.warn, strike ? '🪧 ON STRIKE!' : lowM > 0 && f < 0.5 ? '⚠️ Strike in ' + Math.max(1, sm - lowM) + ' mo' : '⚠️ Strike risk!');
+      U.txt(r.warn, strike ? '📢 ON STRIKE!' : lowM > 0 && f < 0.5 ? '⚠️ Strike in ' + Math.max(1, sm - lowM) + ' mo' : '⚠️ Strike risk!');
       U.show(r.warn, strike || f < 0.5);
       U.show(r.effTxt, !strike && f >= 0.5);
       U.cls(r.el, 'low', strike || f < 0.5);

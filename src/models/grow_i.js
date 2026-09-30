@@ -637,6 +637,114 @@ const I3_HEAVY = [
       hazardLine(g, 0, D - 1, W);
     },
   },
+  {
+    name: 'cement',
+    build(c) {
+      const g = c.g, W = c.W, D = c.D;
+      yardSlab(c);
+      for (let k = 0; k < W * D / 30; k++) g.set(M.hashU(k, 5, c.v) % W, 0, M.hashU(k, 6, c.v) % D, P.CONCRETE_L); // dust
+      // rotary kiln: long inclined horizontal cylinder on piers
+      const kz = 3.5, kl = W - 6;
+      for (let x = 1; x < 1 + kl; x++) {
+        const cy = 3 + ((x - 1) / kl) * 2;
+        g.hcyl('x', x, 1, cy, kz, 1.6, x % 5 === 0 ? P.RUST : P.METAL_D);
+      }
+      for (let x = 2; x < 1 + kl; x += 5) g.box(x, 1, 3, 1, 2 + Math.round(((x - 1) / kl) * 2), 1, P.CONCRETE);
+      // preheater tower with cyclones
+      const tx = W - 5, th = c.sh(18 + c.L * 5);
+      g.box(tx, 1, 1, 4, th, 5, P.CONCRETE_L);
+      K.facade(g, tx, 1, 1, 4, th, 5, (u, v) => (v % 5 === 4 ? P.METAL_D : 0));
+      for (let y = 5; y < th; y += 5) g.box(tx - 1, y, 2, 1, 3, 3, P.PIPE);
+      K.stack(g, tx + 2, 1 + th, 3.5, 0.9, 6 + c.L * 2, P.CHIMNEY, 0, 'smoke', 1);
+      // clinker silos + conveyor
+      const sn = W >= 24 ? 3 : W >= 16 ? 2 : 1;
+      const sh = c.sh(10 + c.L * 3);
+      for (let k = 0; k < sn; k++) K.tank(g, 2.5 + k * 4, 1, D - 4.5, 1.8, sh, P.CONCRETE_L, P.CONCRETE_D);
+      g.line(sn * 4, sh, D - 4, tx, 6, 5, P.METAL_D);
+      if (W >= 16) g.ellipsoid(W - 3, 1, D - 3, 2, 1.5, 2, P.STONE); // aggregate pile
+      hazardLine(g, 0, D - 1, W);
+    },
+  },
+  {
+    name: 'smelter',
+    build(c) {
+      const g = c.g, W = c.W, D = c.D;
+      yardSlab(c);
+      // long potline halls with continuous roof vents and heat shimmer
+      const n = Math.max(1, Math.floor((D - 4) / 7)), hw = W - 4;
+      for (let k = 0; k < n; k++) {
+        const z = 1 + k * 7, H = 5 + c.L;
+        g.box(1, 1, z, hw, H, 5, P.STEEL_BLUE);
+        K.facade(g, 1, 1, z, hw, H, 5, (u, v, f) => (f & 1 ? 0 : v === 2 && u % 4 === 1 ? P.WIN : 0));
+        K.roof(g, 1, 1 + H, z, hw, 5, { type: 'gable', c: P.METAL_D, fill: P.STEEL_BLUE, pitch: 0.5, stripe: P.METAL, oh: 0 });
+        g.box(2, 3 + H, z + 2, hw - 2, 2, 1, P.METAL); // ridge vent
+        g.box(2, 3 + H, z + 2, hw - 2, 1, 1, P.CONCRETE_DD);
+        g.emit(W / 2 - 1, 5 + H, z + 2.5, 'steam', 0.5);
+      }
+      // alumina silo + carbon plant stack
+      K.tank(g, W - 1.5, 1, 2.5, 1.4, c.sh(14 + c.L * 3), P.TANK_WHITE, P.HAZARD_Y);
+      K.stack(g, W - 1.5, 1, D - 2.5, 1, c.sh(20 + c.L * 5), P.CHIMNEY, P.CHIMNEY_RED, 'smoke', 1);
+      // ingot stacks glowing hot
+      g.box(1, 1, D - 2, 4, 1, 1, P.METAL);
+      g.box(1, 2, D - 2, 3, 1, 1, P.FIRE);
+      g.light(2.5, 2.5, D - 1.5, [1, 0.5, 0.15], 0.8, true);
+    },
+  },
+  {
+    name: 'mine',
+    build(c) {
+      const g = c.g, W = c.W, D = c.D;
+      K.slab(g, P.SOIL);
+      for (let k = 0; k < W * D / 16; k++) g.set(M.hashU(k, 7, c.v) % W, 0, M.hashU(k, 8, c.v) % D, P.STONE_D);
+      // headframe: lattice legs with a sheave wheel on top
+      const hx = 1, hz = 2, hh = c.sh(18 + c.L * 5);
+      for (let k = 0; k < hh; k++) {
+        g.set(hx, 1 + k, hz, P.RED); g.set(hx + 3, 1 + k, hz, P.RED);
+        if (k % 3 === 0) g.box(hx, 1 + k, hz, 4, 1, 1, P.RED);
+      }
+      g.line(hx + 3, 1, Math.min(D - 2, hz + 5), hx + 3, hh, hz, P.RED);
+      g.hcyl('z', hz - 1, 3, hh + 1.5, hx + 1.5, 1.4, P.METAL_D);
+      g.box(hx, hh + 1, hz - 1, 4, 1, 3, P.RED);
+      // winder house
+      const wz = Math.min(D - 5, hz + 6);
+      g.box(hx, 1, wz, 5, 4, 4, P.BRICK);
+      K.roof(g, hx, 5, wz, 5, 4, { type: 'gable', c: P.METAL_D, fill: P.BRICK, pitch: 0.5, oh: 0 });
+      g.line(hx + 1, hh, hz, hx + 1, 5, wz, P.BLACK); // hoist cable
+      // conveyor to the ore pile + haul truck
+      const px = Math.min(W - 3, 11);
+      g.line(hx + 4, hh - 4, hz, px, 5, hz, P.METAL_D);
+      g.ellipsoid(px + 0.5, 1, hz + 1.5, Math.min(3.2, W - px - 0.5), 4, 3, (x, y, z) => ((x + y + z) % 5 ? P.ROCK : P.RUST));
+      if (D >= 16 && W >= 16) g.ellipsoid(W - 4, 1, D - 5, 3, 3, 3, P.STONE_D);
+      if (W >= 16) { g.box(W - 5, 1, D - 3, 3, 2, 2, P.YELLOW); g.box(W - 5, 3, D - 3, 1, 1, 2, P.YELLOW); g.set(W - 3, 3, D - 3, P.GLASS_DARK); }
+      K.lamp(g, W - 1, 1, D - 1, 6, P.LAMP_WHITE, P.METAL_D, 0.9);
+      K.beacon(g, hx, hh + 2, hz - 1, 0.6);
+    },
+  },
+  {
+    name: 'fabyard',
+    build(c) {
+      const g = c.g, W = c.W, D = c.D;
+      yardSlab(c);
+      // heavy fabrication yard: portal crane over a steel module, blast shed
+      const H = c.sh(14 + c.L * 4);
+      for (const x of [0, W - 1]) { g.box(x, 1, 1, 1, H, 1, P.HAZARD_Y); g.box(x, 1, D - 3, 1, H, 1, P.HAZARD_Y); g.box(x, H, 1, 1, 1, D - 3, P.HAZARD_Y); }
+      g.box(0, H + 1, 1, W, 2, 2, P.HAZARD_Y);
+      g.box((W >> 1) - 1, H - 1, 1, 3, 2, 2, P.RED);
+      for (let y = 8; y < H - 1; y++) g.set(W >> 1, y, 2, P.BLACK);
+      // steel module being assembled + pipe spools
+      const mw = Math.max(3, Math.min(W - 6, 10)), mx = (W - mw) >> 1;
+      g.box(mx, 1, 3, mw, 3, 5, P.RUST);
+      for (let x = mx; x < mx + mw; x += 3) g.box(x, 4, 3, 1, 3, 5, P.RUST);
+      g.box(mx, 7, 3, mw, 1, 5, P.RUST);
+      for (let k = 0; k < 3; k++) g.hcyl('x', mx, mw, 5 + (k % 2), 4 + k * 1.5, 0.5, P.PIPE);
+      // blast & paint shed
+      if (D >= 16) shed(c, 1, D - 8, W - 2, 5, { wall: P.CONCRETE, roof: P.METAL_D, doors: 2, h: 5, rib: P.CONCRETE_D });
+      g.light(W / 2, H - 1, 2.5, [0.9, 0.95, 1], 1.4);
+      K.beacon(g, 0, H + 3, 1, 0.6);
+      K.beacon(g, W - 1, H + 3, 1, 0.6);
+      hazardLine(g, 0, D - 1, W);
+    },
+  },
 ];
 const I3_TECH = [
   {
@@ -725,6 +833,92 @@ const I3_TECH = [
       K.sign(g, 3, H - 2, d, Math.min(w - 5, 10), 2, neon, 0, c.rng, 0, true);
       K.parking(g, 0, d + 1, W, 4, c.rng, 0.6);
       K.tree(g, 0, 1, d, 1, 'round');
+    },
+  },
+  {
+    name: 'biotech',
+    build(c) {
+      const g = c.g, W = c.W, D = c.D;
+      K.slab(g, P.GRASS_L);
+      const neon = c.pk(1, [P.NEON_GREEN, P.NEON_CYAN, P.GLOW_REACTOR]);
+      // curved glass lab (rounded plan) + a greenhouse dome
+      const lw = Math.min(W - 2, 14), ld = Math.max(4, Math.min(D - 7, 9)), H = 4 * (1 + c.L);
+      K.prism(g, 1, 1, 1, lw, H, ld, P.GLASS_TEAL, 'round', Math.min(3, lw >> 2));
+      K.skin(g, 1, 1, 1, 1 + lw, 1 + H, 1 + ld, (x, y) => (y % 4 === 0 ? P.WHITE : y % 4 === 2 ? P.WIN_OFFICE : 0));
+      K.prism(g, 1, 1 + H, 1, lw, 1, ld, P.WHITE, 'round', Math.min(3, lw >> 2));
+      K.shapeRing(g, 1, H, 1, lw, ld, 'round', Math.min(3, lw >> 2), neon);
+      g.light(1 + lw / 2, H, 1 + ld / 2, K.glowRGB(neon), 1.4);
+      if (W >= 16 && D >= 16) {
+        const r = 4.5, cx = W - r - 0.5, cz = D - r - 1.5;
+        g.ellipsoid(cx, 1, cz, r, r, r, (x, y, z) => ((x + z) % 3 === 0 || y % 3 === 0 ? P.WHITE : P.GLASS_GREEN));
+        g.ellipsoid(cx, 1, cz, r - 1, r - 1, r - 1, 0);
+        K.tree(g, Math.floor(cx), 1, Math.floor(cz), 2, 'palm');
+      }
+      for (let x = 1; x < W - 1; x += 4) K.tree(g, x, 1, D - 2, 1, 'round', K.leaf(c.rng));
+      g.box(0, 0, D - 4, W, 1, 1, P.SIDEWALK);
+    },
+  },
+  {
+    name: 'robotics',
+    build(c) {
+      const g = c.g, W = c.W, D = c.D;
+      K.slab(g, P.CONCRETE_L);
+      const accent = c.pk(1, [P.ORANGE, P.YELLOW, P.RED, P.BLUE]);
+      const w = W - 2, d = D - 5, H = 5 + c.L;
+      g.box(1, 1, 0, w, H, d, P.WHITE);
+      g.box(1, H - 1, 0, w, 1, d, accent);
+      // glazed front showing robot arms on the line
+      g.box(2, 1, d - 1, w - 2, H - 2, 1, P.GLASS_CYAN);
+      for (let x = 3; x < w; x += 4) { g.set(x, 1, d - 2, P.METAL_D); g.set(x, 2, d - 2, accent); g.set(x + 1, 3, d - 2, accent); }
+      // solar sawtooth roof
+      for (let j = 0; j < d; j++) { const k = j % 4; g.box(1, 1 + H, j, w, k + 1, 1, k === 3 ? P.SOLAR : P.WHITE); }
+      K.sign(g, 2, H + 5, d - 1, Math.max(2, Math.min(w - 2, 9)), 1, P.NEON_CYAN, 0, c.rng, 0, true);
+      // delivery vans
+      for (let k = 0; k < 3; k++) if (4 + k * 3 < W) K.car(g, 2 + k * 3, 1, D - 3, 'z', P.WHITE);
+      K.lamp(g, 0, 1, D - 1, 3, P.LAMP_WHITE, P.METAL, 0.6);
+    },
+  },
+  {
+    name: 'aerospace',
+    build(c) {
+      const g = c.g, W = c.W, D = c.D;
+      K.slab(g, P.CONCRETE);
+      // vaulted hangar with open doors and an aircraft inside
+      const hw = W - 2, hd = D - 4;
+      K.roof(g, 1, 1, 0, hw, hd, { type: 'barrelz', c: P.METAL, fill: P.METAL, pitch: 0.9, oh: 0 });
+      const top = g.maxHeight();
+      g.box(3, 1, hd - 1, hw - 4, Math.max(2, top - 3), 1, 0);
+      g.box(3, 1, hd - 2, hw - 4, Math.max(2, top - 3), 1, P.CONCRETE_DD);
+      // fuselage, wings, tail
+      const fl = Math.min(hd + 1, 12), cxp = Math.floor(W / 2);
+      g.hcyl('z', hd - fl + 2, fl, 2.5, W / 2, 1.3, P.WHITE);
+      g.box(cxp - Math.min(4, (W >> 1) - 1), 2, hd - 5, Math.min(9, W - 2), 1, 2, P.WHITE);
+      g.set(cxp, 2, hd + 1, P.GLASS_DARK);
+      g.box(cxp, 3, hd - fl + 2, 1, 3, 2, c.pk(1, [P.BLUE, P.RED, P.ORANGE]));
+      // apron markings & tug
+      for (let x = 1; x < W - 1; x += 2) g.set(x, 0, D - 2, P.HAZARD_Y);
+      g.box(W - 3, 1, D - 3, 2, 1, 2, P.YELLOW);
+      K.wallLight(g, 2, Math.max(2, top - 2), hd - 1, P.LAMP_WHITE, 0.6);
+      K.wallLight(g, W - 3, Math.max(2, top - 2), hd - 1, P.LAMP_WHITE, 0.6);
+      K.beacon(g, W >> 1, top, hd >> 1, 0.6);
+    },
+  },
+  {
+    name: 'gigafactory',
+    build(c) {
+      const g = c.g, W = c.W, D = c.D;
+      K.slab(g, P.GRASS_L);
+      const accent = c.pk(1, [P.RED, P.NAVY, P.BLACK]);
+      const w = W - 1, d = D - 4, H = 6 + c.L * 2;
+      g.box(0, 1, 0, w, H, d, P.WHITE);
+      // diagonal stripe graphic & glazing
+      K.facade(g, 0, 1, 0, w, H, d, (u, v, f) => ((u + v) % 11 === 0 || (u + v) % 11 === 1 ? accent : f === 0 && v === 1 && u % 3 ? P.GLASS_DARK : 0));
+      g.box(0, 1 + H, 0, w, 1, d, P.CONCRETE_L);
+      K.solar(g, 1, 2 + H, 1, w - 2, d - 2);
+      K.sign(g, 2, H - 2, d, Math.max(2, Math.min(w - 3, 12)), 2, P.SIGN_WHITE, accent, c.rng, 0, true);
+      // EV chargers + cars
+      for (let x = 1; x + 2 < W; x += 3) { g.set(x + 2, 1, d + 1, P.NEON_GREEN); if (M.hash(x, 3, c.v) < 0.7) K.car(g, x, 1, d + 1, 'z', K.carColor(c.rng)); }
+      K.tree(g, W - 1, 1, D - 1, 1, 'round');
     },
   },
 ];

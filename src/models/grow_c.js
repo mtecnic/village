@@ -666,7 +666,7 @@ const C3_ARCH = [
       const g = c.g, F = c3Floors(c), t = c3Rect(c, 12);
       plaza(c, t, c.Wl === 2);
       const stone = c.pk(0, [[P.CONCRETE_L, P.STONE], [P.WHITE, P.CONCRETE_L, P.SANDSTONE], [P.WHITE, P.MARBLE]]);
-      const metal = c.Wl === 0 ? P.METAL : P.CHROME;
+      const metal = [P.METAL, P.CHROME, P.GOLD][c.Wl];
       let y = grandLobby(c, t, stone, 5);
       const f1 = Math.ceil(F * 0.5), f2 = Math.ceil(F * 0.3), f3 = F - f1 - f2;
       K.section(g, t.x, y, t.z, t.w, t.d, f1, 3, { wall: stone, win: P.WIN_OFFICE, spandrel: P.CONCRETE_DD, style: 'deco' });

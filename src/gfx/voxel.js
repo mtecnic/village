@@ -335,96 +335,95 @@ VC.VoxelGrid = VoxelGrid;
  */
 function mesh(g, scale = 1) {
   const sx = g.sx, sy = g.sy, sz = g.sz, v = g.v;
-  const dims = [sx, sy, sz];
-  const solid = (x, y, z) => (x >= 0 && y >= 0 && z >= 0 && x < sx && y < sy && z < sz ? v[x + sx * (z + sz * y)] : 0) !== 0;
+  const D = [sx, sy, sz];
+  const ST = [1, sx * sz, sx]; // index strides for x, y, z
   let cap = 4096;
   let buf = new ArrayBuffer(cap * 32);
   let i16 = new Int16Array(buf), u8 = new Uint8Array(buf);
   let quads = 0;
-  const pushQuad = (verts) => {
-    if (quads >= cap) {
-      cap *= 2;
-      const nb = new ArrayBuffer(cap * 32);
-      new Uint8Array(nb).set(u8);
-      buf = nb;
-      i16 = new Int16Array(buf);
-      u8 = new Uint8Array(buf);
-    }
-    let o = quads * 32;
-    for (let k = 0; k < 4; k++, o += 8) {
-      const vv = verts[k];
-      i16[o >> 1] = vv[0] * scale;
-      i16[(o >> 1) + 1] = vv[1] * scale;
-      i16[(o >> 1) + 2] = vv[2] * scale;
-      u8[o + 6] = vv[3];
-      u8[o + 7] = vv[4];
-    }
-    quads++;
-  };
-  const p = [0, 0, 0], q = [0, 0, 0];
+  // scratch (no per-voxel allocations)
+  const cu = new Int32Array(4), cw = new Int32Array(4), cao = new Int32Array(4);
+  const ORD_POS = [0, 1, 2, 3], ORD_NEG = [0, 3, 2, 1];
+  const pos = [0, 0, 0];
   for (let d = 0; d < 3; d++) {
     const u = (d + 1) % 3, w = (d + 2) % 3;
-    const du = dims[u], dw = dims[w];
-    const mask = new Int32Array(du * dw);
-    for (const dir of [1, -1]) {
+    const Du = D[u], Dw = D[w], Dd = D[d];
+    const sd = ST[d], su = ST[u], sw = ST[w];
+    const mask = new Int32Array(Du * Dw);
+    for (let dir = 1; dir >= -1; dir -= 2) {
       const nrm = d * 2 + (dir > 0 ? 0 : 1);
-      for (let i = 0; i < dims[d]; i++) {
-        // build mask
+      const ord = dir > 0 ? ORD_POS : ORD_NEG;
+      for (let i = 0; i < Dd; i++) {
+        const ni = i + dir;
+        const nIn = ni >= 0 && ni < Dd;
         let any = false;
-        for (let b = 0; b < dw; b++)
-          for (let a = 0; a < du; a++) {
-            p[d] = i; p[u] = a; p[w] = b;
-            const c = v[p[0] + sx * (p[2] + sz * p[1])];
+        for (let b = 0; b < Dw; b++) {
+          for (let a = 0; a < Du; a++) {
+            const base = i * sd + a * su + b * sw;
+            const c = v[base];
             let m = 0;
-            if (c) {
-              q[d] = i + dir; q[u] = a; q[w] = b;
-              if (!solid(q[0], q[1], q[2])) {
-                // AO for corners (-u,-w), (+u,-w), (+u,+w), (-u,+w) sampled in the neighbor layer
-                const ao = [0, 0, 0, 0];
-                const su = [-1, 1, 1, -1], sw = [-1, -1, 1, 1];
-                for (let k = 0; k < 4; k++) {
-                  q[u] = a + su[k]; q[w] = b;
-                  const s1 = solid(q[0], q[1], q[2]);
-                  q[u] = a; q[w] = b + sw[k];
-                  const s2 = solid(q[0], q[1], q[2]);
-                  q[u] = a + su[k]; q[w] = b + sw[k];
-                  const cc = solid(q[0], q[1], q[2]);
-                  ao[k] = s1 && s2 ? 0 : 3 - ((s1 ? 1 : 0) + (s2 ? 1 : 0) + (cc ? 1 : 0));
-                }
-                m = c | (ao[0] << 8) | (ao[1] << 10) | (ao[2] << 12) | (ao[3] << 14) | (1 << 16);
-                any = true;
+            if (c && !(nIn && v[base + dir * sd])) {
+              let a0 = 3, a1 = 3, a2 = 3, a3 = 3;
+              if (nIn) {
+                const nb = base + dir * sd;
+                const aL = a > 0, aR = a + 1 < Du, bD = b > 0, bU = b + 1 < Dw;
+                const l = aL && v[nb - su] !== 0, r = aR && v[nb + su] !== 0;
+                const dn = bD && v[nb - sw] !== 0, up = bU && v[nb + sw] !== 0;
+                const ld = aL && bD && v[nb - su - sw] !== 0, rd = aR && bD && v[nb + su - sw] !== 0;
+                const ru = aR && bU && v[nb + su + sw] !== 0, lu = aL && bU && v[nb - su + sw] !== 0;
+                a0 = l && dn ? 0 : 3 - (l + dn + ld);
+                a1 = r && dn ? 0 : 3 - (r + dn + rd);
+                a2 = r && up ? 0 : 3 - (r + up + ru);
+                a3 = l && up ? 0 : 3 - (l + up + lu);
               }
+              m = c | (a0 << 8) | (a1 << 10) | (a2 << 12) | (a3 << 14) | (1 << 16);
+              any = true;
             }
-            mask[b * du + a] = m;
+            mask[b * Du + a] = m;
           }
+        }
         if (!any) continue;
-        // greedy merge
         const plane = dir > 0 ? i + 1 : i;
-        for (let b = 0; b < dw; b++)
-          for (let a = 0; a < du; ) {
-            const m = mask[b * du + a];
+        for (let b = 0; b < Dw; b++)
+          for (let a = 0; a < Du; ) {
+            const m = mask[b * Du + a];
             if (!m) { a++; continue; }
             let wa = 1;
-            while (a + wa < du && mask[b * du + a + wa] === m) wa++;
+            while (a + wa < Du && mask[b * Du + a + wa] === m) wa++;
             let hb = 1;
-            outer: while (b + hb < dw) {
-              for (let k = 0; k < wa; k++) if (mask[(b + hb) * du + a + k] !== m) break outer;
+            outer: while (b + hb < Dw) {
+              for (let k = 0; k < wa; k++) if (mask[(b + hb) * Du + a + k] !== m) break outer;
               hb++;
             }
-            for (let bb = 0; bb < hb; bb++) for (let k = 0; k < wa; k++) mask[(b + bb) * du + a + k] = 0;
+            for (let bb = 0; bb < hb; bb++) mask.fill(0, (b + bb) * Du + a, (b + bb) * Du + a + wa);
             const col = m & 255;
-            const ao = [(m >> 8) & 3, (m >> 10) & 3, (m >> 12) & 3, (m >> 14) & 3];
-            const corner = (ua, wb, aoV) => {
-              const r = [0, 0, 0, col, nrm | (aoV << 3)];
-              r[d] = plane; r[u] = ua; r[w] = wb;
-              return r;
-            };
-            let vs = [corner(a, b, ao[0]), corner(a + wa, b, ao[1]), corner(a + wa, b + hb, ao[2]), corner(a, b + hb, ao[3])];
-            if (dir < 0) vs = [vs[0], vs[3], vs[2], vs[1]];
-            // flip the diagonal to avoid AO anisotropy
-            const aoOf = (vv) => vv[4] >> 3;
-            if (aoOf(vs[0]) + aoOf(vs[2]) < aoOf(vs[1]) + aoOf(vs[3])) vs = [vs[1], vs[2], vs[3], vs[0]];
-            pushQuad(vs);
+            // corners in (u, w): c0 (a,b) c1 (a+wa,b) c2 (a+wa,b+hb) c3 (a,b+hb)
+            cu[0] = a; cw[0] = b; cao[0] = (m >> 8) & 3;
+            cu[1] = a + wa; cw[1] = b; cao[1] = (m >> 10) & 3;
+            cu[2] = a + wa; cw[2] = b + hb; cao[2] = (m >> 12) & 3;
+            cu[3] = a; cw[3] = b + hb; cao[3] = (m >> 14) & 3;
+            // flip the diagonal to avoid AO anisotropy (rotate start vertex by one)
+            const o0 = ord[0], o1 = ord[1], o2 = ord[2], o3 = ord[3];
+            const rot = cao[o0] + cao[o2] < cao[o1] + cao[o3] ? 1 : 0;
+            if (quads >= cap) {
+              cap *= 2;
+              const nbuf = new ArrayBuffer(cap * 32);
+              new Uint8Array(nbuf).set(u8);
+              buf = nbuf;
+              i16 = new Int16Array(buf);
+              u8 = new Uint8Array(buf);
+            }
+            let o = quads * 32;
+            for (let k = 0; k < 4; k++, o += 8) {
+              const ci = ord[(k + rot) & 3];
+              pos[d] = plane; pos[u] = cu[ci]; pos[w] = cw[ci];
+              i16[o >> 1] = pos[0] * scale;
+              i16[(o >> 1) + 1] = pos[1] * scale;
+              i16[(o >> 1) + 2] = pos[2] * scale;
+              u8[o + 6] = col;
+              u8[o + 7] = nrm | (cao[ci] << 3);
+            }
+            quads++;
             a += wa;
           }
       }
@@ -565,7 +564,7 @@ VC.models = {
     }
     const vox = VC.C.VOX * (def.scale || 1);
     const full = mesh(g, 1);
-    const lodGrid = downsample(g, 2);
+    const lodGrid = downsample(g, 2, def.lodMinFill || 3);
     const lodMesh = mesh(lodGrid, 2);
     m = {
       key, variant, params, sx: g.sx, sy: g.sy, sz: g.sz, vox,

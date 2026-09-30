@@ -44,7 +44,7 @@ steps = steps ? JSON.parse(steps) : [{ eval: opt('eval', null), wait: +opt('wait
   const url = 'file://' + html + (query ? '?' + query : '');
   const t0 = Date.now();
   await page.goto(url);
-  await page.waitForFunction(() => window.VC && VC.gfx && VC.gfx.frameCount > 2, null, { timeout: 60000 }).catch(() => console.log('[harness] timeout waiting for frames'));
+  await page.waitForFunction(() => window.VC && VC.gfx && VC.gfx.frameCount > 2, null, { timeout: 180000 }).catch(() => console.log('[harness] timeout waiting for frames'));
   if (!quiet) console.log(`[harness] booted in ${Date.now() - t0} ms`);
   for (const s of steps) {
     if (s.eval) {
@@ -62,7 +62,7 @@ steps = steps ? JSON.parse(steps) : [{ eval: opt('eval', null), wait: +opt('wait
     }
     await page.waitForTimeout(s.wait == null ? 2500 : s.wait);
     if (s.out && s.out !== 'none') {
-      await page.screenshot({ path: s.out });
+      await page.screenshot({ path: s.out, timeout: 180000 });
       if (!quiet) console.log('[harness] screenshot -> ' + s.out);
     }
   }

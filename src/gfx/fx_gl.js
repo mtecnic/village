@@ -17,6 +17,17 @@
  *   VC.fxgl.cells            building registry bucketed per 8x8-tile cell (see BUILDING CELLS below)
  *   VC.fxgl.cachedModel(b)   building b's model ONLY if VC.models already built it (never builds), else null
  *   VC.fxgl.warmup()         compiles the lazily created programs (fx_voxel, fx_voxel_sh, fx_glow) now
+ *   VC.fxgl.lost()           true while the WebGL context is lost (update() code must then make no GL calls)
+ *   VC.fxgl.glGen()          GL context generation (from VC.gfx.lostCount / lost): changes at every loss and restore
+ *   VC.fxgl.restoreModels()  after a context restore: re-uploads every cached VC.models mesh IN PLACE (see below)
+ *
+ * WEBGL CONTEXT LOSS / RESTORE: after a restore every GL object of the old context is dead (never deleted:
+ * deleting a dead handle is an INVALID_OPERATION). Batches, the glow VAO and the private model VAOs remember the
+ * glGen() they were created in and are re-created lazily on their next draw; the programs relink by themselves
+ * (render core). restoreModels() (called by every restore() that draws models; once per generation) uses
+ * VC.models.restore() when voxel.js offers it, else re-meshes each cached model from model.grid and uploads it
+ * into the SAME model object (vao / vbo, lod, winter), so every reference held by renderers stays valid; it also
+ * drops the palette texture (re-created on the next VC.voxel.paletteTexture()).
  *
  * INSTANCE TRANSFORM T: world = R * voxelPos + t, with R = T[0..8] (3 columns, includes the voxel
  * size and scale) and t = T[9..11]. Parts (def.parts of VC.models) are composed with partPose().
@@ -30,6 +41,77 @@ const M = VC.M;
 /** Vector length without Math.hypot (V8's hypot allocates its argument list; this is on per-frame paths). */
 const hyp = (x, z) => Math.sqrt(x * x + z * z);
 const FX = (VC.fxgl = {});
+
+/* ------------------------------------------------------------------ */
+/* Context loss                                                          */
+/* ------------------------------------------------------------------ */
+/**
+ * GL context generation: 2 * VC.gfx.lostCount, + 1 while lost (0 until the first loss). GL objects of another
+ * generation are dead — including ones created while the context was lost (browsers return invalid objects then).
+ */
+const glGen = (FX.glGen = () => { const G = VC.gfx; return G ? ((G.lostCount | 0) << 1) + (G.lost ? 1 : 0) : 0; });
+/**
+ * True while the WebGL context is lost. isContextLost() also covers the gap before the (asynchronous)
+ * 'webglcontextlost' event sets VC.gfx.lost.
+ */
+FX.lost = function () {
+  const G = VC.gfx;
+  return !G || !G.gl || !!G.lost || G.gl.isContextLost();
+};
+let modelsGen = 0;
+/**
+ * Re-uploads every cached VC.models mesh after a context restore, keeping each model object (and its lod / winter
+ * objects) so renderers' references stay valid. Idempotent per context generation (every layer that draws models
+ * may call it from its restore()). Returns the number of models re-uploaded (-1: done by VC.models.restore()).
+ */
+FX.restoreModels = function () {
+  const gen = glGen();
+  if (modelsGen === gen || FX.lost()) return 0;
+  modelsGen = gen;
+  const Ms = VC.models;
+  if (typeof Ms.restore === 'function') {
+    Ms.restore();
+    return -1;
+  }
+  const V = VC.voxel;
+  if (V) { V._palTex = null; V._palDirty = false; } // palette texture: re-created on the next paletteTexture()
+  let n = 0;
+  const t0 = performance.now();
+  for (const m of Ms.cached().values()) {
+    try {
+      reuploadModel(m);
+      n++;
+    } catch (e) {
+      console.error('[fxgl] model re-upload failed', m && m.key, e);
+    }
+  }
+  FX.restoreStats = { models: n, ms: Math.round(performance.now() - t0) };
+  return n;
+};
+/** Meshes model m again from its grid (exactly as VC.models.get does) and uploads it into the same objects. */
+function reuploadModel(m) {
+  const g = m.grid, V = VC.voxel;
+  if (!g) {
+    // (no voxels kept: cannot be rebuilt; renderers skip meshes without a VAO)
+    m.vao = m.vbo = null;
+    if (m.lod) m.lod.vao = m.lod.vbo = null;
+    return;
+  }
+  const def = VC.models.defs[m.key] || {};
+  Object.assign(m, V.upload(V.mesh(g, 1)));
+  const lodGrid = V.downsample(g, 2, def.lodMinFill || 3);
+  const lod = V.upload(V.mesh(lodGrid, 2));
+  if (m.lod) Object.assign(m.lod, lod);
+  else m.lod = lod;
+  const w = m.winter;
+  if (w) {
+    const open = V.foliageLUT();
+    Object.assign(w, V.upload(V.mesh(g, 1, open)));
+    const wl = V.upload(V.mesh(lodGrid, 2, open));
+    if (w.lod) Object.assign(w.lod, wl);
+    else w.lod = wl;
+  }
+}
 
 /** ModelBatch per-instance flags. */
 FX.F = {
@@ -258,13 +340,17 @@ function shadowProgram() {
 /*
  * Private VAOs per model mesh (full / LOD): the mesh VBO on locations 0-1 + the shared quad index buffer.
  * The model's own VAO belongs to the building renderer; never touching it keeps both renderers independent.
+ * Memo entry {vao, vbo, gen}: re-created when the mesh was re-uploaded (context restore) or the context changed.
  */
 const vaoMemo = new WeakMap();
 function privateVao(gl, g) {
-  let v = vaoMemo.get(g);
-  if (v) return v;
+  const gen = glGen();
+  let e = vaoMemo.get(g);
+  if (e && e.vbo === g.vbo && e.gen === gen) return e.vao;
+  // same context but a new mesh buffer: the old VAO is still a live object
+  if (e && e.gen === gen && e.vao) gl.deleteVertexArray(e.vao);
   const ib = VC.gfx.quadIndexBuffer(g.quads); // (unbinds any VAO: call before binding ours)
-  v = gl.createVertexArray();
+  const v = gl.createVertexArray();
   gl.bindVertexArray(v);
   gl.bindBuffer(gl.ARRAY_BUFFER, g.vbo);
   gl.enableVertexAttribArray(0);
@@ -277,7 +363,8 @@ function privateVao(gl, g) {
     gl.vertexAttribDivisor(k, 1);
   }
   gl.bindVertexArray(null);
-  vaoMemo.set(g, v);
+  if (e) { e.vao = v; e.vbo = g.vbo; e.gen = gen; }
+  else vaoMemo.set(g, { vao: v, vbo: g.vbo, gen });
   return v;
 }
 
@@ -304,6 +391,7 @@ class ModelBatch {
     this.slots = [];
     this.slotMap = new Map();
     this.buf = null;
+    this.bufGen = -1; // glGen() of buf
     this.T = new Float32Array(12); // scratch for parts
     this.stats = { n: 0, cam: 0, sh0: 0, sh1: 0 };
   }
@@ -439,7 +527,8 @@ class ModelBatch {
     if (shadow) this.stats[cascade >= 1 ? 'sh1' : 'sh0'] = cnt;
     else this.stats.cam = cnt;
     if (!cnt) return;
-    if (!this.buf) this.buf = gl.createBuffer();
+    const gen = glGen();
+    if (!this.buf || this.bufGen !== gen) { this.buf = gl.createBuffer(); this.bufGen = gen; } // (old one died with its context)
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
     gl.bufferData(gl.ARRAY_BUFFER, this.data, gl.DYNAMIC_DRAW, 0, cnt * 16); // (WebGL2 offset/length: no subarray per draw)
     let P;
@@ -547,13 +636,19 @@ void main(){
   float fogK = exp(-length(vWp - uCamPos.xyz) * uFog.w * 0.8);
   fragColor = vec4(vCol.rgb * (vCol.a * a * fogK), 0.0);
 }`;
-let glowProg = null, glowVao = null;
+let glowProg = null, glowVao = null, glowVaoGen = -1;
 function glowProgram() {
-  if (!glowProg) {
-    glowProg = VC.gfx.program('fx_glow', GVS, GFS);
-    glowVao = VC.gfx.gl.createVertexArray();
-  }
+  if (!glowProg) glowProg = VC.gfx.program('fx_glow', GVS, GFS);
   return glowProg;
+}
+/** The shared (attribute-less until bound) glow VAO of the current context. */
+function glowVertexArray(gl) {
+  const gen = glGen();
+  if (!glowVao || glowVaoGen !== gen) {
+    glowVao = gl.createVertexArray();
+    glowVaoGen = gen;
+  }
+  return glowVao;
 }
 
 class GlowBatch {
@@ -562,6 +657,7 @@ class GlowBatch {
     this.data = new Float32Array(cap * 12);
     this.n = 0;
     this.buf = null;
+    this.bufGen = -1; // glGen() of buf
   }
   begin() {
     this.n = 0;
@@ -603,8 +699,9 @@ class GlowBatch {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);
     gl.depthMask(false);
-    gl.bindVertexArray(glowVao);
-    if (!this.buf) this.buf = gl.createBuffer();
+    gl.bindVertexArray(glowVertexArray(gl));
+    const gen = glGen();
+    if (!this.buf || this.bufGen !== gen) { this.buf = gl.createBuffer(); this.bufGen = gen; } // (old one died with its context)
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
     gl.bufferData(gl.ARRAY_BUFFER, this.data, gl.DYNAMIC_DRAW, 0, this.n * 12);
     for (let k = 0; k < 3; k++) {
@@ -623,10 +720,11 @@ FX.glowBatch = (cap = 256) => new GlowBatch(cap);
 /* ------------------------------------------------------------------ */
 /** Compiles the lazily created programs now (the first vehicle / glow / shadow never compiles mid-game). */
 FX.warmup = function () {
-  if (!VC.gfx || !VC.gfx.gl) return false;
+  if (!VC.gfx || !VC.gfx.gl || FX.lost()) return false;
   modelProgram();
   shadowProgram();
   glowProgram();
+  glowVertexArray(VC.gfx.gl);
   return true;
 };
 /**

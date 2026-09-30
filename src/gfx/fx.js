@@ -26,9 +26,15 @@
  * DISASTERS: gfx/fx_disasters.js (VC.fxDis) renders VC.disasters.active every frame.
  * CELEBRATIONS: gfx/fx_celebrate.js (VC.fxCel): fireworks, confetti, space-center rocket launches.
  *
+ * WEBGL CONTEXT LOSS: while the context is lost update() keeps the weather state machine (CPU only) but skips the
+ *   effect models (disasters / celebrations: no model builds). restore() (layer hook) re-uploads the shared model
+ *   meshes (VC.fxgl.restoreModels), re-creates the precipitation / bolt VAOs + buffer, the tornado mesh
+ *   (VC.fxDis.restore) and the precipitation floor texture (full upload on the next draw); programs relink by
+ *   themselves, batches re-create their buffers on their next draw.
+ *
  * API: setWeather(type | 'auto', instant), fireworks(x, z, n), confetti(x, z, n), launchRocket(b?),
  *      isLaunching(b), lightning(x, z), weatherInfo() -> {target, forced, nextInDays, precipKind, sim},
- *      lastBolt, stats
+ *      lastBolt, stats, restore()
  */
 const M = VC.M, C = VC.C;
 /** Vector lengths without Math.hypot (V8's hypot allocates its argument list; these are on per-frame paths). */
@@ -121,6 +127,8 @@ const FXL = (VC.fx = {
       rainSplashes(S, rdt);
       fogPuffs(S, rdt);
     }
+    // context lost: effect models are not rebuilt (they may build models, whose meshes could not be uploaded)
+    if (VC.fxgl.lost()) { FXL.stats.ms = Math.round((performance.now() - t0) * 100) / 100; return; }
     FXL.batch.begin();
     FXL.glows.begin();
     if (VC.fxDis) VC.fxDis.update(dt, rdt, S, FXL.batch, FXL.glows);
@@ -135,6 +143,13 @@ const FXL = (VC.fx = {
   },
   opaque(ctx) {
     FXL.batch.draw(ctx, false);
+  },
+  /** WebGL context restored: every GL object of this layer is gone (see the header). */
+  restore() {
+    VC.fxgl.restoreModels();
+    initBuffers();
+    RF.tex = null; // (dead handle: never deleted) re-created with the whole floor by roofUpload
+    if (VC.fxDis && VC.fxDis.restore) VC.fxDis.restore();
   },
   transparent(ctx) {
     if (VC.fxDis && VC.fxDis.drawTransparent) VC.fxDis.drawTransparent(ctx);
@@ -820,13 +835,18 @@ void main(){
 }`;
 const GLR = {};
 function initGL() {
-  const G = VC.gfx, gl = G.gl;
+  const G = VC.gfx;
   GLR.precip = G.program('fx_precip', PVS, PFS);
   GLR.bolt = G.program('fx_bolt', BVS, BFS);
+  GLR.boltData = new Float32Array(6 * 5 * 90 * 4);
+  initBuffers();
+}
+/** VAOs + bolt vertex buffer (init, and after a context restore: the program wrappers stay valid). */
+function initBuffers() {
+  const gl = VC.gfx.gl;
   GLR.emptyVao = gl.createVertexArray();
   GLR.boltVao = gl.createVertexArray();
   GLR.boltBuf = gl.createBuffer();
-  GLR.boltData = new Float32Array(6 * 5 * 90 * 4);
   gl.bindVertexArray(GLR.boltVao);
   gl.bindBuffer(gl.ARRAY_BUFFER, GLR.boltBuf);
   gl.enableVertexAttribArray(0);

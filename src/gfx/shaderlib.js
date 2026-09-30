@@ -205,9 +205,10 @@ vec3 _libHorizonGlow(vec3 d, vec3 sd){
   float amt = smoothstep(0.34, 0.02, h) * smoothstep(-0.2, -0.03, h) * (1.0 - uWind.w * 0.75);
   if (amt <= 0.001) return vec3(0.0);
   float t = dot(normalize(d.xz + vec2(1e-5)), normalize(sd.xz + vec2(1e-5))) * 0.5 + 0.5;
-  float low = 1.0 - smoothstep(-0.08, 0.42, d.y);
-  vec3 toward = vec3(1.0, 0.4, 0.13) * (1.25 * t * t * t) * smoothstep(-0.12, 0.02, h);
-  vec3 away = vec3(0.34, 0.2, 0.38) * (0.35 * (1.0 - t));
+  float low = 1.0 - smoothstep(-0.05, 0.38, d.y);
+  float t2 = t * t;
+  vec3 toward = vec3(1.0, 0.42, 0.14) * (0.75 * t2 * t2) * smoothstep(-0.12, 0.02, h);
+  vec3 away = vec3(0.34, 0.2, 0.38) * (0.3 * (1.0 - t));
   return (toward + away) * amt * low;
 }
 /** Fog / horizon color seen along view direction v (base fog + sunset glow + key light scattering). */
@@ -215,7 +216,8 @@ vec3 libFogColor(vec3 v){
   vec3 sd = libSunDir();
   vec3 c = uFog.rgb + _libHorizonGlow(v, sd);
   float mu = max(dot(v, uSunDir.xyz), 0.0);
-  c += uSunColor.rgb * uSunDir.w * (pow(mu, 6.0) * 0.1) * (1.0 - uWind.w * 0.6);
+  float mu2 = mu * mu, mu4 = mu2 * mu2;
+  c += uSunColor.rgb * uSunDir.w * (mu4 * mu4 * 0.06) * (1.0 - uWind.w * 0.6);
   return c;
 }
 

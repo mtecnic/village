@@ -833,6 +833,7 @@ G.render = function (dt, rdt) {
   gl.bindTexture(gl.TEXTURE_2D, G.dummyShadow);
   gl.activeTexture(gl.TEXTURE0);
 
+  if (G._prof) profMark('setup');
   // ---- shadow pass ----
   G.shadowTex = null;
   G.shadowMat = null;
@@ -855,6 +856,7 @@ G.render = function (dt, rdt) {
   gl.bindTexture(gl.TEXTURE_2D, G.shadowTex || G.dummyShadow);
   gl.activeTexture(gl.TEXTURE0);
 
+  if (G._prof) profMark('shadow');
   // ---- main pass ----
   G.writeFrame(null);
   gl.bindFramebuffer(gl.FRAMEBUFFER, G.hdr.fbo);
@@ -866,8 +868,10 @@ G.render = function (dt, rdt) {
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   if (S) {
     G.drawLayers('opaque', ctx);
+    if (G._prof) profMark('opaque');
     G.drawLayers('transparent', ctx);
     drawGizmos();
+    if (G._prof) profMark('transparent');
   }
 
   // ---- post ----
@@ -895,6 +899,7 @@ G.render = function (dt, rdt) {
     G.fullscreen();
   }
   gl.enable(gl.DEPTH_TEST);
+  if (G._prof) profMark('post');
   if (G._captures && G._captures.length) {
     const list = G._captures;
     G._captures = [];
@@ -914,6 +919,36 @@ G.render = function (dt, rdt) {
 };
 
 /** Captures the next rendered frame as a data URL (scaled to maxW px wide). Returns a Promise. */
+/* GPU-synchronous phase timing (debug only: stalls the pipeline). */
+const _profPx = new Uint8Array(4);
+function profMark(name) {
+  const gl = G.gl, p = G._prof;
+  const fb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, _profPx);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  const t = performance.now();
+  p[name] = +(t - p._t).toFixed(2);
+  p._t = t;
+}
+/**
+ * Renders one frame synchronously and returns per-phase GPU+CPU times in ms
+ * {setup, shadow, opaque, transparent, post, total}. Debug/benchmark only (stalls the GPU).
+ */
+G.profile = function () {
+  const gl = G.gl;
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, _profPx);
+  const t0 = performance.now();
+  G._prof = { _t: t0 };
+  try { G.render(0, 1 / 60); } finally {
+    const p = G._prof;
+    G._prof = null;
+    delete p._t;
+    p.total = +(performance.now() - t0).toFixed(2);
+    return p;
+  }
+};
+
 G.capture = function (maxW = 320, type = 'image/jpeg') {
   return new Promise((resolve) => {
     (G._captures || (G._captures = [])).push({ maxW, type, resolve });

@@ -36,7 +36,10 @@ const SH = (VC.shadows = {
   frustum: [new Float32Array(24), new Float32Array(24)],
   mat: new Float32Array(16),
   far: { k: 0, ox: 0, oy: 0 },
-  stats: { cascades: 0, half: [0, 0], size: 0, ms: 0 },
+  stats: { cascades: 0, half: [0, 0], size: 0, ms: 0, reused: 0 },
+  /** Frames between shadow map updates (1 = every frame; 'ultra' always uses 1). */
+  interval: 2,
+  cache: { valid: false, n: 0, moon: false, size: 0, frame: -1, L: [0, 0, 0] },
   _err: false,
 
   init() {
@@ -46,6 +49,7 @@ const SH = (VC.shadows = {
   reset() {
     slot.near.half = slot.far.half = 0;
     grid.S = null;
+    SH.cache.valid = false;
   },
   /** Tallest receiver world Y on the map (terrain + buildings + trees). */
   maxHeight() {
@@ -55,6 +59,9 @@ const SH = (VC.shadows = {
   render(ctx) {
     const G = VC.gfx, gl = ctx.gl, S = ctx.S, env = ctx.env, cam = ctx.cam;
     SH.cascades = 0;
+    SH.stats.cascades = 0;
+    const wasValid = SH.cache.valid;
+    SH.cache.valid = false; // set again below when a map is rendered or reused
     if (!S) return;
     // Skip when the key light cannot contribute (sun/moon crossover, very dim moon under clouds).
     const keyLum = (env.sunColor[0] * 0.2126 + env.sunColor[1] * 0.7152 + env.sunColor[2] * 0.0722) * env.keyVis;
@@ -84,6 +91,23 @@ const SH = (VC.shadows = {
     SH.cascades2 = two;
     const list = two ? CASC2 : CASC1;
     const n = list.length;
+
+    // --- temporal reuse: the atlas and its matrices stay self-consistent, so between updates the previous
+    // map is reused as long as it still covers the view (moving casters lag one frame at most).
+    const C = SH.cache;
+    const moon = env.sunUp < -0.02;
+    const interval = (VC.settings && VC.settings.quality) === 'ultra' ? 1 : SH.interval;
+    const due = !wasValid || SH._realloc || C.n !== n || C.moon !== moon || C.size !== SH.size || G.frameCount - C.frame >= interval ||
+      L[0] * C.L[0] + L[1] * C.L[1] + L[2] * C.L[2] < 0.99996 || !covers(list, SH.size);
+    if (!due) {
+      C.valid = true;
+      G.setShadow(SH.tex, SH.mat);
+      G.shadowFar = C.n === 2 ? SH.far : null;
+      SH.cascades = n;
+      SH.stats.cascades = n;
+      SH.stats.reused++;
+      return;
+    }
 
     // shared depth range: receivers' farthest point .. every map caster toward the light
     let zMin = Infinity;
@@ -117,11 +141,14 @@ const SH = (VC.shadows = {
     // --- render ---
     gl.bindFramebuffer(gl.FRAMEBUFFER, SH.fbo);
     gl.viewport(0, 0, SH.atlasW, SH.atlasH);
-    gl.disable(gl.SCISSOR_TEST);
     gl.colorMask(false, false, false, false);
     gl.depthMask(true);
     gl.clearDepth(1);
+    // clear only the atlas part in use
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, n * SH.size, SH.size);
     gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.disable(gl.SCISSOR_TEST);
     // slope-scaled bias; clamp (when supported) keeps steep walls from detaching their contact shadows
     G.shadowBias = [1.6, 2.5];
     for (let c = 0; c < n; c++) {
@@ -140,6 +167,13 @@ const SH = (VC.shadows = {
     G.setShadow(SH.tex, SH.mat);
     G.shadowFar = two ? SH.far : null;
     SH.cascades = n;
+    C.valid = true;
+    SH._realloc = false;
+    C.n = n;
+    C.moon = moon;
+    C.size = SH.size;
+    C.frame = G.frameCount;
+    C.L[0] = L[0]; C.L[1] = L[1]; C.L[2] = L[2];
     const st = SH.stats;
     st.cascades = n;
     st.size = SH.size;
@@ -164,6 +198,7 @@ function ensureTarget(gl, size, two) {
   SH.atlasW = w;
   SH.atlasH = size;
   slot.near.half = slot.far.half = 0;
+  SH._realloc = true;
   if (!SH.fbo) {
     SH._failedAt = w * 100000 + size;
     if (!SH._err) console.warn('[shadows] shadow framebuffer unsupported at ' + w + 'x' + size + '; shadows disabled');
@@ -423,6 +458,17 @@ function fit(cam, S, tFar, sl) {
   const ext = (u) => rc * Math.hypot(u[0], u[2]) + hh * Math.abs(u[1]);
   sl.need = Math.max(ext(LX), ext(LY));
   sl.zlo = LZ[0] * px + LZ[1] * cy + LZ[2] * pz - ext(LZ);
+  return true;
+}
+
+/** True if the last rendered cascades (stabilized cx, cy, half) still contain every slot's required region. */
+function covers(list, size) {
+  for (let c = 0; c < list.length; c++) {
+    const sl = list[c];
+    if (!sl.half) return false;
+    const need = Math.max(3, sl.need * (1 + 12 / size));
+    if (Math.abs(sl.rawX - sl.cx) + need > sl.half || Math.abs(sl.rawY - sl.cy) + need > sl.half) return false;
+  }
   return true;
 }
 

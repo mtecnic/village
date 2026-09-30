@@ -126,7 +126,7 @@ const PP = (VC.post = {
 
     /* ---- 3. bloom ---- */
     let bloomTex = PP.black;
-    const bloomI = 0.2 + n * 0.5 + (env.blueHour || 0) * 0.15 + (env.lightning || 0) * 0.3;
+    const bloomI = 0.2 + n * 0.7 + (env.blueHour || 0) * 0.15 + (env.lightning || 0) * 0.3;
     if (f.bloom) {
       const levels = 6;
       let w = hw, h = hh;
@@ -216,9 +216,9 @@ const PP = (VC.post = {
           draw(P.rays, m0, { uSrc: m1.tex }, (u) => { gl.uniform2f(u.uSunUv, su, sv); gl.uniform2f(u.uParam, 0.9 / 24, 0.985); });
           raysTex = m0.tex;
           const warm = M.smoothstep(0.35, 0.0, h);
-          raysCol[0] = k * 1.1;
-          raysCol[1] = k * M.lerp(0.95, 0.62, warm);
-          raysCol[2] = k * M.lerp(0.82, 0.32, warm);
+          raysCol[0] = k * 0.45;
+          raysCol[1] = k * 0.45 * M.lerp(0.92, 0.66, warm);
+          raysCol[2] = k * 0.45 * M.lerp(0.8, 0.4, warm);
         } else f.rays = false;
       } else f.rays = false;
     }
@@ -237,12 +237,13 @@ const PP = (VC.post = {
       gl.uniform3fv(u.uLift, gp.lift);
       gl.uniform3fv(u.uGamma, gp.gamma);
       gl.uniform3fv(u.uGain, gp.gain);
-      gl.uniform4f(u.uGradeP, gp.sat, gp.contrast, gp.vignette, low ? 0 : 0.005);
+      gl.uniform4f(u.uGradeP, gp.sat, gp.contrast, gp.vignette, low ? 0 : 0.0025);
       gl.uniform4f(u.uFx, grain, ctx.time % 100, M.sat(env.lightning || 0), toScreen ? 1 : 0);
       gl.uniform4fv(u.uTilt, tilt);
       gl.uniform2fv(u.uFocusZ, focus);
       gl.uniform1f(u.uAoStr, 0.75);
       gl.uniform1f(u.uScotopic, M.smoothstep(0.3, 1.0, n) * 0.65);
+      gl.uniform1f(u.uKeepHue, 0.3 + n * 0.25);
     });
 
     /* ---- 7. FXAA + grain -> canvas ---- */
@@ -363,7 +364,7 @@ function grade(env) {
   mix3(t, WB_GOLD, g * 0.85);
   mix3(t, WB_DUSK, dk * (1 - g) * 0.6);
   mix3(t, WB_BLUE, bh * 0.6);
-  mix3(t, WB_NIGHT, n * 0.9);
+  mix3(t, WB_NIGHT, n * 0.12); // (the scotopic shift in the shader cools the darks; lights stay warm)
   mix3(t, WB_WET, wet * 0.6 + snow * 0.25);
   // lift (shadow tint), gamma, gain (highlight tint)
   lift[0] = 0.004 - n * 0.002; lift[1] = 0.004 + n * 0.004; lift[2] = 0.006 + n * 0.016 + bh * 0.01;
@@ -577,8 +578,10 @@ void main(){
   vec3 vd = normalize(vec3(ndc.x / uProj[0][0], ndc.y / uProj[1][1], -1.0));
   vec3 wd = transpose(mat3(uView)) * vd;
   float mu = max(dot(wd, uSun), 0.0);
-  vec3 c = texture(uSrc, vUv).rgb;
-  fragColor = vec4(min(c, vec3(4.0)) * (pow(mu, 5.0) * 0.8 + pow(mu, 40.0) * 2.0), 1.0);
+  vec3 c = min(texture(uSrc, vUv).rgb, vec3(8.0));
+  // only the bright sky around the sun feeds the shafts
+  float b = smoothstep(0.7, 2.5, libLuma(c)) * smoothstep(-0.02, 0.06, wd.y);   // sky only (not sea glints)
+  fragColor = vec4(c * b * (pow(mu, 4.0) * 0.5 + pow(mu, 32.0) * 1.5), 1.0);
 }`;
 
 const FS_RAYS = `
@@ -607,13 +610,19 @@ uniform vec4 uGradeP;  // x saturation, y contrast, z vignette, w chromatic aber
 uniform vec4 uFx;      // x grain, y time, z lightning flash, w writes to canvas (grain here)
 uniform float uAoStr;
 uniform float uScotopic;
+uniform float uKeepHue;
 const mat3 ACES_IN = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777);
 const mat3 ACES_OUT = mat3(1.60475, -0.10208, -0.00327, -0.53108, 1.10813, -0.07276, -0.07367, -0.00605, 1.07602);
-vec3 acesFilm(vec3 v){
-  v = ACES_IN * v;
-  vec3 a = v * (v + 0.0245786) - 0.000090537;
-  vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
-  return clamp(ACES_OUT * (a / b), 0.0, 1.0);
+vec3 rrtOdt(vec3 v){ return (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.4329510) + 0.238081); }
+vec3 acesFilm(vec3 v){ return clamp(ACES_OUT * rrtOdt(ACES_IN * v), 0.0, 1.0); }
+// ACES desaturates bright lights to white; blending in a hue-preserving (luminance-mapped) version keeps
+// warm windows warm and neon signs colorful.
+vec3 tonemap(vec3 c, float keepHue){
+  vec3 a = acesFilm(c);
+  float L = max(libLuma(c), 1e-5);
+  vec3 b = c * (clamp(rrtOdt(vec3(L)).x, 0.0, 1.0) / L);
+  b /= max(1.0, max(b.r, max(b.g, b.b)));
+  return mix(a, b, keepHue * smoothstep(0.2, 1.0, L));
 }
 vec3 toSrgb(vec3 c){ return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 void main(){
@@ -641,7 +650,7 @@ void main(){
   float sl = libLuma(col);
   col = mix(col, sl * vec3(0.62, 0.78, 1.18), uScotopic * (1.0 - smoothstep(0.06, 0.6, sl)));
   col += vec3(0.5, 0.56, 0.75) * (uFx.z * 0.45);        // lightning flash
-  col = toSrgb(acesFilm(max(col, vec3(0.0))));
+  col = toSrgb(tonemap(max(col, vec3(0.0)), uKeepHue));
   // lift / gamma / gain, contrast, saturation (display space)
   col = col * uGain + uLift * (1.0 - col);
   col = pow(max(col, vec3(0.0)), uGamma);

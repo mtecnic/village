@@ -285,6 +285,9 @@ function onKey(e) {
   if (e.defaultPrevented) return; // input.js (or another handler) already took care of it
   e.preventDefault(); // never open the browser's "Save page" dialog
   if (e.repeat) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return; // typing
+  if (VC.ui && VC.ui.modalCount && VC.ui.modalCount() > 0) return; // a dialog is up
   const S = VC.state;
   if (!S || S.demo || (VC.menu && VC.menu.active)) return;
   SV.quickSave();

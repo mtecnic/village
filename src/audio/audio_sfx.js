@@ -415,7 +415,7 @@ R.siren = {
   },
 };
 R.thunder = {
-  vol: 0.75, group: 'thunder', win: 1500, variants: 2, prio: 2, pos: false, duck: 0.25, wet: 0.3,
+  vol: 0.75, group: 'thunder', win: 1500, variants: 2, prio: 2, far: true, duck: 0.25, wet: 0.3,
   render(D, r, v) {
     return D.stereo(4, 91 + v * 3, (b, rr) => {
       const bumps = [];
@@ -433,7 +433,7 @@ R.thunder = {
   },
 };
 R.rocket = {
-  vol: 0.7, group: 'rocket', win: 3000, variants: 1, prio: 3, duck: 0.4, wet: 0.35,
+  vol: 0.7, group: 'rocket', win: 3000, variants: 1, prio: 3, far: true, duck: 0.4, wet: 0.35,
   render(D) {
     return D.stereo(6, 61, (b, rr) => {
       const env = (x) => Math.min(1, x * 6) * (x < 0.55 ? 1 : 1 - (x - 0.55) / 0.45);
@@ -553,14 +553,53 @@ R.horn = {
     return fin(D, b, 0.8);
   },
 };
+// fireworks come in three stages so a show can voice each shell: launch -> burst -> glitter.
+// 'fireworks' (alias) = one burst; 'firework_show' = the whole thing in one sound.
+R.firework_launch = {
+  vol: 0.28, group: 'fwlaunch', win: 90, variants: 3, pitch: 0.1, prio: 1, far: true, wet: 0.3,
+  render(D, r) {
+    const b = D.buf(0.8);
+    D.tone(b, 0, 0.7, 650 + r() * 300, 2100 + r() * 900, 0.5, { a: 0.04, env: (x) => (1 - x * 0.6) * Math.min(1, x * 8) });
+    D.noise(b, 0, 0.7, 0.35, { f: 'bp', f0: 1500, f1: 3500, q: 2, a: 0.05, rnd: r, env: (x) => 1 - x });
+    return fin(D, b);
+  },
+};
 R.firework = {
-  vol: 0.5, group: 'firework', win: 120, variants: 3, prio: 1, pos: true, wet: 0.4,
+  vol: 0.5, group: 'firework', win: 120, variants: 3, prio: 1, far: true, wet: 0.45,
+  render(D, r) {
+    const b = D.buf(1.4);
+    thud(D, b, 0, 150 + r() * 40, 55, 1, 0.09); // the burst
+    D.noise(b, 0, 0.25, 0.7, { f: 'lp', f0: 3200, d: 0.06, rnd: r });
+    D.crackle(b, 0.08, 1.2, 200, 0.3, { f: 5200, q: 1.2, len: 0.0015, rnd: r, env: (x) => (1 - x) ** 1.5 });
+    return fin(D, b);
+  },
+};
+R.crackle = {
+  vol: 0.3, group: 'crackle', win: 80, variants: 3, prio: 0, far: true, wet: 0.35,
+  render(D, r) {
+    const b = D.buf(1.0);
+    D.crackle(b, 0, 1.0, 380, 0.8, { f: 5800, q: 1.3, len: 0.0012, rnd: r, env: (x) => Math.min(1, x * 10) * (1 - x) ** 1.3 });
+    return fin(D, b);
+  },
+};
+R.firework_show = {
+  vol: 0.5, group: 'firework', win: 120, variants: 2, prio: 1, far: true, wet: 0.4,
   render(D, r) {
     const b = D.buf(2.0);
-    D.tone(b, 0, 0.55, 700 + r() * 300, 2200 + r() * 800, 0.15, { a: 0.05, env: (x) => 1 - x * 0.5 }); // launch whistle
-    thud(D, b, 0.6, 140, 60, 0.9, 0.08); // pop
+    D.tone(b, 0, 0.55, 700 + r() * 300, 2200 + r() * 800, 0.15, { a: 0.05, env: (x) => 1 - x * 0.5 });
+    thud(D, b, 0.6, 140, 60, 0.9, 0.08);
     D.noise(b, 0.6, 0.2, 0.6, { f: 'lp', f0: 3000, d: 0.05, rnd: r });
-    D.crackle(b, 0.7, 1.2, 260, 0.35, { f: 5500, q: 1.2, len: 0.0015, rnd: r, env: (x) => (1 - x) ** 1.5 }); // glitter
+    D.crackle(b, 0.7, 1.2, 260, 0.35, { f: 5500, q: 1.2, len: 0.0015, rnd: r, env: (x) => (1 - x) ** 1.5 });
+    return fin(D, b);
+  },
+};
+R.burner = {
+  vol: 0.3, group: 'burner', win: 600, variants: 2, pitch: 0.06, prio: 0, far: true, wet: 0.15,
+  render(D, r) {
+    const b = D.buf(1.3);
+    // hot-air balloon gas burner: a fast "pfff" ignition into a breathy roar
+    D.noise(b, 0, 1.2, 1, { color: 'pink', f: 'lp', f0: 900, f1: 1400, q: 0.7, a: 0.03, hold: 0.7, d: 0.15, rnd: r });
+    D.noise(b, 0, 1.2, 0.35, { f: 'hp', f0: 3500, a: 0.02, hold: 0.7, d: 0.1, rnd: r });
     return fin(D, b);
   },
 };
@@ -602,7 +641,8 @@ Object.assign(A.ALIAS, {
   lightning: 'thunder', thunderclap: 'thunder',
   beam: 'abduct', tractor: 'abduct',
   launch: 'rocket', water: 'splash',
-  fireworks: 'firework',
+  fireworks: 'firework', firework_burst: 'firework', glitter: 'crackle', sparkler: 'crackle',
+  plane: 'jet', airplane: 'jet', flyover: 'jet', balloon: 'burner', flame: 'burner',
   select: 'click', toggle: 'click', tab: 'click', button: 'click',
   shutter: 'camera', screenshot: 'camera', photo: 'camera',
   stamp: 'policy', ordinance: 'policy',

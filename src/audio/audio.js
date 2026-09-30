@@ -673,7 +673,9 @@ A.play = function (name, opts) {
   let pan = 0, lp = 0;
   if (o.x != null && o.z != null && R.pos !== false) {
     const sp = A.spatial(+o.x, +o.z);
-    gain *= sp.g; pan = sp.pan; lp = sp.lp;
+    // 'far' sounds (thunder, jets, rockets, fireworks) carry: pan + distance low-pass, gentle attenuation
+    gain *= R.far ? 0.5 + 0.5 * sp.g : sp.g;
+    pan = sp.pan; lp = sp.lp;
   }
   if (gain < 0.012) { A.stats.dropped++; return false; }
   const prio = R.prio == null ? 1 : R.prio;
@@ -778,7 +780,12 @@ const DISASTER_START = { fire: 'fire', tornado: 'wind', meteor: 'meteor', earthq
 const DISASTER_WARM = { fire: ['collapse'], tornado: ['collapse'], meteor: ['explosion', 'collapse'], earthquake: ['collapse', 'explosion'], ufo: ['abduct'], monster: ['stomp', 'collapse', 'explosion'] };
 function hookBus() {
   const on = (ev, fn) => VC.bus.on(ev, (d) => { if (A.ready()) fn(d); });
-  on('sfx', (d) => { if (d) A.play(typeof d === 'string' ? d : d.name, typeof d === 'string' ? null : d); });
+  on('sfx', (d) => {
+    if (!d) return;
+    const name = typeof d === 'string' ? d : d.name;
+    if (name === 'thunder') A.extThunder = true; // the weather module voices its own lightning
+    A.play(name, typeof d === 'string' ? null : d);
+  });
   on('built', onBuilt);
   on('bldRemove', onRemove);
   on('milestone', () => A.play('milestone'));

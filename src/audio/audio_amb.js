@@ -181,6 +181,99 @@ R.swoosh = {
   },
 };
 
+/* ---------------- landmark voices ---------------- */
+R.shiphorn = {
+  vol: 0.34, group: 'shiphorn', win: 5000, variants: 2, pitch: 0.03, prio: 1, bus: 'amb', wet: 0.45,
+  render(D, r, v) {
+    const b = D.buf(2.4);
+    const f = v ? 92 : 104;
+    for (const [m, a] of [[1, 0.6], [1.26, 0.45], [2.0, 0.15]]) D.tone(b, 0.02, 2.2, f * m, f * m * 0.995, a, { type: 'saw', a: 0.12, hold: 1.5, d: 0.25, vib: [4.5, 0.004] });
+    D.filter(b, 'lp', 650, 0.9);
+    return D.fade(D.normalize(b, 0.85), 0.01, 0.1);
+  },
+};
+R.jet = {
+  vol: 0.34, group: 'jet', win: 6000, variants: 2, pitch: 0.05, prio: 1, bus: 'amb', far: true, wet: 0.2,
+  render(D, r, v) {
+    return D.stereo(4.5, 71 + v, (b, rr, ch) => {
+      const pass = (x) => Math.exp(-((x - (0.45 + ch * 0.06)) ** 2) / 0.05); // flyover, slightly later on the right
+      D.noise(b, 0, 4.5, 1, { color: 'pink', f: 'lp', f0: 1800, q: 0.5, rnd: rr, env: pass });
+      D.noise(b, 0, 4.5, 0.6, { color: 'brown', f: 'lp', f0: 220, rnd: rr, env: pass });
+      D.tone(b, 0, 4.5, 3300, 2300, 0.05, { env: pass }); // turbine whine with a doppler drop
+    }).map((c) => D.fade(D.normalize(c, 0.85), 0.05, 0.2));
+  },
+};
+R.crowd = {
+  vol: 0.3, group: 'crowd', win: 3000, variants: 2, pitch: 0.04, prio: 1, bus: 'amb', wet: 0.35,
+  render(D, r, v) {
+    return D.stereo(2.8, 81 + v, (b, rr) => {
+      const swell = (x) => Math.min(1, x * 4) * Math.exp(-Math.max(0, x - 0.35) * 2.2);
+      for (let k = 0; k < 7; k++) { // many voices = band-passed noise "vowels"
+        const f = 450 + rr() * 1100;
+        D.noise(b, rr() * 0.2, 2.5, 0.5, { color: 'pink', f: 'bp', f0: f, f1: f * (1.05 + rr() * 0.2), q: 3, rnd: rr, env: (x) => swell(x) * (0.7 + 0.3 * Math.sin(x * 30 + k)) });
+      }
+      D.crackle(b, 0.3, 2.3, 900, 0.35, { f: 2600, q: 0.6, len: 0.002, rnd: rr, env: swell }); // clapping
+      if (rr() < 0.8) D.tone(b, 0.3 + rr() * 0.4, 0.5, 2200, 2900, 0.05, { a: 0.02, d: 0.2 }); // a whistle
+    }).map((c) => D.fade(D.normalize(c, 0.8), 0.05, 0.2));
+  },
+};
+R.turbine = {
+  vol: 0.24, group: 'turbine', win: 1500, variants: 2, pitch: 0.06, prio: 0, bus: 'amb', wet: 0.1,
+  render(D, r) {
+    const b = D.buf(3.6);
+    D.noise(b, 0, 3.6, 1, { color: 'pink', f: 'bp', f0: 380, q: 1.1, rnd: r, env: (x) => Math.sin(x * Math.PI * 3) ** 4 }); // blade swishes
+    D.tone(b, 0, 3.6, 46, 46, 0.12, { a: 0.3 });
+    return D.fade(D.normalize(b, 0.8), 0.2, 0.3);
+  },
+};
+R.musicbox = {
+  vol: 0.17, group: 'musicbox', win: 4000, variants: 3, pitch: 0, prio: 0, bus: 'amb', wet: 0.4,
+  render(D, r) {
+    const b = D.buf(3.4);
+    const pent = [0, 2, 4, 7, 9, 12, 14, 16];
+    let t = 0;
+    for (let k = 0; k < 10; k++) {
+      const m = 84 + pent[Math.floor(r() * pent.length)];
+      D.modal(b, t, 1.2, mt(m), [[1, 1, 0.5], [3.9, 0.25, 0.08], [9.2, 0.08, 0.02]], 0.6, { a: 0.001 });
+      t += (k % 4 === 3 ? 0.42 : 0.21) * (0.9 + r() * 0.2); // a slightly unsteady comb
+    }
+    return D.fade(D.normalize(b, 0.8), 0.001, 0.1);
+  },
+};
+R.jingle = {
+  vol: 0.19, group: 'jingle', win: 3000, variants: 2, pitch: 0.03, prio: 0, bus: 'amb', wet: 0.3,
+  render(D, r, v) {
+    const b = D.buf(1.3);
+    const seq = v ? [79, 83, 86, 91, 95] : [84, 88, 91, 96];
+    seq.forEach((m, k) => D.fm(b, k * 0.07, 0.6, mt(m), 3.5, 1.2, 0.1, 0.5, { a: 0.001, d: 0.15, id: 0.05 }));
+    D.crackle(b, 0.35, 0.8, 60, 0.4, { f: 5200, q: 3, len: 0.003, rnd: r, env: (x) => 1 - x }); // coins
+    return D.fade(D.normalize(b, 0.8), 0.001, 0.05);
+  },
+};
+R.fountain = {
+  vol: 0.17, group: 'fountain', win: 1200, variants: 2, pitch: 0.05, prio: 0, bus: 'amb', wet: 0.2,
+  render(D, r) {
+    const b = D.buf(2.6);
+    D.noise(b, 0, 2.6, 0.7, { f: 'bp', f0: 1700, q: 0.8, rnd: r, env: (x) => 0.7 + 0.3 * Math.sin(x * 80 + r()) });
+    D.crackle(b, 0, 2.6, 320, 0.6, { f: 2600, q: 2, len: 0.002, rnd: r });
+    return D.fade(D.normalize(b, 0.8), 0.3, 0.4);
+  },
+};
+/** Landmarks that make themselves heard when the camera is close. rate = events/s at full proximity. */
+const LANDMARKS = {
+  seaport: { sound: 'shiphorn', rate: 0.05 },
+  airport: { sound: 'jet', rate: 0.07 },
+  stadium: { sound: 'crowd', rate: 0.09, night: 1.8 },
+  wind_turbine: { sound: 'turbine', rate: 0.4, near: 0.6 },
+  ferris_wheel: { sound: 'musicbox', rate: 0.06, night: 2, day: 0.6 },
+  casino: { sound: 'jingle', rate: 0.06, night: 2, day: 0.4 },
+  plaza: { sound: 'fountain', rate: 0.35, near: 0.55 },
+  botanical_garden: { sound: 'bird', rate: 0.5, night: 0 },
+};
+const LM = {};
+for (const k in LANDMARKS) LM[k] = { g: 0, x: 0, z: 0 };
+AMB.LANDMARKS = LANDMARKS;
+
 /* ------------------------------------------------------------------ */
 /* Environment sampling (no allocations)                                */
 /* ------------------------------------------------------------------ */
@@ -223,15 +316,24 @@ function sampleEnv(S) {
   E.build = build; E.roads = roads * k; E.traffic = roads ? traffic / roads / 255 : 0;
   return E;
 }
-/** Loudest burning building (sim fires) near the camera: {g, pan} in FIRE. Runs ~1/s. */
+/**
+ * One pass over the buildings (~1/s): the loudest burning building (sim fires) -> FIRE {g, pan}, and the
+ * closest audible instance of each landmark type -> LM[key] {g, x, z}.
+ */
 const FIRE = { g: 0, pan: 0 };
-function scanFires(S) {
+function scanBuildings(S) {
   FIRE.g = 0; FIRE.pan = 0;
+  for (const k in LM) LM[k].g = 0;
   for (const b of S.buildings.values()) {
-    if (!(b.fire > 0)) continue;
-    const sp = A.spatial(b.x + b.w / 2, b.z + b.d / 2);
-    const g = sp.g * Math.min(1, 0.4 + b.fire);
-    if (g > FIRE.g) { FIRE.g = g; FIRE.pan = sp.pan; }
+    const L = LM[b.key];
+    if (!(b.fire > 0) && !L) continue;
+    const cx = b.x + b.w / 2, cz = b.z + b.d / 2;
+    const sp = A.spatial(cx, cz);
+    if (b.fire > 0) {
+      const g = sp.g * Math.min(1, 0.4 + b.fire);
+      if (g > FIRE.g) { FIRE.g = g; FIRE.pan = sp.pan; }
+    }
+    if (L && !(b.built < 1) && !b.abandoned && sp.g > L.g) { L.g = sp.g; L.x = cx; L.z = cz; }
   }
 }
 /** Random tile near the camera matching a predicate (few tries) -> sets PT.x/z. */
@@ -248,6 +350,7 @@ function findTile(S, pred, tries) {
 const isTree = (S, i) => S.trees[i] > 0 || (S.maps && S.maps.park && S.maps.park[i] > 60);
 const isWater = (S, i) => S.height[i] < VC.C.SEA;
 const isRoad = (S, i) => S.road[i] > 0;
+const isOpenLand = (S, i) => S.height[i] >= VC.C.SEA && !S.road[i] && !S.bld[i];
 const nearWater = (S, i) => { const W = S.W; return S.height[i] >= VC.C.SEA && (isWater(S, i - 1) || isWater(S, i + 1) || isWater(S, i - W) || isWater(S, i + W)); };
 
 /* ------------------------------------------------------------------ */
@@ -310,10 +413,9 @@ function setBed(key, target, pan, tc, dt) {
 /* Update                                                               */
 /* ------------------------------------------------------------------ */
 let acc = 0, fireAcc = 0, gust = 0.5, gustT = 0;
-let tBird = 2, tGull = 5, tOwl = 20, tFrog = 3, tSwoosh = 1, tHorn = 20, tBuild = 2, tStorm = 20;
+let tStorm = 20;
 let lastLightning = 0, thunderIn = -1;
 const T = AMB.targets;
-const exp = (rate) => (rate > 1e-4 ? -Math.log(1 - Math.random()) / rate : 1e9);
 const DIS_BED = { tornado: 'tornado', fire: 'fire', ufo: 'ufo', earthquake: 'quake', monster: 'growl' };
 const dis = { tornado: [0, 0], fire: [0, 0], ufo: [0, 0], quake: [0, 0], growl: [0, 0] };
 
@@ -368,53 +470,50 @@ function applyTargets(dt) {
   setBed('crickets', T.crickets, null, 2, dt);
   for (const k in dis) setBed(k, dis[k][0], dis[k][1], 0.4, dt);
 }
+/**
+ * Memoryless trigger: true with probability rate * dt (Poisson process sampled per update). Unlike
+ * pre-drawn timers this reacts instantly when a rate changes (dawn, rain stops, game unpaused).
+ * Minimum spacing between repeats comes from each recipe's group window.
+ */
+const trig = (rate, dt) => rate > 0 && Math.random() < rate * dt;
 function oneShots(S, dt) {
   const zn = E.zoomNear;
   // songbirds: day, greenery, fewer in winter / rain; a proper dawn chorus
   const birdRate = E.day * (0.15 + E.green) * (E.warm > 0 ? 1 : 0.15) * (1 - E.rain) * (0.35 + 0.65 * zn) * (E.dawn ? 2.2 : 0.7) * (1 - E.urban * 0.4);
-  if ((tBird -= dt) <= 0) {
-    tBird = Math.max(0.2, exp(birdRate));
-    if (birdRate > 0.02 && findTile(S, isTree, 6)) A.play('bird', { x: PT.x, z: PT.z, vol: 0.6 + Math.random() * 0.5 });
+  if (trig(birdRate, dt)) {
+    // in a tree if there is one nearby, else a quieter city sparrow on open land
+    if (findTile(S, isTree, 6)) A.play('bird', { x: PT.x, z: PT.z, vol: 0.6 + Math.random() * 0.5 });
+    else if (findTile(S, isOpenLand, 4)) A.play('bird', { x: PT.x, z: PT.z, vol: 0.3 + Math.random() * 0.3 });
   }
   const gullRate = E.day * (E.water > 0.2 ? E.water : 0) * 0.25 * (0.3 + zn) * (1 - E.rain);
-  if ((tGull -= dt) <= 0) {
-    tGull = Math.max(1.5, exp(gullRate));
-    if (gullRate > 0.005 && findTile(S, isWater, 4)) A.play('gull', { x: PT.x, z: PT.z });
-  }
+  if (trig(gullRate, dt) && findTile(S, isWater, 4)) A.play('gull', { x: PT.x, z: PT.z });
   const owlRate = E.night > 0.8 ? 0.03 * E.green * (1 - E.rain) : 0;
-  if ((tOwl -= dt) <= 0) {
-    tOwl = Math.max(6, exp(owlRate));
-    if (owlRate > 0.003 && findTile(S, isTree, 6)) A.play('owl', { x: PT.x, z: PT.z });
-  }
+  if (trig(owlRate, dt) && findTile(S, isTree, 6)) A.play('owl', { x: PT.x, z: PT.z });
   const frogRate = E.night * E.warm * (E.water > 0.03 ? 0.6 : 0) * (1 - E.rain * 0.5) * (0.3 + zn);
-  if ((tFrog -= dt) <= 0) {
-    tFrog = Math.max(0.25, exp(frogRate));
-    if (frogRate > 0.01 && findTile(S, nearWater, 8)) A.play('frog', { x: PT.x, z: PT.z, vol: 0.5 + Math.random() * 0.5 });
-  }
+  if (trig(frogRate, dt) && findTile(S, nearWater, 8)) A.play('frog', { x: PT.x, z: PT.z, vol: 0.5 + Math.random() * 0.5 });
   // traffic pass-bys when zoomed in over busy roads (cars stop while paused)
   const busy = E.roads > 0 ? M.clamp(E.traffic * 1.6 + 0.08, 0, 1) : 0;
   const swooshRate = E.paused || zn < 0.45 ? 0 : busy * 3 * zn * Math.min(1, E.roads * 6);
-  if ((tSwoosh -= dt) <= 0) {
-    tSwoosh = Math.max(0.12, exp(swooshRate));
-    if (swooshRate > 0.02 && findTile(S, isRoad, 8)) A.play('swoosh', { x: PT.x, z: PT.z, vol: 0.4 + busy * 0.6 });
-  }
+  if (trig(swooshRate, dt) && findTile(S, isRoad, 8)) A.play('swoosh', { x: PT.x, z: PT.z, vol: 0.4 + busy * 0.6 });
   const hornRate = E.paused ? 0 : (E.traffic > 0.45 ? 0.05 : 0.005) * busy * zn;
-  if ((tHorn -= dt) <= 0) {
-    tHorn = Math.max(4, exp(hornRate));
-    if (hornRate > 0.001 && findTile(S, isRoad, 8)) A.play('horn', { x: PT.x, z: PT.z, vol: 0.5 });
-  }
+  if (trig(hornRate, dt) && findTile(S, isRoad, 8)) A.play('horn', { x: PT.x, z: PT.z, vol: 0.5 });
   const buildRate = E.build > 0 && !E.paused && zn > 0.45 ? Math.min(1, E.build / 2) * 0.8 : 0;
-  if ((tBuild -= dt) <= 0) {
-    tBuild = Math.max(0.4, exp(buildRate));
-    if (buildRate > 0.01) A.play('construct', { x: E.bx, z: E.bz });
+  if (trig(buildRate, dt)) A.play('construct', { x: E.bx, z: E.bz });
+  // landmarks nearby: ship horns, jets, stadium crowds, turbine swishes, music box, casino, fountains
+  for (const k in LM) {
+    const L = LM[k], def = LANDMARKS[k];
+    if (L.g < 0.12 || zn < (def.near || 0)) continue;
+    const tm = E.night > 0.5 ? (def.night == null ? 1 : def.night) : def.day == null ? 1 : def.day;
+    if (trig(def.rate * tm * L.g * (1 - E.rain * 0.5), dt)) A.play(def.sound, { x: L.x + (Math.random() - 0.5), z: L.z + (Math.random() - 0.5) });
   }
   // thunder after a lightning flash (distance delay), or now and then in storms without flashes
   const w = S.weather || {};
   const L = w.lightning || 0;
   if (!AMB.thunderWarm && (w.type === 'storm' || L > 0)) { AMB.thunderWarm = true; A.warm(['thunder']); }
-  if (L > 0.5 && lastLightning <= 0.5) thunderIn = 0.35 + Math.random() * 2.2;
+  // (only when no other module voices thunder: fx emits its own positional 'thunder' per bolt)
+  if (!A.extThunder && L > 0.5 && lastLightning <= 0.5) thunderIn = 0.35 + Math.random() * 2.2;
   lastLightning = L;
-  if (w.type === 'storm' && (tStorm -= dt) <= 0) { tStorm = 12 + Math.random() * 25; if (thunderIn < 0) thunderIn = 0.1; }
+  if (!A.extThunder && w.type === 'storm' && (tStorm -= dt) <= 0) { tStorm = 12 + Math.random() * 25; if (thunderIn < 0) thunderIn = 0.1; }
   if (thunderIn >= 0 && (thunderIn -= dt) < 0) {
     if (performance.now() - A.lastPlayed('thunder') > 2500) A.play('thunder', { vol: 0.55 + Math.random() * 0.45 });
   }
@@ -438,7 +537,7 @@ AMB.update = function () {
   lastT = now;
   acc += rdt;
   fireAcc += rdt;
-  if (fireAcc > 1) { fireAcc = 0; scanFires(S); }
+  if (fireAcc > 1) { fireAcc = 0; scanBuildings(S); }
   if (acc >= 0.35) {
     const step = acc;
     acc = 0;

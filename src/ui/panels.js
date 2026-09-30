@@ -456,6 +456,59 @@ U.overlayBtn = (key, label) => {
   b.sync();
   return b;
 };
+/**
+ * Hover readout for a VC.ui.chart element: a vertical guide line plus a tooltip listing every series'
+ * value at the hovered sample. Call chartEl.setHover(series, fmt) after each chart.update(series).
+ * Matches the framework chart padding (70 / 12 px on the 2x canvas).
+ */
+U.chartHover = (chartEl) => {
+  const cv = chartEl.querySelector('canvas');
+  if (!cv) return chartEl;
+  chartEl.classList.add('pn-hov');
+  const guide = h('i', { class: 'pn-guide' });
+  chartEl.appendChild(guide);
+  let series = [], fmt = (v) => VC.fmt.short(v), idx = -1;
+  const n = () => series.reduce((m, s) => Math.max(m, s.data.length), 0);
+  const html = () => {
+    const N = n();
+    if (idx < 0 || idx >= N) return '';
+    const S = VC.state;
+    const month = S ? Math.floor(S.time.day / VC.C.DAYS_PER_MONTH) - (N - 1 - idx) : 0;
+    let out = `<b>${S ? VC.fmt.date(Math.max(0, month) * VC.C.DAYS_PER_MONTH) : ''}</b>`;
+    for (const s of series) {
+      const v = s.data[idx - (N - s.data.length)];
+      if (v == null) continue;
+      out += `<br><span style="color:${s.color}">●</span> ${s.label || 'Value'}: <b>${fmt(v)}</b>`;
+    }
+    return out;
+  };
+  cv.addEventListener('pointermove', (e) => {
+    const N = n();
+    const r = cv.getBoundingClientRect();
+    if (N < 2 || !r.width) return;
+    const t = M.sat((((e.clientX - r.left) / r.width) * cv.width - 70) / (cv.width - 82));
+    idx = Math.round(t * (N - 1));
+    const sx = cv.offsetWidth / cv.width, sy = cv.offsetHeight / cv.height;
+    guide.style.left = cv.offsetLeft + (70 + (idx / (N - 1)) * (cv.width - 82)) * sx + 'px';
+    guide.style.top = cv.offsetTop + 12 * sy + 'px';
+    guide.style.height = (cv.height - 34) * sy + 'px';
+    guide.style.display = 'block';
+    const t2 = html();
+    cv.dataset.tip = t2; // shown on enter by the basic framework
+    const tip = VC.ui && VC.ui.tip; // keep a visible tooltip in sync while moving
+    if (tip && tip.classList && tip.classList.contains('show')) tip.innerHTML = t2;
+  });
+  cv.addEventListener('pointerleave', () => {
+    idx = -1;
+    guide.style.display = 'none';
+  });
+  cv._tip = html; // richer frameworks re-evaluate this while the tooltip is visible
+  chartEl.setHover = (s, f) => {
+    series = s || [];
+    if (f) fmt = f;
+  };
+  return chartEl;
+};
 /** Promise-safe call: resolves fn() (sync or async); cb(ok, value, error). */
 U.async = (fn, cb) => {
   let r;

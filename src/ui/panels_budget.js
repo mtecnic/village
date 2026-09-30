@@ -483,8 +483,8 @@ function tabHistory(c) {
   });
   c.appendChild(h('div', { class: 'pn-toolbar' }, h('span', { class: 'pn-toolbar-label' }, 'Range'), seg));
   const W = 540;
-  const ch1 = VC.ui.chart({ width: W, height: 170, series: [], yFormat: U.moneyAxis });
-  const ch2 = VC.ui.chart({ width: W, height: 110, series: [], yFormat: U.moneyAxis });
+  const ch1 = U.chartHover(VC.ui.chart({ width: W, height: 170, series: [], yFormat: U.moneyAxis }));
+  const ch2 = U.chartHover(VC.ui.chart({ width: W, height: 110, series: [], yFormat: U.moneyAxis }));
   const box = h('div', null, U.sec('Income vs expenses (monthly)', ch1), U.sec('Treasury', ch2));
   const empty = U.empty('📉', 'Not enough history yet', 'Charts fill in as months pass. Check back after a couple of months.');
   c.append(box, empty);
@@ -500,12 +500,16 @@ function tabHistory(c) {
     const inc = U.hist('income', histRange), exp = U.hist('expenses', histRange).map(Math.abs);
     let net = U.hist('net', histRange);
     if (net.length !== inc.length) net = inc.map((v, i) => v - (exp[i] || 0));
-    ch1.update([
+    const s1 = [
       { data: inc, color: '#3ddc84', label: 'Income', fill: false },
       { data: exp, color: '#ff5a6a', label: 'Expenses', fill: false },
       { data: net, color: '#5ad1ff', label: 'Net' },
-    ]);
-    ch2.update([{ data: U.hist('money', histRange), color: '#b388ff', label: 'Treasury' }]);
+    ];
+    const s2 = [{ data: U.hist('money', histRange), color: '#b388ff', label: 'Treasury' }];
+    ch1.update(s1);
+    ch2.update(s2);
+    ch1.setHover(s1, U.money);
+    ch2.setHover(s2, U.money);
   }
   return (force) => draw(force);
 }

@@ -143,6 +143,13 @@ P.defs.policies = {
       const inc = U.num(VC.state.stats.income);
       kCost.set(U.money(sum) + '/mo', sum > 0 ? (inc > 0 ? Math.round((sum / inc) * 100) + '% of monthly income' : 'recurring expense') : 'nothing to pay', sum > 0 ? 'warn' : '');
       kUn.set(un + ' / ' + VC.POLICIES.length, un < VC.POLICIES.length ? 'grow to unlock more' : 'all unlocked');
+      // live count badge on the "Active" tab
+      const at = p.tabs && p.tabs.querySelector('.tab[data-key="active"]');
+      if (at) {
+        if (!at._badge) at.appendChild((at._badge = h('span', { class: 'pn-tab-badge' })));
+        U.txt(at._badge, String(n));
+        U.show(at._badge, n > 0);
+      }
     };
   },
 };

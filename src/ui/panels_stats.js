@@ -33,7 +33,9 @@ function chartCard(def, width) {
   const delta = h('span', { class: 'pn-cc-delta' });
   let autoPct = false; // 'auto' charts show percentages when all samples are 0..1 fractions
   const yFormat = (v) => (def.auto ? (autoPct ? pctFmt(v) : VC.fmt.short(v)) : def.fmt(v));
-  const chart = VC.ui.chart({ width, height: 118, series: [], yFormat, min: def.min, max: def.max });
+  const chart = U.chartHover(VC.ui.chart({ width, height: 118, series: [], yFormat, min: def.min, max: def.max }));
+  // tooltip values: full precision in the chart's own unit
+  const tipFmt = (v) => (def.auto ? (autoPct ? U.pct(v, 1) : U.int(v)) : def.key === 'rci' ? (v > 0 ? '+' : '') + Math.round(v * 100) : def.min === 0 && def.max === 1 ? U.pct(v, 1) : def.fmt === U.moneyAxis ? U.money(v) : U.int(v));
   const el = h('div', { class: 'pn-cc' }, h('div', { class: 'pn-cc-head' }, h('span', { class: 'pn-cc-title' }, h('span', { class: 'pn-ic' }, def.icon), def.title), cur), delta, chart);
   let lastSig = '', lastR = -1;
   el.upd = (S, force) => {
@@ -57,6 +59,7 @@ function chartCard(def, width) {
     autoPct = auto01;
     el.hasData = series.length > 0;
     chart.update(series);
+    chart.setHover(series.map((x) => Object.assign({}, x, { label: x.label || def.title })), tipFmt);
     // 12-month delta of the first series
     const d0 = series[0] && series[0].data;
     if (def.sub) {

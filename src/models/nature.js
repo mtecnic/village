@@ -10,12 +10,27 @@
  *                       monster (CUBEZILLA walk cycle), meteor, bird, balloon
  *   nature_vehicles.js  car, taxi, bus, truck, tanker, police_car, firetruck, ambulance, garbage_truck
  *
- * TREES: 8 x H x 8 grids (one tile), 10..22 voxels tall, trunk on the tile centre, canopies built
- * from clustered blobs in 2-3 FOLIAGE shades (lower lobes darker, crown lighter) so they read as
- * irregular foliage but still mesh to <= 250 quads. Nothing leaves the 8x8 footprint.
+ * TREES: 8 x H x 8 grids (one tile), 4 (bush) to 22 voxels tall, trunk on the tile centre, canopies
+ * built from clustered blobs in 2-3 FOLIAGE shades (lower lobes darker, crown lighter) so they read
+ * as irregular foliage but still mesh to <= 250 quads. Nothing leaves the 8x8 footprint. 5-6 variants
+ * each. Maples use their own MAPLE colours and cherries BLOSSOM pinks; palms, pines and cypresses
+ * only evergreen shades (PALM, HEDGE, PINE*), so the season table below leaves them green.
  *
  * Non-building models (props, vehicles, creatures) are centred on their grid: the renderer's origin
  * is the bottom centre (sx/2, 0, sz/2); the front faces +Z. See the per-file headers for meta fields.
+ * Thin models carry `lodMinFill: 1` in their definition: a hint that the LOD downsample should keep
+ * any block with >= 1 voxel (poles, stems and rotor blades otherwise vanish at LOD).
+ *
+ * VC.natureKit (usable by any module after load):
+ *   seasonPalette()          { autumn, winter: Float32Array(256*3) sRGB, mask: Uint8Array(256) }
+ *                            per-palette-index foliage recolouring (maples red, birches gold, ...)
+ *   treeFor(hash, level, terr)  species key for a tile (beach palms, alpine pines, meadow maples...)
+ *   TREES                    every tree key
+ *   toWorld(model, p, x, y, z, angle, out?)  model-local voxel point -> world (meta points)
+ *   signalVariant(phase, rot)   traffic_light variant for a VC.agents.signal() phase (props file)
+ *   col(name)                custom palette entries: BLOSSOM, BLOSSOM_L, MAPLE, MAPLE_L, NAV_GREEN, KAIJU_D
+ *   text(g, str, x, y, z, c, face)  3x5 pixel font; fit, under, blobIn, mirrorX, beam, disc, ring,
+ *                            exposed, sprinkle: grid helpers
  */
 const P = VC.P, MAT = VC.MAT;
 const K = (VC.natureKit = {});
@@ -26,12 +41,77 @@ const K = (VC.natureKit = {});
 const CUSTOM = {
   BLOSSOM: ['#f29cc2', MAT.FOLIAGE],
   BLOSSOM_L: ['#fbcfe0', MAT.FOLIAGE],
+  MAPLE: ['#4f9e36', MAT.FOLIAGE], // own indices so the season table can turn maples vivid red
+  MAPLE_L: ['#79bf42', MAT.FOLIAGE],
   NAV_GREEN: ['#3cff6e', MAT.NIGHTLIGHT | MAT.NOSNOW],
   KAIJU_D: ['#27502d', 0],
 };
 const customIdx = {};
-/** Palette index of a named custom nature color (BLOSSOM, BLOSSOM_L, NAV_GREEN, KAIJU_D). */
+/** Palette index of a named custom nature color (BLOSSOM, BLOSSOM_L, MAPLE, MAPLE_L, NAV_GREEN, KAIJU_D). */
 K.col = (name) => customIdx[name] || (customIdx[name] = VC.voxel.color(CUSTOM[name][0], CUSTOM[name][1]));
+
+/* ------------------------------------------------------------------ */
+/* Seasonal foliage hints (for renderers)                                */
+/* ------------------------------------------------------------------ */
+/**
+ * Per-palette-index foliage recolouring for autumn and winter, so each species turns its own
+ * colour: maples vivid red, birches gold, oaks orange/russet, cherries orange-red, evergreens
+ * (pine, palm, cypress) unchanged. Returns { autumn, winter: Float32Array(256*3) sRGB 0..1,
+ * mask: Uint8Array(256) (bit 1 autumn entry, bit 2 winter entry) } — cheap to upload as a 256x2
+ * texture and blend by the Frame UBO season. Rebuilt when the palette grows (call again).
+ */
+K.seasonPalette = () => {
+  const autumn = new Float32Array(256 * 3), winter = new Float32Array(256 * 3), mask = new Uint8Array(256);
+  const put = (arr, bit, idx, hex) => {
+    if (!idx) return;
+    const c = VC.color.rgb(hex);
+    arr[idx * 3] = c[0];
+    arr[idx * 3 + 1] = c[1];
+    arr[idx * 3 + 2] = c[2];
+    mask[idx] |= bit;
+  };
+  const A = [
+    [P.LEAF, '#c8702a'], [P.LEAF_D, '#9a4a22'], [P.LEAF_L, '#e0a030'], [P.LEAF_Y, '#f0c640'],
+    [P.BIRCH_LEAF, '#f2cc3a'], [K.col('MAPLE'), '#d42a1c'], [K.col('MAPLE_L'), '#f0502a'],
+    [K.col('BLOSSOM'), '#d8683a'], [K.col('BLOSSOM_L'), '#e8904a'],
+  ];
+  // winter: bare twig browns (the renderer's snow cover whitens the tops)
+  const Wn = [
+    [P.LEAF, '#6e5e4e'], [P.LEAF_D, '#5e5044'], [P.LEAF_L, '#7a6a58'], [P.LEAF_Y, '#827260'],
+    [P.BIRCH_LEAF, '#8a7e70'], [K.col('MAPLE'), '#6a5646'], [K.col('MAPLE_L'), '#7a6452'],
+    [K.col('BLOSSOM'), '#6e5a58'], [K.col('BLOSSOM_L'), '#7e6a66'],
+  ];
+  for (const [i, h] of A) put(autumn, 1, i, h);
+  for (const [i, h] of Wn) put(winter, 2, i, h);
+  return { autumn, winter, mask };
+};
+
+/* ------------------------------------------------------------------ */
+/* Species picker (for tree renderers / world generation)               */
+/* ------------------------------------------------------------------ */
+const T_BANDS = {
+  beach: [['tree_palm', 7], ['tree_bush', 2], ['tree_cypress', 1]],
+  lowland: [['tree_oak', 5], ['tree_maple', 3], ['tree_birch', 2], ['tree_bush', 3], ['tree_cypress', 1], ['tree_cherry', 1]],
+  meadow: [['tree_maple', 4], ['tree_oak', 3], ['tree_cherry', 2], ['tree_bush', 3], ['tree_birch', 1]],
+  upland: [['tree_pine', 4], ['tree_birch', 3], ['tree_oak', 2], ['tree_maple', 1], ['tree_bush', 1]],
+  alpine: [['tree_pine', 8], ['tree_birch', 1], ['tree_cypress', 1]],
+};
+/** Every tree model key this module defines. */
+K.TREES = ['tree_oak', 'tree_maple', 'tree_birch', 'tree_pine', 'tree_cypress', 'tree_palm', 'tree_cherry', 'tree_bush'];
+/**
+ * Picks a species for a tile: h = any uint32 hash of the tile/tree, level = terrain level,
+ * terr = VC.TERR code. Beaches get palms, mountains pines, meadows maples and cherries.
+ */
+K.treeFor = (h, level, terr) => {
+  const T = VC.TERR, C = VC.C;
+  const band = terr === T.SAND || level <= C.SEA ? 'beach' : terr === T.SNOW || terr === T.ROCK || level > 26 ? 'alpine' : level > 17 ? 'upland' : terr === T.MEADOW ? 'meadow' : 'lowland';
+  const list = T_BANDS[band];
+  let tot = 0;
+  for (const e of list) tot += e[1];
+  let r = (h >>> 0) % tot;
+  for (const e of list) if ((r -= e[1]) < 0) return e[0];
+  return list[0][0];
+};
 
 /* ------------------------------------------------------------------ */
 /* Grid helpers                                                         */
@@ -249,13 +329,15 @@ VC.models.define('tree_maple', {
     const a0 = rng() * Math.PI * 2;
     for (let k = 0; k < 2; k++) branch(g, th, a0 + k * Math.PI + rng.range(-0.4, 0.4), 2.3, 3);
     // taller, denser, egg-shaped crown in bright greens
-    crown(g, rng, { cy: th + 5, rx: 2.7, ry: 3.7, n: 6, spread: 1.95, lr: 1.8, dark: P.LEAF, mid: P.LEAF_L, light: P.LEAF_L, cap: 1.9, capC: P.BIRCH_LEAF });
+    const MA = K.col('MAPLE'), ML = K.col('MAPLE_L');
+    crown(g, rng, { cy: th + 5, rx: 2.7, ry: 3.7, n: 6, spread: 1.95, lr: 1.8, dark: MA, mid: ML, light: ML, cap: 1.9, capC: P.BIRCH_LEAF });
     trunk2(g, 0, th);
     return K.fit(g);
   },
 });
 
 VC.models.define('tree_birch', {
+  lodMinFill: 1,
   variants: 6,
   gen(rng) {
     const g = new VC.VoxelGrid(T, 22, T);
@@ -342,6 +424,7 @@ VC.models.define('tree_cypress', {
 });
 
 VC.models.define('tree_palm', {
+  lodMinFill: 1,
   variants: 6,
   gen(rng) {
     const g = new VC.VoxelGrid(T, 20, T);
@@ -365,7 +448,7 @@ VC.models.define('tree_palm', {
     AX.forEach(([dx, dz], k) => {
       const room = dx > 0 ? 7 - cx : dx < 0 ? cx : dz > 0 ? 7 - cz : cz;
       const L = Math.min(room, rng.int(3, 4));
-      const col = (k + a0) % 2 ? P.PALM : P.LEAF;
+      const col = (k + a0) % 2 ? P.PALM : P.HEDGE; // evergreen shades only
       const prof = rng.chance(0.5) ? [0, 0, -1, -2] : [1, 0, -1, -2];
       for (let t = 1; t <= L; t++) {
         const x = cx + dx * t, z = cz + dz * t, y = cy + prof[t - 1];
@@ -382,7 +465,7 @@ VC.models.define('tree_palm', {
       for (let t = 1; t <= L; t++) {
         const x = cx + dx * t, z = cz + dz * t;
         if (x < 0 || z < 0 || x > 7 || z > 7) break;
-        g.set(x, cy - t + 1, z, t === L ? P.LEAF : P.PALM);
+        g.set(x, cy - t + 1, z, t === L ? P.HEDGE : P.PALM);
       }
     }
     // coconut cluster under the crown

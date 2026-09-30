@@ -94,6 +94,13 @@ VC.models.define('plane', {
       g.box(23, y, z0, 1, 1, z1 - z0 + 1, L.tail);
     }
     g.box(23, 12, 5, 1, 2, 2, L.logo);
+    // landing gear so the plane rests on y = 0 when taxiing: nose leg + two main bogies
+    g.box(23, 1, 44, 1, 2, 1, P.METAL_D);
+    g.box(23, 0, 44, 1, 1, 2, P.TIRE);
+    for (const x of [18, 28]) {
+      g.box(x, 1, 23, 1, 3, 1, P.METAL_D);
+      g.box(x, 0, 22, 1, 1, 3, P.TIRE);
+    }
     // anti-collision beacon on the crown, white strobe on the tail cone
     g.set(23, 10, 24, P.BEACON_RED);
     g.set(23, 8, 0, P.HEADLIGHT);
@@ -105,6 +112,7 @@ VC.models.define('plane', {
 /* Helicopter + rotors                                                   */
 /* ------------------------------------------------------------------ */
 VC.models.define('helicopter_rotor', {
+  lodMinFill: 1,
   scale: 0.5,
   gen() {
     const g = new VC.VoxelGrid(27, 1, 27);
@@ -116,6 +124,7 @@ VC.models.define('helicopter_rotor', {
   },
 });
 VC.models.define('helicopter_tail_rotor', {
+  lodMinFill: 1,
   scale: 0.5,
   gen() {
     const g = new VC.VoxelGrid(1, 7, 7);
@@ -271,7 +280,7 @@ function ferry(rng) {
   g.box(4, 12, 11, 3, 1, 3, P.BLACK);
   g.emit(5.5, 13, 12.5, 'smoke', 0.5);
   g.set(5, 11, 19, P.BEACON_RED);
-  g.meta = { draft: 2, kind: 'ferry' };
+  g.meta = { draft: 1, kind: 'ferry' };
   return g;
 }
 
@@ -298,7 +307,7 @@ function cargoShip(rng) {
   // foremast
   g.box(6, 5, 52, 1, 5, 1, P.METAL);
   g.set(6, 10, 52, P.LAMP_WHITE);
-  g.meta = { draft: 3, kind: 'cargo' };
+  g.meta = { draft: 2, kind: 'cargo' };
   return g;
 }
 
@@ -510,6 +519,7 @@ VC.models.define('meteor', {
 /* Bird                                                                  */
 /* ------------------------------------------------------------------ */
 VC.models.define('bird', {
+  lodMinFill: 1,
   variants: 3,
   scale: 0.25,
   gen(rng, v) {

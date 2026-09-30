@@ -10,9 +10,11 @@
  *                  meta.head = lamp position (voxels); g.light at the head (glows at night).
  *   traffic_light  scale .5, 9x18x17. Pole on the origin, mast arm along +Z over the lanes carrying
  *                  a double-faced head that faces +-X (seen by traffic moving along X); a small
- *                  pole head faces +-Z and always shows the complementary aspect.
- *                  Variants: 0 red lit, 1 green lit, 2 yellow lit (for the X-facing head).
- *                  meta.heads = [[x,y,z] of lit lamps]; each lit lamp also has an always-on g.light.
+ *                  pole head faces +-Z for the crossing direction.
+ *                  Variants (main head / pole head): 0 red/green, 1 green/red, 2 yellow/red,
+ *                  3 red/yellow. VC.natureKit.signalVariant(phase, rot) maps an agents.signal()
+ *                  phase to the right variant. meta.heads = lit lamps of the main head; every
+ *                  lit lamp also has an always-on g.light.
  *   pylon          scale .5, 15x46x15 steel lattice tower; cross arms along X, wires run along +-Z.
  *                  meta.wire = 6 insulator attachment points in voxel coords, 3 per side:
  *                  [-X low, -X mid, -X high, +X low, +X mid, +X high]; meta.earth = top peak.
@@ -33,6 +35,7 @@ const M = VC.M;
 /* Street lamp                                                           */
 /* ------------------------------------------------------------------ */
 VC.models.define('streetlamp', {
+  lodMinFill: 1,
   variants: 2,
   scale: 0.5,
   gen(rng, v) {
@@ -71,15 +74,23 @@ VC.models.define('streetlamp', {
 const SIG_ON = () => [P.NEON_RED, P.NEON_ORANGE, P.NEON_GREEN];
 const SIG_OFF = () => [P.BRICK_D, P.WOOD_D, K.col('KAIJU_D')];
 const SIG_RGB = [[1, 0.2, 0.15], [1, 0.6, 0.1], [0.3, 1, 0.4]];
+/**
+ * Traffic-light variant for an intersection phase as returned by VC.agents.signal(x, z)
+ * (0 X-axis green, 1 X yellow, 2 Z-axis green, 3 Z yellow; <0 none) and the prop's quarter-turn
+ * rotation (rot 0/2: main head seen by X traffic, rot 1/3: by Z traffic).
+ */
+K.signalVariant = (phase, rot = 0) => (phase < 0 ? 0 : (rot & 1 ? [0, 3, 1, 2] : [1, 2, 0, 3])[phase & 3]);
 VC.models.define('traffic_light', {
-  variants: 3,
+  lodMinFill: 1,
+  variants: 4,
   scale: 0.5,
   gen(rng, v) {
     const g = new VC.VoxelGrid(9, 18, 17);
     const X = 4, Z = 8;
     const on = SIG_ON(), off = SIG_OFF();
-    // aspect of the X-facing head (0 red, 1 green, 2 yellow) -> lamp index (0 top red, 1 yellow, 2 green)
-    const litX = [0, 2, 1][v % 3], litZ = litX === 0 ? 2 : 0;
+    // variant -> lit lamp (0 top red, 1 yellow, 2 green) of the main (X-facing) head and the pole
+    // (Z-facing) head: 0 red/green, 1 green/red, 2 yellow/red, 3 red/yellow
+    const litX = [0, 2, 1, 0][v % 4], litZ = [2, 0, 0, 1][v % 4];
     g.box(3, 0, 7, 3, 1, 3, P.CONCRETE_D);
     g.box(X, 1, Z, 1, 15, 1, P.METAL_D);
     g.set(X, 16, Z, P.METAL_D);
@@ -118,6 +129,7 @@ VC.models.define('traffic_light', {
 /* Power pylon                                                           */
 /* ------------------------------------------------------------------ */
 VC.models.define('pylon', {
+  lodMinFill: 1,
   variants: 1,
   scale: 0.5,
   gen() {
@@ -178,6 +190,7 @@ VC.models.define('pylon', {
 /* Bench, hydrant                                                        */
 /* ------------------------------------------------------------------ */
 VC.models.define('bench', {
+  lodMinFill: 1,
   variants: 3,
   scale: 0.5,
   gen(rng, v) {
@@ -205,6 +218,7 @@ VC.models.define('bench', {
 });
 
 VC.models.define('hydrant', {
+  lodMinFill: 1,
   variants: 2,
   scale: 0.5,
   gen(rng, v) {
@@ -225,6 +239,7 @@ VC.models.define('hydrant', {
 /* Bus stop                                                              */
 /* ------------------------------------------------------------------ */
 VC.models.define('bus_stop', {
+  lodMinFill: 1,
   variants: 2,
   scale: 0.5,
   gen(rng, v) {
@@ -286,6 +301,7 @@ const ADS = [
   },
 ];
 VC.models.define('billboard', {
+  lodMinFill: 1,
   variants: 4,
   scale: 0.5,
   gen(rng, v) {

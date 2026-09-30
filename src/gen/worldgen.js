@@ -2,10 +2,12 @@
  * VOXELPOLIS — world generation.
  *
  *   VC.worldgen.generate(S, opts)          fills S.height / S.terr / S.trees for S.mapType from S.seed
- *   VC.worldgen.previewCanvas(o, px)       o = {seed, mapType, size} -> px x px mini-map canvas of the same map
+ *   VC.worldgen.previewCanvas(o, px)       o = {seed, mapType, size, showStart?} -> px x px mini-map canvas of
+ *                                            the same map (showStart: dashed outline of the start plateau)
  *   VC.worldgen.startArea(S)               -> {x0, z0, x1, z1, level, cx, cz}: the guaranteed dry, flat
  *                                            32x32 start plateau near the map center (inclusive tile rect)
- *   VC.worldgen.lastMs                     duration of the last generate() call
+ *   VC.worldgen.sample(seed, type, size, res) raw generator output {h, terr, trees, res, step, start}
+ *   VC.worldgen.TYPES, VC.worldgen.lastMs  map type keys; duration of the last generate() call
  *
  * Pipeline (deterministic from seed + map type; RESOLUTION INDEPENDENT so the low-res preview
  * shows the same map): continuous height field in terrain levels built from type-specific landforms
@@ -177,7 +179,7 @@ GEN.river = {
     const half = (size - 1) / 2;
     const alongX = rng() < 0.5;
     const side = rng() < 0.5 ? -1 : 1;
-    const off0 = side * (g.keep * 0.92 + size * (0.02 + rng() * 0.07));
+    const off0 = side * (g.keep * 0.92 + size * (0.01 + rng() * 0.05));
     const A1 = size * (0.04 + rng() * 0.06), L1 = size * (0.55 + rng() * 0.4), P1 = rng() * 6.283;
     const A2 = size * (0.012 + rng() * 0.022), L2 = size * (0.16 + rng() * 0.12), P2 = rng() * 6.283;
     const drift = (rng() - 0.5) * 0.3;
@@ -634,6 +636,16 @@ VC.worldgen = {
       }
     }
     ctx.putImageData(img, 0, 0);
+    if (o.showStart) {
+      // dashed outline of the guaranteed flat start plateau
+      const st = r.start, k = px / size;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+      ctx.lineWidth = Math.max(1, px / 160);
+      ctx.setLineDash([Math.max(2, px / 40), Math.max(2, px / 60)]);
+      ctx.strokeRect(st.x0 * k + 0.5, st.z0 * k + 0.5, (st.x1 - st.x0 + 1) * k - 1, (st.z1 - st.z0 + 1) * k - 1);
+      ctx.restore();
+    }
     return cv;
   },
 };

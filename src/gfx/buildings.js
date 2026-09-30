@@ -24,9 +24,10 @@
  *   skip distance are dropped) are scanned — nearest first in the camera pass, so each bucket is ordered front
  *   to back — and each instance picks a LOD tier by camera distance (0 full mesh, 1 model.lod, 2 a
  *   1/4-resolution mesh built lazily here from model.grid; props stop at tier 1, models without a distinct
- *   LOD mesh stay in one bucket, and a model's few 1/4-res instances (<= 3) join its LOD-1 bucket). The LOD
- *   distances are the preset's lodDist on high/ultra (moved closer only by dynamic resolution / wide FOV); on
- *   medium/low the full-mesh range is screen-space (see lodDistance). Tiny/far things are skipped (SKIP_DEF:
+ *   LOD mesh (incl. thin street furniture whose model.lod is the model) stay in one bucket, bare deciduous crowns
+ *   use their winter LOD mesh for tier 2 as well, and a model's few 1/4-res instances (<= 3) join its LOD-1
+ *   bucket). The LOD distances are the preset's lodDist on high/ultra (moved closer only by dynamic resolution /
+ *   wide FOV); on medium/low the full-mesh range is screen-space (see lodDistance). Tiny/far things are skipped (SKIP_DEF:
  *   props end at 0.9 lodDist, their glows stay), and the visible slot indices are counting-sorted per
  *   (model, tier) into a stream buffer. Result: ONE drawElementsInstanced per visible
  *   (model, tier) — bindVertexArray + one attribute pointer + one uniform per draw (the instance attribute's
@@ -320,6 +321,7 @@ let cellSeen = new Int32Array(0); // frameCount when the camera pass last saw th
 const MWS = [];
 const mwMap = new Map();
 let mwKind = new Uint8Array(64), mwHasL2 = new Uint8Array(64), mwL2State = new Uint8Array(64), mwSameL1 = new Uint8Array(64);
+let mwBareL1 = new Uint8Array(64); // 1: bare-crown tree with a winter LOD mesh (its tier 2 is that mesh while bareSeason())
 const mwSkip = [new Float32Array(64), new Float32Array(64), new Float32Array(64)]; // (factor * lodDist)^2 per mode (camera, shadow near, shadow far), in units of lodDist^2
 const l2Queue = [];
 // lit slots (model has lights) for the static sprite list
@@ -545,6 +547,7 @@ function ensureMwArrays(n) {
   mwHasL2 = growU8(mwHasL2, len, 0);
   mwL2State = growU8(mwL2State, len, 0);
   mwSameL1 = growU8(mwSameL1, len, 0);
+  mwBareL1 = growU8(mwBareL1, len, 0);
   for (let k = 0; k < 3; k++) {
     const a = new Float32Array(len);
     a.set(mwSkip[k]);
@@ -602,21 +605,26 @@ function getMW(m, kind) {
 }
 /**
  * (Re)reads the mesh handles of wrapper mw from its model (at creation and after a context restore re-uploaded
- * the model): tier 0 full mesh, tier 1 model.lod (or the full mesh), tier 2 the 1/4-res mesh built here lazily
- * (dropped: requested again by gather), winter meshes of open-foliage trees.
+ * the model): tier 0 full mesh, tier 1 model.lod (or the full mesh: models without a LOD, and thin street furniture
+ * whose model.lod is the model itself), tier 2 the 1/4-res mesh built here lazily (dropped: requested again by
+ * gather), winter meshes of open-foliage trees. Bare crowns do not use the 1/4-res mesh (at 1/4 resolution the
+ * leaves out-vote the skeleton, and a 2-voxel trunk would become a 4-voxel pillar): their tier 2 is the winter LOD
+ * mesh (gather folds those instances into the tier-1 bucket while bareSeason()).
  */
 function meshLevels(mw) {
   const m = mw.m, idx = mw.idx;
   const l0 = m.vao && m.quads ? { vao: m.vao, quads: m.quads } : null;
-  const l1 = m.lod && m.lod.vao && m.lod.quads ? { vao: m.lod.vao, quads: m.lod.quads } : l0;
+  const l1 = m.lod && m.lod !== m && m.lod.vao && m.lod.quads ? { vao: m.lod.vao, quads: m.lod.quads } : l0;
   mw.lv[0] = l0;
   mw.lv[1] = l1;
   mw.lv[2] = null;
   const w = m.winter;
-  mw.lvWinter = w && w.vao ? [{ vao: w.vao, quads: w.quads }, w.lod && w.lod.vao ? { vao: w.lod.vao, quads: w.lod.quads } : null, null] : null;
+  const wl1 = w && w.lod && w.lod.vao && w.lod.quads ? { vao: w.lod.vao, quads: w.lod.quads } : null;
+  mw.lvWinter = w && w.vao ? [{ vao: w.vao, quads: w.quads }, wl1, wl1] : null;
   mwHasL2[idx] = 0;
   mwL2State[idx] = l0 ? 0 : 3;
   mwSameL1[idx] = l1 === l0 ? 1 : 0;
+  mwBareL1[idx] = wl1 ? 1 : 0;
 }
 /** Overrides skip distances (in units of quality lodDist; Infinity = never skip, 0 = never draw) for a wrapper. */
 function setSkip(mw, cam, shNear, shFar) {
@@ -1613,6 +1621,7 @@ function gather(set, planes, mode) {
     T1[k] = TIER_F[k][1] * TIER_F[k][1] * L2;
   }
   const minTier = mode === 0 ? 0 : mode === 1 ? 1 : 2;
+  const bare = bareSeason();
   const skip = mwSkip[mode];
   const cam = VC.camera.pos;
   const px = cam[0], py = cam[1], pz = cam[2];
@@ -1661,6 +1670,9 @@ function gather(set, planes, mode) {
         if (mwL2State[mi] === 0) { mwL2State[mi] = 1; l2Queue.push(mi); }
         tier = 1;
       }
+      // bare crowns: the leafy 1/4-res mesh has no skeleton left, the winter LOD mesh draws their tier 2 (the 1/4-res
+      // mesh is still requested above, so it is ready when the leaves come back)
+      if (tier === 2 && bare && mwBareL1[mi]) tier = 1;
       if (tier === 1 && mwSameL1[mi]) tier = 0; // no distinct LOD mesh: one bucket, one draw
       const bk = mi * 3 + tier;
       if (bCnt[bk]++ === 0) { used[nUsed++] = bk; bMin[bk] = d2; }

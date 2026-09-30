@@ -31,17 +31,26 @@
  *     parts: [{ model:'wind_rotor', pivot:[x,y,z], partPivot:[x,y,z], axis:'x'|'y'|'z', speed: radPerSec }],
  *     sized: false,                        // true: forBuilding passes params {fw, fd} (e.g. 'rubble')
  *     lodMinFill: 3,                       // LOD-1 downsample keeps blocks with >= this many voxels (1 for poles)
+ *     lod: true,                           // false: no downsampled LOD — model.lod IS the model (its full-mesh
+ *                                          // handles). For thin street furniture (lamps, signals, hydrants), whose
+ *                                          // 1-voxel poles would double into chunky pillars at half resolution
  *     openFoliage: false,                  // true (deciduous trees): also builds model.winter, meshes whose wood
  *                                          // faces touching leaves exist too (a hidden branch skeleton shows when
- *                                          // the renderer drops the leaves); the summer meshes stay lean
+ *                                          // the renderer drops the leaves); the summer meshes stay lean. The
+ *                                          // winter LOD (model.winter.lod) is its own grid: the wood downsampled
+ *                                          // with minFill 1 (trunks and limbs survive, block grid phase-aligned
+ *                                          // to the trunk), leaf blocks only where there is no wood
  *   })
  *   PARTS: an animated sub-model. pivot = attachment point in the PARENT grid (voxels);
  *   partPivot = rotation center in the PART grid (voxels). Renderer draws the part with
  *   world = parentTransform * T(pivot) * Rot(axis, time*speed [* wind for anim 'wind']) * T(-partPivot).
  *   VC.models.get(key, variant, params) -> Model (generated, meshed, uploaded on first use; cached)
- *   Model = { key, variant, params, sx, sy, sz, vox, height, quads, vao, vbo, lod:{quads,vao,vbo},
- *             emitters:[{x,y,z,type}], lights:[{x,y,z,color,size}], parts,
+ *   Model = { key, variant, params, sx, sy, sz, vox, height, quads, vao, vbo, lod:{quads,vao,vbo} (=== the model
+ *             itself for lod: false), emitters:[{x,y,z,type}], lights:[{x,y,z,color,size}], parts,
  *             winter?:{quads,vao,vbo,lod} (openFoliage models: meshes with the wood under the leaves) }
+ *   VC.models.restore() (after a WebGL context restore; VC.fxgl.restoreModels calls it) re-meshes every cached
+ *   model from model.grid and uploads it into the SAME objects (model, model.lod, model.winter, model.winter.lod),
+ *   so renderers' references stay valid; it also drops the palette texture (re-created on next use).
  *
  * BUILDING MODEL CONVENTIONS:
  *   - A building of unrotated footprint fw x fd tiles is a grid of exactly (fw*8) x H x (fd*8) voxels.
@@ -474,6 +483,61 @@ function downsample(g, f = 2, minFill = 3) {
   return o;
 }
 
+/**
+ * Half-resolution WINTER mesh data of an openFoliage model (drawn while the crowns are bare). The plain LOD grid
+ * loses the skeleton: a 2x2 trunk straddles block boundaries (2 voxels per block < minFill) and leaves out-vote
+ * the wood in mixed blocks, so a bare crown fell apart into floating blocks. Here the WOOD (every non-`open`
+ * voxel) is downsampled on its own with minFill 1, so trunks, limbs and twigs survive, and the foliage blocks
+ * (same minFill as the summer LOD) fill in only where there is no wood. The 2x2x2 block grid is shifted by one
+ * voxel on X and / or Z when that needs fewer wood blocks: a 2x2 trunk on voxels 3..4 then stays one block
+ * (2 voxels) wide instead of doubling to 4; the meshed positions are shifted back. Returns mesh() output.
+ */
+function winterLodMesh(g, open, minFill) {
+  const sx = g.sx, sy = g.sy, sz = g.sz, v = g.v;
+  let best = null;
+  for (let s = 0; s < 4; s++) {
+    const ox = s & 1, oz = s >> 1;
+    const wx = sx + ox, wz = sz + oz;
+    const wood = new VoxelGrid(wx, sy, wz);
+    let any = false;
+    for (let y = 0; y < sy; y++)
+      for (let z = 0; z < sz; z++) {
+        let i = sx * (z + sz * y);
+        const o = ox + wx * (z + oz + wz * y);
+        for (let x = 0; x < sx; x++, i++) {
+          const c = v[i];
+          if (c && !open[c]) { wood.v[o + x] = c; any = true; }
+        }
+      }
+    if (!any && s) break; // no wood at all: the unshifted grid is as good as any
+    const w = downsample(wood, 2, 1);
+    let n = 0;
+    for (let i = 0; i < w.v.length; i++) if (w.v[i]) n++;
+    if (!best || n < best.n) best = { n, w, ox, oz };
+  }
+  const { w, ox, oz } = best;
+  // foliage-only grid in the same (shifted) frame, downsampled like the summer LOD, merged where there is no wood
+  const wx = sx + ox, wz = sz + oz;
+  const fol = new VoxelGrid(wx, sy, wz);
+  for (let y = 0; y < sy; y++)
+    for (let z = 0; z < sz; z++) {
+      let i = sx * (z + sz * y);
+      const o = ox + wx * (z + oz + wz * y);
+      for (let x = 0; x < sx; x++, i++) {
+        const c = v[i];
+        if (c && open[c]) fol.v[o + x] = c;
+      }
+    }
+  const f = downsample(fol, 2, minFill);
+  for (let i = 0; i < w.v.length; i++) if (!w.v[i] && f.v[i]) w.v[i] = f.v[i];
+  const m = mesh(w, 2, open);
+  if (ox || oz) {
+    const p = new Int16Array(m.data.buffer, m.data.byteOffset, m.data.byteLength >> 1);
+    for (let k = 0; k < p.length; k += 4) { p[k] -= ox; p[k + 2] -= oz; }
+  }
+  return m;
+}
+
 /* ------------------------------------------------------------------ */
 /* VC.voxel API                                                          */
 /* ------------------------------------------------------------------ */
@@ -492,6 +556,7 @@ VC.voxel = {
   palette: PAL,
   mesh,
   downsample,
+  winterLodMesh,
   foliageLUT,
   get palVersion() {
     return palVersion;
@@ -548,6 +613,31 @@ VC.voxel = {
 /* ------------------------------------------------------------------ */
 const defs = Object.create(null);
 const cache = new Map();
+/**
+ * Meshes model m's grid g and uploads it INTO m: the full mesh (m.vao/vbo/quads), m.lod (the model itself for
+ * def.lod === false) and, for openFoliage models, m.winter (+ m.winter.lod). Existing lod / winter objects are
+ * refilled in place (context restore), so references held by renderers stay valid. full = mesh(g, 1) if known.
+ */
+function uploadModel(m, def, g, full) {
+  const V = VC.voxel;
+  Object.assign(m, V.upload(full || mesh(g, 1)));
+  if (def.lod === false) m.lod = m; // thin street furniture: the full mesh is its own LOD
+  else {
+    const lod = V.upload(mesh(downsample(g, 2, def.lodMinFill || 3), 2));
+    if (m.lod && m.lod !== m) Object.assign(m.lod, lod);
+    else m.lod = lod;
+  }
+  if (def.openFoliage) {
+    // winter meshes: the wood under the leaves meshed too (drawn while crowns are bare); the LOD keeps the skeleton
+    const open = foliageLUT();
+    const w = V.upload(mesh(g, 1, open));
+    const wl = V.upload(winterLodMesh(g, open, def.lodMinFill || 3));
+    if (m.winter) Object.assign(m.winter, w);
+    else m.winter = w;
+    if (m.winter.lod) Object.assign(m.winter.lod, wl);
+    else m.winter.lod = wl;
+  }
+}
 VC.models = {
   defs,
   stats: { built: 0, quads: 0, ms: 0 },
@@ -593,8 +683,6 @@ VC.models = {
     }
     const vox = VC.C.VOX * (def.scale || 1);
     const full = mesh(g, 1);
-    const lodGrid = downsample(g, 2, def.lodMinFill || 3);
-    const lodMesh = mesh(lodGrid, 2);
     m = {
       key, variant, params, sx: g.sx, sy: g.sy, sz: g.sz, vox,
       height: g.maxHeight() * vox,
@@ -605,16 +693,7 @@ VC.models = {
       parts: def.parts || null,
       grid: g,
     };
-    if (VC.gfx.gl) {
-      Object.assign(m, VC.voxel.upload(full));
-      m.lod = VC.voxel.upload(lodMesh);
-      if (def.openFoliage) {
-        // winter meshes: the same grids with the wood under the leaves meshed too (drawn while crowns are bare)
-        const open = foliageLUT();
-        m.winter = VC.voxel.upload(mesh(g, 1, open));
-        m.winter.lod = VC.voxel.upload(mesh(lodGrid, 2, open));
-      }
-    }
+    if (VC.gfx.gl) uploadModel(m, def, g, full);
     cache.set(ck, m);
     const dt = performance.now() - t0;
     VC.models.stats.built++;
@@ -653,10 +732,38 @@ VC.models = {
     const gl = VC.gfx.gl;
     for (const m of cache.values()) {
       if (gl && m.vbo) { gl.deleteBuffer(m.vbo); gl.deleteVertexArray(m.vao); }
-      if (gl && m.lod) { gl.deleteBuffer(m.lod.vbo); gl.deleteVertexArray(m.lod.vao); }
+      if (gl && m.lod && m.lod !== m) { gl.deleteBuffer(m.lod.vbo); gl.deleteVertexArray(m.lod.vao); }
       if (gl && m.winter) for (const w of [m.winter, m.winter.lod]) if (w) { gl.deleteBuffer(w.vbo); gl.deleteVertexArray(w.vao); }
     }
     cache.clear();
+  },
+  /**
+   * After a WebGL context restore: re-meshes every cached model from its grid and uploads it into the same model /
+   * lod / winter objects (exactly as get() built them). Old handles are dead and are never deleted. Also drops the
+   * palette texture (re-created by the next paletteTexture()). Returns the number of models re-uploaded.
+   */
+  restore() {
+    VC.voxel._palTex = null;
+    VC.voxel._palDirty = false;
+    if (!VC.gfx.gl) return 0;
+    let n = 0;
+    const t0 = performance.now();
+    for (const m of cache.values()) {
+      try {
+        if (!m.grid) {
+          // (no voxels kept: cannot be rebuilt; renderers skip meshes without a VAO)
+          m.vao = m.vbo = null;
+          if (m.lod && m.lod !== m) m.lod.vao = m.lod.vbo = null;
+          continue;
+        }
+        uploadModel(m, defs[m.key] || {}, m.grid);
+        n++;
+      } catch (e) {
+        console.error('[models] re-upload failed', m && m.key, e);
+      }
+    }
+    VC.models.stats.restored = { models: n, ms: Math.round(performance.now() - t0) };
+    return n;
   },
   cached() {
     return cache;

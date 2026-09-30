@@ -4,14 +4,18 @@
  * Street furniture uses scale 0.5 (1/16-unit voxels, 16 per tile) so poles stay slim next to the
  * 1/8-unit buildings. Non-sized props are centred on their grid (renderer origin = bottom centre
  * (sx/2, 0, sz/2)); odd grid widths keep 1-voxel poles exactly on that origin. Front = +Z.
+ * Lamps, traffic lights and hydrants are `lod: false`: a half-resolution LOD would double their 1-voxel poles
+ * into chunky pillars, so the full mesh (a few dozen quads) is drawn at every distance.
  *
- *   streetlamp     scale .5, 9x19x9. Pole on the origin, arm overhangs +Z. Variants: 0 classic
- *                  (dark grey-green cast-iron crook + lantern, warm LAMP — not pure black, so the slim pole
- *                  still reads against dark asphalt), 1 modern (grey LED arm, LAMP_WHITE).
- *                  meta.head = lamp position (voxels); g.light at the head (glows at night).
- *   traffic_light  scale .5, 9x18x17. Pole on the origin, mast arm along +Z over the lanes carrying
- *                  a double-faced head that faces +-X (seen by traffic moving along X); a small
- *                  pole head faces +-Z for the crossing direction.
+ *   streetlamp     scale .5, 9x13x9 (0.81 units: a one-storey eave, about half a two-storey house). Pole on
+ *                  the origin, the head hangs 3-3.5 voxels out along +Z (the terrain's light pools and
+ *                  VC.props.lampReach, ~0.2 units, sit under it). Variants: 0 classic (dark grey-green
+ *                  cast-iron crook + lantern, warm LAMP — not pure black, so the slim pole still reads against
+ *                  dark asphalt), 1 modern (grey LED arm, LAMP_WHITE). meta.head = lamp position (voxels);
+ *                  g.light at the head (glows at night).
+ *   traffic_light  scale .5, 9x14x17 (0.88 units). Pole on the origin, mast arm along +Z over the lanes
+ *                  carrying a double-faced head that faces +-X (seen by traffic moving along X; its underside
+ *                  clears the tallest vehicles); a small pole head faces +-Z for the crossing direction.
  *                  Variants (main head / pole head): 0 red/green, 1 green/red, 2 yellow/red,
  *                  3 red/yellow. VC.natureKit.signalVariant(phase, rot) maps an agents.signal()
  *                  phase to the right variant. meta.heads = lit lamps of the main head; every
@@ -36,35 +40,35 @@ const M = VC.M;
 /* Street lamp                                                           */
 /* ------------------------------------------------------------------ */
 VC.models.define('streetlamp', {
-  lodMinFill: 1,
+  lod: false, // (thin pole: the full mesh is its own LOD)
   variants: 2,
   scale: 0.5,
   gen(rng, v) {
-    const g = new VC.VoxelGrid(9, 19, 9);
+    const g = new VC.VoxelGrid(9, 13, 9);
     const X = 4, Z = 4;
     if (v % 2 === 0) {
       // classic: stepped cast-iron base, fluted pole, shepherd's crook, hanging lantern
       const IRON = K.col('IRON');
       g.box(3, 0, 3, 3, 1, 3, IRON);
-      g.box(X, 1, Z, 1, 15, 1, IRON);
+      g.box(X, 1, Z, 1, 11, 1, IRON);
       g.set(X, 3, Z, P.GOLD);
-      g.set(X, 16, Z, P.GOLD); // finial
-      g.box(X, 15, Z + 1, 1, 1, 3, IRON); // arm
-      g.set(X, 14, Z + 1, IRON); // scroll brace
-      g.set(X, 14, Z + 3, IRON); // lantern cap
-      g.box(X, 12, Z + 3, 1, 2, 1, P.LAMP);
-      g.set(X, 11, Z + 3, IRON);
-      g.meta.head = [X + 0.5, 12.5, Z + 3.5];
-      g.light(X + 0.5, 12.5, Z + 3.5, [1, 0.78, 0.45], 1.2);
+      g.set(X, 12, Z, P.GOLD); // finial
+      g.box(X, 11, Z + 1, 1, 1, 3, IRON); // arm
+      g.set(X, 10, Z + 1, IRON); // scroll brace
+      g.set(X, 10, Z + 3, IRON); // lantern cap
+      g.box(X, 8, Z + 3, 1, 2, 1, P.LAMP);
+      g.set(X, 7, Z + 3, IRON);
+      g.meta.head = [X + 0.5, 8.5, Z + 3.5];
+      g.light(X + 0.5, 8.5, Z + 3.5, [1, 0.78, 0.45], 1.2);
     } else {
       // modern: slim grey pole, rising arm, flat LED head
       g.box(3, 0, 3, 3, 1, 3, P.CONCRETE_D);
-      g.box(X, 1, Z, 1, 16, 1, P.METAL);
-      g.line(X, 16, Z, X, 17, Z + 2, P.METAL);
-      g.box(X, 17, Z + 2, 1, 1, 3, P.METAL_D);
-      g.box(X, 16, Z + 3, 1, 1, 2, P.LAMP_WHITE);
-      g.meta.head = [X + 0.5, 16, Z + 4];
-      g.light(X + 0.5, 16, Z + 4, [0.85, 0.92, 1], 1.2);
+      g.box(X, 1, Z, 1, 11, 1, P.METAL);
+      g.line(X, 11, Z, X, 12, Z + 2, P.METAL);
+      g.box(X, 12, Z + 2, 1, 1, 3, P.METAL_D);
+      g.box(X, 11, Z + 3, 1, 1, 2, P.LAMP_WHITE);
+      g.meta.head = [X + 0.5, 11, Z + 4];
+      g.light(X + 0.5, 11, Z + 4, [0.85, 0.92, 1], 1.2);
     }
     return K.fit(g);
   },
@@ -83,30 +87,30 @@ const SIG_RGB = [[1, 0.2, 0.15], [1, 0.6, 0.1], [0.3, 1, 0.4]];
  */
 K.signalVariant = (phase, rot = 0) => (phase < 0 ? 0 : (rot & 1 ? [0, 3, 1, 2] : [1, 2, 0, 3])[phase & 3]);
 VC.models.define('traffic_light', {
-  lodMinFill: 1,
+  lod: false, // (thin pole: the full mesh is its own LOD)
   variants: 4,
   scale: 0.5,
   gen(rng, v) {
-    const g = new VC.VoxelGrid(9, 18, 17);
+    const g = new VC.VoxelGrid(9, 14, 17);
     const X = 4, Z = 8;
     const on = SIG_ON(), off = SIG_OFF();
     // variant -> lit lamp (0 top red, 1 yellow, 2 green) of the main (X-facing) head and the pole
     // (Z-facing) head: 0 red/green, 1 green/red, 2 yellow/red, 3 red/yellow
     const litX = [0, 2, 1, 0][v % 4], litZ = [2, 0, 0, 1][v % 4];
     g.box(3, 0, 7, 3, 1, 3, P.CONCRETE_D);
-    g.box(X, 1, Z, 1, 15, 1, P.METAL_D);
-    g.set(X, 16, Z, P.METAL_D);
-    g.box(X, 15, Z + 1, 1, 1, 8, P.METAL_D); // mast arm over the lanes
-    g.set(X, 14, Z + 1, P.METAL_D); // gusset
+    g.box(X, 1, Z, 1, 12, 1, P.METAL_D);
+    g.box(X, 12, Z + 1, 1, 1, 8, P.METAL_D); // mast arm over the lanes
+    g.set(X, 11, Z + 1, P.METAL_D); // gusset
     // street-name blade on the arm
-    g.box(X, 16, Z + 2, 1, 1, 3, P.GREEN);
-    g.set(X, 16, Z + 3, P.WHITE);
-    // main head hanging from the arm end: lamps on the +-X faces, black housing around them
+    g.box(X, 13, Z + 2, 1, 1, 3, P.GREEN);
+    g.set(X, 13, Z + 3, P.WHITE);
+    // main head hanging from the arm end: lamps on the +-X faces, black housing around them. Its underside
+    // (y 8 = 0.5 units + the kerb) clears the tallest vehicles (trucks, 0.5 units) passing below
     const hz = Z + 6;
-    g.box(X, 10, hz - 1, 1, 5, 3, P.BLACK);
+    g.box(X, 8, hz - 1, 1, 4, 3, P.BLACK);
     g.meta.heads = [];
     for (let k = 0; k < 3; k++) {
-      const y = 13 - k;
+      const y = 10 - k;
       g.set(X, y, hz, k === litX ? on[k] : off[k]);
       if (k === litX) {
         g.meta.heads.push([X + 0.5, y + 0.5, hz + 0.5]);
@@ -115,9 +119,9 @@ VC.models.define('traffic_light', {
       }
     }
     // pole head for the crossing direction (faces +-Z), complementary aspect
-    g.box(X + 1, 7, Z, 2, 5, 1, P.BLACK);
+    g.box(X + 1, 5, Z, 2, 5, 1, P.BLACK);
     for (let k = 0; k < 3; k++) {
-      const y = 10 - k;
+      const y = 8 - k;
       g.set(X + 1, y, Z, k === litZ ? on[k] : off[k]);
       if (k === litZ) g.light(X + 1.5, y + 0.5, Z + 1.2, SIG_RGB[k], 0.45, true);
     }
@@ -220,7 +224,7 @@ VC.models.define('bench', {
 });
 
 VC.models.define('hydrant', {
-  lodMinFill: 1,
+  lod: false, // (tiny: a half-resolution LOD is a blob)
   variants: 2,
   scale: 0.5,
   gen(rng, v) {

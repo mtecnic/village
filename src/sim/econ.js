@@ -81,6 +81,7 @@ const CATEGORIES = {
   'tax:I': { name: 'Industrial taxes', icon: '🏭' },
   tourism: { name: 'Tourism', icon: '📸' },
   grant: { name: 'State grant (young towns)', icon: '🏛️' },
+  refund: { name: 'Undo refunds', icon: '↩️' },
   income: { name: 'Venues (casino, stadium)', icon: '🎟️' },
   reward: { name: 'Milestone rewards', icon: '🏆' },
   loan: { name: 'Loans received', icon: '🏦' },

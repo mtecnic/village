@@ -644,7 +644,8 @@ const A = (VC.actions = {
     res.level = L;
     res.flattenCost = dl * C.TERRAFORM_COST * m;
     res.cost += res.flattenCost;
-    if (!W.roadAdjacent(x, z, w, d)) res.warn = 'No road access';
+    const needsRoad = VC.sim && VC.sim.needsRoadAccess ? VC.sim.needsRoadAccess(key) : true;
+    if (needsRoad && !W.roadAdjacent(x, z, w, d)) res.warn = 'No road access';
     if (!affordable(res.cost)) { res.reason = 'Not enough money'; res.money = true; return res; }
     res.ok = true;
     return res;

@@ -913,7 +913,8 @@ const P = (VC.panels = {
  * toggled the same panel while the event was being dispatched, so it can never double-toggle.
  */
 function onHotkey(e) {
-  if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+  if (VC.hud && VC.hud.isVisible && !VC.hud.isVisible()) return; // photo mode
   const tg = e.target;
   if (tg && (VC.ui.isTextEntry(tg) || tg.tagName === 'SELECT')) return; // sliders / checkboxes do not block keys
   const it = LIST.find((l) => l.hotkey === e.code);

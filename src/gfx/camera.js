@@ -45,6 +45,11 @@ const cam = (VC.camera = {
 
   update(dt, rdt) {
     const g = cam.goal, S = VC.state;
+    // never let a bad input (NaN focus, zoom factor) poison the view matrix
+    if (!isFinite(g.tx) || !isFinite(g.tz)) { g.tx = isFinite(cam.tx) ? cam.tx : S ? S.W / 2 : 64; g.tz = isFinite(cam.tz) ? cam.tz : S ? S.H / 2 : 64; }
+    if (!isFinite(g.dist)) g.dist = isFinite(cam.dist) ? cam.dist : 45;
+    if (!isFinite(g.yaw)) g.yaw = isFinite(cam.yaw) ? cam.yaw : 0.8;
+    if (!isFinite(g.pitch)) g.pitch = isFinite(cam.pitch) ? cam.pitch : 0.85;
     if (cam.cinematic) {
       g.yaw += rdt * 0.06;
     }
@@ -126,9 +131,10 @@ const cam = (VC.camera = {
   },
   /** Smoothly moves to look at world (x,z). */
   focus(x, z, dist) {
+    if (!isFinite(x) || !isFinite(z)) return;
     cam.goal.tx = x;
     cam.goal.tz = z;
-    if (dist) cam.goal.dist = dist;
+    if (dist && isFinite(dist)) cam.goal.dist = dist;
   },
   /** Instantly jumps (no smoothing). */
   snap() {

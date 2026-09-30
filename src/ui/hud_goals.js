@@ -1,0 +1,302 @@
+/*
+ * VOXELPOLIS — HUD: Mayor's Goals card. Lives top-left under the top bar, where the tutorial card sits
+ * (hidden while the tutorial runs), in a shared left column (.gl-col, also holding the Mayor's Desk card of
+ * ui/hud_desk.js). The column stacks BELOW the windows layer (z 15 < 20): windows always cover it, never
+ * the other way round.
+ *   ITEMS     icon, title (live: problem goals keep their count current), why, live progress bar + text,
+ *             reward, "Show me" (VC.goals.focusOf: camera, overlay, panel, tool — in the palette of the tool's
+ *             own group (VC.tools.info), highlighted — else the focus group), "↻" swap (dim,
+ *             full on hover). Completed goals glow gold with a Claim button; the real time a completed goal
+ *             is on screen (game running) is counted into g.shown — VC.goals only auto-claims after
+ *             AUTO_CLAIM_SEC of it, so fast-forwarding never skips the Claim button.
+ *   HEADER    click to collapse / expand (remembered per browser); collapsed it shows mini progress bars and
+ *             a "🎁 Claim" chip. A click never leaves keyboard focus on it (Space stays "pause"). While a
+ *             desk decision is open the list folds away (the header peeks it; peeking, the list scrolls in
+ *             at most ~40% of the column and never in the room the decision's choices need — with no useful
+ *             room left the decision folds into its header badge instead). Where even the header does not
+ *             fit beside the choices, the card steps aside until the decision is made (hud_desk.js).
+ *   LAYOUT    the column is laid out by ui/hud_desk.js (VC.deskHud.layout): under the top bar / tutorial
+ *             card, height-capped above the minimap, toolbar and ticker; the goals list scrolls when the
+ *             column is too short for it.
+ *   CELEBRATE bus 'goalDone' -> ONE toast (VC.ui.toast, sfx 'achievement') + VC.fx.confetti at the camera
+ *             target (not with VC.settings.juice === false) — unless a milestone banner went up in the last
+ *             MS_QUIET_MS (that party is enough; the item still glows gold). Claiming plays 'cash' and floats
+ *             the reward over the item.
+ *             A goal rotated out for lack of progress (bus 'goalRotated') gets a quiet info toast.
+ *             Nothing in the demo.
+ * Polls VC.goals.list() at 2 Hz (in-place DOM updates, no rebuild unless the set of goals changed).
+ * Registers as a VC.hud part (order 45).
+ */
+const h = VC.h;
+const GL = { col: null, card: null, list: null, count: null, chip: null, mini: null, items: new Map(), sig: '', acc: 0, run: 0, collapsed: false, peek: false, vis: false, msAt: -1e9 };
+const MS_QUIET_MS = 10000; // a goal completing this soon after a milestone banner celebrates quietly
+const LS_KEY = 'voxelpolis.goalsCollapsed';
+const esc = (s) => (VC.ui && VC.ui.esc ? VC.ui.esc(s) : String(s == null ? '' : s));
+const tutorialOn = () => !!(VC.hud && VC.hud.tutorialStep && VC.hud.tutorialStep() >= 0);
+const rewardLong = (g) => (g.reward && (g.reward.long || g.reward.text)) || '';
+const demo = () => !!(VC.state && VC.state.demo) || !!(VC.menu && VC.menu.active);
+
+/** The shared left column (created by whichever of hud_goals / hud_desk needs it first). */
+function ensureCol() {
+  const root = VC.hud && VC.hud.root;
+  if (!root) return null;
+  let col = root.querySelector('.gl-col');
+  if (!col) {
+    col = h('div', { class: 'gl-col' });
+    root.appendChild(col);
+  }
+  return col;
+}
+
+/* ---------------- card ---------------- */
+function build() {
+  GL.col = ensureCol();
+  if (!GL.col) return;
+  GL.count = h('span', { class: 'gl-count' });
+  GL.chip = h('span', { class: 'gl-claimchip' }, '🎁 Claim');
+  GL.list = h('div', { class: 'gl-list' });
+  GL.mini = h('div', { class: 'gl-mini' });
+  // a div (not a button): the folded desk badge (hud_desk.js) docks in here as its own button.
+  // A mouse click / tap never focuses it (mousedown default prevented), so Space keeps meaning "pause"
+  // afterwards; with keyboard focus (Tab), Enter / Space only fold the card (stopPropagation: no pause too).
+  const head = h('div', { class: 'gl-head', role: 'button', tabindex: '0', 'aria-label': 'Show or hide goals', onclick: toggle,
+    onmousedown: (e) => e.preventDefault(),
+    onkeydown: (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      if (e.target !== e.currentTarget) return; // (Enter / Space on the docked desk badge: its own click)
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) toggle();
+    } },
+    // "Mayor’s" drops out when the Claim chip and a docked desk badge share the header (goals.css)
+    h('span', { class: 'gl-badge' }, h('span', { class: 'gl-target' }, '🎯'), h('span', { class: 'gl-btext' }, h('span', { class: 'gl-bpre' }, 'Mayor’s '), 'Goals')), GL.count, GL.chip, h('span', { class: 'gl-chev', 'data-tip': 'Show / hide goals' }, '▾'));
+  GL.card = h('div', { class: 'gl-card pe hide' }, head, GL.mini, GL.list);
+  GL.col.appendChild(GL.card);
+  // the desk card opening / closing folds the list right away (hud_desk dispatches this on the column)
+  GL.col.addEventListener('deskstate', applyCompact);
+  GL.list.addEventListener('scroll', moreHint, { passive: true });
+}
+/** Fades the bottom edge of the goals list while more of it is scrolled out of view. */
+function moreHint() {
+  const l = GL.list;
+  if (l) l.classList.toggle('more', l.scrollHeight - l.clientHeight - l.scrollTop > 4);
+}
+function saveCollapsed() {
+  try { localStorage.setItem(LS_KEY, GL.collapsed ? '1' : '0'); } catch (e) { /* private mode / blocked storage */ }
+}
+const PEEK_USEFUL = 64; // CSS px: a peeked list any shorter than this would show no whole goal
+function toggle() {
+  VC.bus.emit('sfx', { name: 'click' });
+  if (deskOpen()) {
+    // a decision is open (list folded for it): the click peeks at the goals / folds them again. Where the
+    // decision's choices leave no room for the list, the decision folds into the header badge instead
+    // ("Decide later": one click on the 📨 badge brings it back) and the goals open normally.
+    if (GL.card.classList.contains('compact')) {
+      if (GL.collapsed) { GL.collapsed = false; saveCollapsed(); }
+      const D = VC.deskHud;
+      if (D && D.peekRoom && D.fold && D.peekRoom() < PEEK_USEFUL && D.fold()) { GL.peek = false; applyCompact(); return; }
+      GL.peek = true;
+    } else GL.peek = false;
+  } else {
+    GL.collapsed = !GL.collapsed;
+    saveCollapsed();
+  }
+  applyCompact();
+}
+const deskOpen = () => !!(GL.col && GL.col.classList.contains('desk-open'));
+function applyCompact() {
+  if (!GL.card) return;
+  if (!deskOpen()) GL.peek = false;
+  const compact = GL.collapsed || (deskOpen() && !GL.peek);
+  GL.card.classList.toggle('compact', compact);
+  GL.card.classList.toggle('peek', deskOpen() && !compact);
+}
+
+/* ---------------- items ---------------- */
+function makeItem(g) {
+  const bar = h('i');
+  const ptext = h('span', { class: 'gl-ptext' });
+  const act = h('div', { class: 'gl-act' });
+  const title = h('div', { class: 'gl-title' }, g.title || '');
+  const el = h('div', { class: 'gl-item cat-' + (g.cat || 'grow') + ' new' },
+    h('div', { class: 'gl-ico' }, g.icon || '🎯'),
+    h('div', { class: 'gl-main' },
+      title,
+      h('div', { class: 'gl-desc', 'data-tip': esc(g.desc || '') }, g.desc || ''),
+      h('div', { class: 'gl-prow' }, h('div', { class: 'gl-bar' }, bar), ptext),
+      h('div', { class: 'gl-row' }, h('span', { class: 'gl-reward', 'data-tip': '<b>Reward</b><br>' + esc(rewardLong(g)) }, (g.reward && g.reward.text) || ''), act)),
+    h('button', { class: 'gl-swap', 'data-tip': 'Swap for a different goal', 'aria-label': 'Swap goal', onclick: (e) => { e.stopPropagation(); swapGoal(g.id, el); } }, '↻'));
+  setTimeout(() => el.classList.remove('new'), 700);
+  const it = { el, bar, ptext, act, title, g, done: null, pv: -1, tv: null, tt: g.title || '', mini: h('i', null, h('b')) };
+  setActions(it);
+  return it;
+}
+function setActions(it) {
+  const done = !!it.g.done;
+  if (it.done === done) return;
+  it.done = done;
+  it.act.textContent = '';
+  it.el.classList.toggle('done', done);
+  if (done) it.act.appendChild(h('button', { class: 'btn small gl-claim', onclick: (e) => { e.stopPropagation(); claimGoal(it); } }, '🎁 Claim'));
+  else it.act.appendChild(h('button', { class: 'btn small ghost gl-show', 'data-tip': 'Show me where / how', onclick: (e) => { e.stopPropagation(); showMe(it.g.id); } }, '👉 Show me'));
+}
+/** Rebuilds the item set only when goals were added / removed / reordered. */
+function syncItems(goals) {
+  let sig = '';
+  for (let i = 0; i < goals.length; i++) sig += goals[i].id + ',';
+  if (sig !== GL.sig) {
+    GL.sig = sig;
+    const keep = new Set();
+    for (const g of goals) {
+      keep.add(g.id);
+      let it = GL.items.get(g.id);
+      if (!it) { it = makeItem(g); GL.items.set(g.id, it); }
+      it.g = g;
+      GL.list.appendChild(it.el); // (re)order
+      GL.mini.appendChild(it.mini);
+    }
+    for (const [id, it] of GL.items) {
+      if (keep.has(id)) continue;
+      GL.items.delete(id);
+      it.mini.remove();
+      if (it.el.classList.contains('out')) continue;
+      it.el.classList.add('out');
+      setTimeout(() => it.el.remove(), 360);
+    }
+  }
+  let claimable = 0;
+  for (const g of goals) {
+    const it = GL.items.get(g.id);
+    if (!it) continue;
+    it.g = g;
+    setActions(it);
+    if (g.done) claimable++;
+    const p = Math.round((g.progress || 0) * 1000) / 10;
+    if (p !== it.pv) {
+      it.pv = p;
+      it.bar.style.width = p + '%';
+      it.mini.firstChild.style.width = p + '%';
+      it.mini.classList.toggle('done', !!g.done);
+    }
+    const t = g.done ? 'Complete!' : g.text || '';
+    if (t !== it.tv) { it.tv = t; it.ptext.textContent = t; }
+    if ((g.title || '') !== it.tt) { it.tt = g.title || ''; it.title.textContent = it.tt; } // live counts
+  }
+  const n = goals.length;
+  const txt = claimable ? '' : `${n} active`;
+  if (GL.count.textContent !== txt) GL.count.textContent = txt;
+  GL.chip.classList.toggle('show', claimable > 0);
+  GL.card.classList.toggle('claimable', claimable > 0);
+}
+function refresh() {
+  if (!GL.card) return;
+  const G = VC.goals;
+  const goals = G && G.list ? G.list() : [];
+  const vis = !!VC.state && !demo() && !tutorialOn() && goals.length > 0;
+  if (vis !== GL.vis) {
+    GL.vis = vis;
+    GL.card.classList.toggle('hide', !vis);
+  }
+  applyCompact();
+  if (vis) syncItems(goals);
+  moreHint();
+}
+
+/* ---------------- actions ---------------- */
+function showMe(id) {
+  const f = VC.goals && VC.goals.focusOf ? VC.goals.focusOf(id) : null;
+  VC.bus.emit('sfx', { name: 'click' });
+  if (!f) return;
+  try {
+    if (f.overlay && VC.gfx && VC.gfx.setOverlay) VC.gfx.setOverlay(f.overlay);
+    if (isFinite(f.x) && isFinite(f.z) && VC.camera && VC.camera.focus) VC.camera.focus(f.x, f.z, f.dist || Math.min((VC.camera.goal && VC.camera.goal.dist) || 30, 30));
+    if (f.panel && VC.hud.openPanel) VC.hud.openPanel(f.panel);
+    // the palette that really holds the tool (its registered group wins over the goal's hint) with the
+    // tool's card highlighted, as the tutorial does
+    const T = VC.tools;
+    const tool = f.tool && T && T.select && (!T.isTool || T.isTool(f.tool)) ? f.tool : null;
+    const info = tool && T.info ? T.info(tool) : null;
+    const group = (info && info.group) || f.group;
+    if (group && VC.hud.openPalette) VC.hud.openPalette(group, tool ? { highlight: tool } : undefined);
+    if (tool) T.select(tool);
+  } catch (e) { console.error('[goals] show me', e); }
+}
+function claimGoal(it) {
+  const g = it.g;
+  if (!VC.goals || !VC.goals.claim(g.id)) return;
+  VC.bus.emit('sfx', { name: 'cash' });
+  // the reward floats up out of the item while it slides away
+  const r = it.el.getBoundingClientRect(), cr = GL.col.getBoundingClientRect();
+  const s = (VC.ui && VC.ui.scale && VC.ui.scale()) || 1;
+  const fl = h('div', { class: 'gl-float' }, (g.reward && g.reward.text) || '🎁');
+  fl.style.left = Math.round((r.left - cr.left) / s + 44) + 'px';
+  fl.style.top = Math.round((r.top - cr.top) / s + 8) + 'px';
+  GL.col.appendChild(fl);
+  setTimeout(() => fl.remove(), 1500);
+  refresh();
+}
+function swapGoal(id, el) {
+  VC.bus.emit('sfx', { name: 'click' });
+  if (VC.goals && VC.goals.swap && VC.goals.swap(id)) refresh();
+  else if (VC.ui && VC.ui.flash) VC.ui.flash(el, 'shake-bad');
+}
+function celebrate(g) {
+  if (!g || demo() || !VC.hud.visible) return;
+  // the milestone banner just threw a party for (nearly) the same thing: glow gold, no second fanfare
+  if (performance.now() - GL.msAt < MS_QUIET_MS) { refresh(); return; }
+  const reward = rewardLong(g) ? `<br><small>Claim your reward: ${esc(rewardLong(g))}</small>` : '';
+  VC.ui.toast(`<b>Goal complete!</b> ${esc(g.title)}${reward}`, {
+    type: 'good', icon: '🎯', duration: 6500, sfx: 'achievement',
+    onClick: () => { if (GL.collapsed) toggle(); },
+  });
+  try {
+    // 'Growth popups & celebrations' off (VC.settings.juice === false): the toast only, no confetti
+    const cam = VC.camera;
+    if (!(VC.settings && VC.settings.juice === false) && VC.fx && VC.fx.confetti && cam && isFinite(cam.tx)) VC.fx.confetti(cam.tx, cam.tz, 140);
+  } catch (e) { /* fx optional */ }
+  refresh();
+}
+
+if (VC.hud && VC.hud.register) {
+  VC.hud.register({
+    name: 'goals',
+    order: 45,
+    init() {
+      try { GL.collapsed = localStorage.getItem(LS_KEY) === '1'; } catch (e) { GL.collapsed = false; }
+      build();
+      VC.bus.on('goalsChanged', () => { if (VC.hud.visible) refresh(); });
+      VC.bus.on('goalDone', (e) => celebrate(e && e.goal));
+      VC.bus.on('milestone', () => { GL.msAt = performance.now(); });
+      VC.bus.on('goalRotated', (e) => {
+        if (!e || !e.goal || demo() || !VC.hud.visible) return;
+        const nx = e.next ? ` — here is a fresh one: <b>${esc(e.next.title)}</b>` : '';
+        VC.ui.toast(`“${esc(e.goal.title)}” sat still for a long while, so it made room${nx}.`, { type: 'info', icon: '🔄', duration: 6500 });
+      });
+      // toasts pick a lane that keeps off the goals card when they can
+      if (VC.ui && VC.ui.toastAvoid) VC.ui.toastAvoid.push(() => (GL.vis && GL.card && VC.hud.visible ? GL.card.getBoundingClientRect() : null));
+    },
+    reset() {
+      for (const it of GL.items.values()) { it.el.remove(); it.mini.remove(); }
+      GL.items.clear();
+      GL.sig = '';
+      GL.vis = false;
+      GL.peek = false;
+      if (GL.card) GL.card.classList.add('hide');
+      GL.acc = 0.4;
+    },
+    update(dt, rdt) {
+      GL.acc += rdt;
+      if (dt > 0) GL.run += rdt; // real time with the game running
+      if (GL.acc < 0.5) return;
+      GL.acc = 0;
+      refresh();
+      // completed goals on screen: count the real time (VC.goals waits for it before auto-claiming)
+      const run = Math.min(GL.run, 1);
+      GL.run = 0;
+      if (run > 0 && GL.vis && VC.hud.isVisible && VC.hud.isVisible()) {
+        for (const g of (VC.goals && VC.goals.list ? VC.goals.list() : [])) if (g.done) g.shown = Math.round(((g.shown || 0) + run) * 100) / 100;
+      }
+    },
+    onHide() { GL.vis = false; if (GL.card) GL.card.classList.add('hide'); },
+  });
+}

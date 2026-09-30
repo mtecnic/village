@@ -1,0 +1,1661 @@
+/*
+ * VOXELPOLIS — terrain renderer: a stepped voxel diorama.
+ *
+ * GEOMETRY (chunked, C.CHUNK² tiles per chunk, typed arrays, rebuilt only when height/material/road
+ * data in a chunk (+3 tile margin) actually changed; nearest-first per-frame time budget; frustum culled
+ * per pass — the shadow pass culls against the light matrix found in the Frame UBO):
+ *   - tile tops at level * STEP (seabed for water tiles), road ramps as sloped tops
+ *   - cliff sides toward lower neighbours; map edges get skirts. EDGE LOOK follows VC.water.ocean:
+ *     ocean (default) = the map is an island in open sea: skirts stop a little below the sea surface and
+ *     there is no plinth; diorama (ocean = false) = skirts down to SKIRT_Y standing on a wooden plinth ring
+ *   - roads: raised sidewalks + kerbs (street/avenue), green median (straight avenues), jersey
+ *     barriers (highway), bridges on water tiles (closed deck at DECK_Y so it casts shadows, fascia,
+ *     railings, piers)
+ * SURFACES are procedural in the fragment shader on a world-space 1/8 voxel grid: grass/meadow/sand/
+ * dirt/rock/snow, strata on sides, road markings, crosswalks, storm drains, zone lots, lot bases under
+ * buildings, seasons (patchy autumn, off-white sparkling snow), rain (darkening, puddles with ripples),
+ * shoreline wash, underwater caustics, night lamp pools, build grid, hover glow and a smooth (bilinear)
+ * data overlay.
+ *
+ * DATA OVERLAY: shown at full strength only where it matters — on developed tiles (road / building / zoned)
+ * with a soft ~3 tile falloff (CPU relevance texture, see overlayInfo()); elsewhere the ground is only
+ * desaturated with a faint tint. 'bad' maps also show wherever their value is high (plumes over the
+ * countryside); happiness treats 0 as "no data"; traffic is drawn on roads only. Overlay colours get an
+ * emissive floor at night so they stay readable. The water renderer shares the same code (OVERLAY_GLSL).
+ *
+ * DRAW GROUPS + VARIANTS: each chunk mesh holds four face groups — 0 land tops, 1 road surfaces (road,
+ * sidewalk, kerb, median), 2 structures (barriers, rails, fascia, piers, plinth), 3 cliff sides + seabed —
+ * each drawn with a shader specialised for it (#define GROUP). Overlay / snow / rain code is compiled only
+ * while active (#define F_OVERLAY / F_SNOW / F_WET); variants compile lazily, and the likely ones are
+ * pre-compiled one per frame in idle time (see warmup()).
+ * ARENA: all chunk meshes live in ONE vertex buffer + VAO (sub-allocated slots with slack, compacted when
+ * it grows), so a pass is one multi-draw per group (WEBGL_multi_draw; plain draws without rebinding
+ * otherwise) instead of a VAO bind + draw per chunk and group. The shadow pass is ONE depth-only multi-draw.
+ *
+ * VERTEX FORMAT (12 bytes):
+ *   loc 0 aP  int16 x4  x, y, z, w in 1/64 world units (float attrib). w = top-edge Y of side faces
+ *   loc 1 aI  uint8 x4  (integer attrib)
+ *     .x normal index (0 +X,1 -X,2 +Y,3 -Y,4 +Z,5 -Z, 6+d = ramp rising toward dir d) | kind << 4
+ *     .y terr | road type << 3 | bridge << 5 | ramp << 6
+ *     .z roads: connection mask (bit d: 0 +X,1 -X,2 +Z,3 -Z) | neighbour-is-intersection mask << 4
+ *        land tops: water-neighbour mask (same bit order as the AO mask) for the shoreline wash
+ *     .w tops: AO mask (edge higher: 1 +X,2 -X,4 +Z,8 -Z; corner: 16 +X+Z,32 -X+Z,64 +X-Z,128 -X-Z)
+ *        sides: bottom level (255 = slab bottom)
+ *
+ * ROAD RULES: roads connect to any adjacent road (street/avenue/highway) whose road level differs by
+ * at most 1. A 1-level difference becomes a RAMP on the lower tile when that tile is straight along the
+ * link; bridges (road on water) act as road level DECK_LVL and never ramp (a higher land tile ramps
+ * down onto them instead). Right-hand traffic: stop lines sit on the lane approaching an intersection.
+ * Night light pools sit at sidewalk mid-points of non-connected edges on tiles with (x + z) even —
+ * see lampSpots(x, z) (props should put their street lamps there).
+ *
+ * Night light pools are centred under the lamp HEAD, LAMP_REACH toward the road from the pole.
+ *
+ * API (VC.terrain): SKIRT_Y, DECK_Y, CURB, LAMP_REACH, markDirty(x0,z0,x1,z1), rebuildAll(), warmup(all),
+ *   stats, roadY(wx, wz) road surface height (ramps/bridge decks) or null, surfaceY(wx, wz) walkable top,
+ *   roadInfo(x, z) -> {type, mask, inter, bridge, ramp:{dir, up}|null, y}, lampSpots(x, z) -> [{x, z, dir}]
+ *   (pole positions), OVERLAY_GLSL + overlayInfo() -> {tex, cfg} (shared overlay code for other layers:
+ *   bind tex to the sampler uOvRel, cfg to the vec4 uOvCfg), restore() (re-creates every GL object after a
+ *   WebGL context restore, then rebuilds).
+ */
+const C = VC.C, M = VC.M;
+const STEP = C.STEP, SEA = C.SEA, CH = C.CHUNK;
+const Q = 64; // position quantization (units of 1/64 world unit)
+const SKIRT_Y = -3; // diorama slab bottom
+const DECK_LVL = SEA + 1; // bridges behave like roads at this level
+const DECK_Y = DECK_LVL * STEP; // 1.75 (= C.SEA_Y + 0.37)
+const DECK_T = 0.125; // deck thickness
+const CURB = 3 / 64; // sidewalk / median height
+const SW = [0, 9 / 64, 6 / 64, 0]; // sidewalk width per road type
+const BAR_W = 3 / 64, BAR_H = 5 / 64; // highway jersey barrier
+const RAIL_H = 6 / 64, POST = 1.5 / 64; // bridge railing
+const MED_HW = 2 / 64; // half width of the raised avenue median
+const PLINTH = 0.4; // plinth ring width
+const OCEAN_SKIRT = C.SEA_Y - 1.2; // skirt bottom in ocean mode (hidden under the opaque sea)
+const LAMP_REACH = 0.22; // street-lamp head overhang toward the road (nature_props lamp: head 0.22 from the pole)
+const DX = [1, -1, 0, 0], DZ = [0, 0, 1, -1], OPP = [1, 0, 3, 2];
+const K = { TOP: 0, ROAD: 1, SIDE: 2, WALK: 3, CURB: 4, MEDIAN: 5, BARRIER: 6, RAIL: 7, DECKSIDE: 8, PILLAR: 9, PLINTH: 10, SEABED: 11 };
+const POP = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4]; // popcount of a 4-bit mask
+
+const T = (VC.terrain = {
+  name: 'terrain',
+  order: 0,
+  SKIRT_Y, DECK_Y, CURB, LAMP_REACH,
+  chunks: [],
+  cw: 0, ch: 0,
+  full: true,
+  stats: { chunks: 0, quads: 0, drawn: 0, draws: 0, rebuilt: 0, skipped: 0, lastMs: 0, fullMs: 0, maxChunkMs: 0, arenaQuads: 0, arenaUsed: 0, grows: 0, variants: 0 },
+  budgetMs: 4, // incremental rebuild budget per frame
+
+  init() {
+    T.variants = new Map();
+    initGL();
+    VC.gfx.addLayer(T);
+    VC.bus.on('dirty', (d) => { T.markDirty(d.x0, d.z0, d.x1, d.z1); OV.dirty = true; });
+    for (const ev of ['flagsUpdated', 'mapsUpdated', 'overlay', 'newGame']) VC.bus.on(ev, () => (OV.dirty = true));
+  },
+
+  reset(S) {
+    T.chunks = [];
+    T.dirty = [];
+    T.cw = Math.ceil(S.W / CH);
+    T.ch = Math.ceil(S.H / CH);
+    arenaClear();
+    arenaReserve(Math.ceil(S.W * S.H * 1.9)); // typical terrain: ~1.5 quads per tile + slot slack
+    for (let cz = 0; cz < T.ch; cz++)
+      for (let cx = 0; cx < T.cw; cx++) {
+        const c = { cx, cz, x0: cx * CH, z0: cz * CH, x1: Math.min(S.W, cx * CH + CH), z1: Math.min(S.H, cz * CH + CH), dirty: false, base: -1, cap: 0, quads: 0, q: [0, 0, 0, 0], hash: -1, minY: 0, maxY: 1, dist: 0 };
+        T.chunks.push(c);
+        setDirty(c);
+      }
+    T.full = true;
+    T.stats.chunks = T.chunks.length;
+    T.stats.quads = 0;
+    T._ocean = oceanMode();
+    buildPlinth(S);
+    OV.dirty = true;
+  },
+
+  /** Re-creates every GL object after a WebGL context restore (programs, sampler, arena, textures), then rebuilds. */
+  restore() {
+    T.variants = new Map();
+    T._feat = -1;
+    A.vbo = A.vao = null;
+    OV.tex = null;
+    OV.dirty = true;
+    initGL();
+    if (VC.state && T.chunks.length) T.reset(VC.state);
+  },
+
+  update() {
+    // meshing happens lazily at draw time (after VC.world.flush), so edits show up the same frame.
+    // Idle-time shader warmup: compile ONE likely variant per frame (after the first few seconds), so the
+    // first rain / snow / overlay toggle never stalls on a synchronous compile.
+    const G = VC.gfx;
+    if (T._warmIdx < WARM.length * NG && G.frameCount > 120 && G.frameCount % 6 === 0 && VC.state) {
+      const i = T._warmIdx++;
+      program(i % NG, WARM[(i / NG) | 0]);
+      T.stats.variants = T.variants.size;
+    }
+  },
+
+  /** Marks chunks overlapping the inclusive tile rect (+ margin for road/ramp context) for rebuild. */
+  markDirty(x0, z0, x1, z1) {
+    if (!T.chunks.length) return;
+    const c0x = Math.max(0, Math.floor((x0 - 3) / CH)), c1x = Math.min(T.cw - 1, Math.floor((x1 + 3) / CH));
+    const c0z = Math.max(0, Math.floor((z0 - 3) / CH)), c1z = Math.min(T.ch - 1, Math.floor((z1 + 3) / CH));
+    for (let cz = c0z; cz <= c1z; cz++) for (let cx = c0x; cx <= c1x; cx++) setDirty(T.chunks[cz * T.cw + cx]);
+  },
+
+  /** Rebuilds every chunk synchronously (forced, ignores the change hash). */
+  rebuildAll() {
+    for (const c of T.chunks) { c.hash = -1; setDirty(c); }
+    T.full = true;
+    T._frame = -1;
+    process();
+  },
+  /**
+   * Compiles shader variants ahead of time so toggling overlays / weather never hitches.
+   * all = true: every group x feature combination (32 programs); otherwise the likely ones.
+   * Returns the number of programs now cached.
+   */
+  warmup(all) {
+    const sets = all ? [0, 1, 2, 3, 4, 5, 6, 7] : [0, F_OVERLAY, F_SNOW, F_WET, F_SNOW | F_WET];
+    for (const f of sets) for (let g = 0; g < NG; g++) program(g, f);
+    if (T.progShadow) T.stats.variants = T.variants.size;
+    return T.variants.size;
+  },
+  /**
+   * Shared overlay state for other layers (water): {tex (R8 relevance, LINEAR, tile res), cfg Float32Array(4)}
+   * — updated lazily; null while no overlay is shown.
+   */
+  overlayInfo() {
+    const S = VC.state;
+    if (!S || !VC.gfx.overlay || VC.gfx.overlay === 'none') return null;
+    updateOverlay(S);
+    return OV;
+  },
+  /** Debug/benchmark: rebuilds one chunk synchronously. */
+  _build(c) {
+    if (!VC.state) return;
+    bindState(VC.state);
+    c.hash = -1;
+    buildChunk(c);
+  },
+
+  shadow(ctx) {
+    process();
+    draw(ctx, true);
+  },
+  opaque(ctx) {
+    checkOcean();
+    process();
+    draw(ctx, false);
+  },
+
+  /* ---------------- queries for other modules ---------------- */
+  /** Road surface height at world (wx, wz) — follows ramps and bridge decks. null if no road. */
+  roadY(wx, wz) {
+    const S = VC.state;
+    if (!S) return null;
+    const x = Math.floor(wx), z = Math.floor(wz);
+    if (x < 0 || z < 0 || x >= S.W || z >= S.H) return null;
+    const i = z * S.W + x;
+    if (!S.road[i]) return null;
+    bindState(S);
+    if (S.height[i] < SEA) return DECK_Y;
+    return rampY(S.height[i], rampOf(x, z), wx - x, wz - z);
+  },
+  /** Top of whatever you would stand on at (wx, wz): road deck/ramp, else terrain (water surface on water). */
+  surfaceY(wx, wz) {
+    const r = T.roadY(wx, wz);
+    if (r != null) return r;
+    const S = VC.state;
+    if (!S) return 0;
+    const x = M.clamp(Math.floor(wx), 0, S.W - 1), z = M.clamp(Math.floor(wz), 0, S.H - 1);
+    return Math.max(S.height[z * S.W + x] * STEP, C.SEA_Y);
+  },
+  /** Connectivity of a road tile as rendered: {type, mask, inter, bridge, ramp: {dir, up} | null, y}. */
+  roadInfo(x, z) {
+    const S = VC.state;
+    if (!S || x < 0 || z < 0 || x >= S.W || z >= S.H) return null;
+    const i = z * S.W + x;
+    if (!S.road[i]) return null;
+    bindState(S);
+    const mask = finalMask(x, z), rc = rampOf(x, z), bridge = S.height[i] < SEA;
+    return {
+      type: S.road[i], mask, inter: POP[mask] >= 3, bridge,
+      ramp: rc ? { dir: (rc - 1) >> 1, up: !((rc - 1) & 1) } : null,
+      y: bridge ? DECK_Y : S.height[i] * STEP,
+    };
+  },
+  /** Where this renderer puts street-lamp light pools on road tile (x, z) (world coords). */
+  lampSpots(x, z) {
+    const S = VC.state;
+    const out = [];
+    if (!S || x < 0 || z < 0 || x >= S.W || z >= S.H || (x + z) & 1) return out;
+    const rt = S.road[z * S.W + x];
+    if (!rt) return out;
+    bindState(S);
+    const m = finalMask(x, z);
+    if (rt === 3) {
+      if (m === 3 || m === 12) out.push({ x: x + 0.5, z: z + 0.5, dir: m === 3 ? 0 : 2 });
+      return out;
+    }
+    // (the light pool itself sits LAMP_REACH toward the road, under the lamp head)
+    const h = SW[rt] * 0.5;
+    if (!(m & 1)) out.push({ x: x + 1 - h, z: z + 0.5, dir: 0 });
+    if (!(m & 2)) out.push({ x: x + h, z: z + 0.5, dir: 1 });
+    if (!(m & 4)) out.push({ x: x + 0.5, z: z + 1 - h, dir: 2 });
+    if (!(m & 8)) out.push({ x: x + 0.5, z: z + h, dir: 3 });
+    return out;
+  },
+});
+
+/**
+ * Shader variants: draw group (0 land, 1 roads, 2 structures, 3 sides/seabed) x feature bits (1 overlay, 2 snow, 4 rain).
+ * Features that are off are compiled out entirely, so fair weather without an overlay runs the leanest
+ * shaders. Variants compile lazily on first use and are cached.
+ */
+const F_OVERLAY = 1, F_SNOW = 2, F_WET = 4;
+const WARM = [F_OVERLAY, F_WET, F_SNOW, F_SNOW | F_WET, F_OVERLAY | F_WET, F_OVERLAY | F_SNOW, 7]; // idle warmup order
+function program(g, f) {
+  const key = g * 8 + f;
+  let p = T.variants.get(key);
+  if (p) return p;
+  let defs = '#define GROUP ' + g + '\n';
+  if (f & F_OVERLAY) defs += '#define F_OVERLAY 1\n';
+  if (f & F_SNOW) defs += '#define F_SNOW 1\n';
+  if (f & F_WET) defs += '#define F_WET 1\n';
+  p = VC.gfx.program('terrain_g' + g + '_f' + f, VS, FS, { defines: defs });
+  if (p.u.uOvRel) {
+    const gl = VC.gfx.gl;
+    gl.useProgram(p.prog);
+    gl.uniform1i(p.u.uOvRel, OV_UNIT);
+  }
+  T.variants.set(key, p);
+  return p;
+}
+/** (Re)creates the GL objects owned by the terrain: base programs, noise sampler, depth program, arena. */
+function initGL() {
+  const G = VC.gfx, gl = G.gl;
+  T.progs = [0, 1, 2, 3].map((g) => program(g, 0));
+  T._feat = 0;
+  T._warmIdx = 0;
+  // bilinear sampling from one mip level for the noise texture (half the texel reads of trilinear)
+  T.sampler = gl.createSampler();
+  gl.samplerParameteri(T.sampler, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+  gl.samplerParameteri(T.sampler, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.samplerParameteri(T.sampler, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.samplerParameteri(T.sampler, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  // shadow casters: position only, empty fragment shader (the shadow map has more pixels than the screen)
+  T.progShadow = G.depthProgram ? G.depthProgram('terrain_shadow', VS_SHADOW) : G.program('terrain_shadow', VS_SHADOW, 'void main(){}');
+  arenaInit(gl);
+}
+/** Edge look follows the water renderer: open ocean (default) or the diorama with walls + plinth. */
+function oceanMode() {
+  return !(VC.water && VC.water.ocean === false);
+}
+/** Rebuilds the map-edge chunks + plinth when the edge look changes at runtime. */
+function checkOcean() {
+  const o = oceanMode();
+  if (o === T._ocean || !VC.state) return;
+  T._ocean = o;
+  const S = VC.state;
+  for (const c of T.chunks) if (c.x0 === 0 || c.z0 === 0 || c.x1 === S.W || c.z1 === S.H) { c.hash = -1; setDirty(c); }
+  buildPlinth(S);
+}
+function features(env) {
+  let f = 0;
+  if (VC.gfx.overlay && VC.gfx.overlay !== 'none') f |= F_OVERLAY;
+  if (env && env.snow > 0.004) f |= F_SNOW;
+  if (env && env.wet > 0.01) f |= F_WET;
+  return f;
+}
+
+/* ------------------------------------------------------------------ */
+/* Data overlay relevance (CPU -> R8 texture, shared with the water)    */
+/* ------------------------------------------------------------------ */
+const OV_UNIT = 4; // texture unit of uOvRel (units 0-4 are free per layer)
+const OV = { tex: null, w: 0, h: 0, dirty: true, key: '', cfg: new Float32Array(4), dist: null, bytes: null };
+/**
+ * Per overlay [mode, floor, reveal]. mode 0 = weighted by relevance (developed tiles + ~3 tile falloff),
+ * 1 = a value of 0 means "no data" (masked average; transparent where there is none), 2 = roads only.
+ * floor = strength away from development; reveal = a 'bad' map also shows wherever it exceeds this.
+ * Overlay defs may override with def.nodata0 / def.roadsOnly / def.ovFloor.
+ */
+const OV_BY_RAMP = { good: [0, 0.12, 0], bad: [0, 0.12, 0.07], value: [0, 0.22, 0], net: [0, 1, 0] };
+const OV_BY_KEY = { happiness: [1, 0, 0], traffic: [2, 0, 0] };
+function overlayCfg(key) {
+  const def = VC.OVERLAYS.find((o) => o.key === key) || {};
+  const base = OV_BY_KEY[key] || OV_BY_RAMP[def.ramp] || OV_BY_RAMP.good;
+  const mode = def.roadsOnly ? 2 : def.nodata0 ? 1 : base[0];
+  return [mode, def.ovFloor != null ? def.ovFloor : base[1], base[2]];
+}
+/** Rebuilds the relevance texture when the overlay, the map or the tile flags changed (overlay on only). */
+function updateOverlay(S) {
+  const gl = VC.gfx.gl, key = VC.gfx.overlay;
+  if (!OV.tex || OV.w !== S.W || OV.h !== S.H) {
+    if (OV.tex) gl.deleteTexture(OV.tex);
+    OV.w = S.W;
+    OV.h = S.H;
+    OV.tex = VC.gfx.texture({ w: S.W, h: S.H, internal: gl.R8, format: gl.RED, filter: gl.LINEAR });
+    OV.dist = new Float32Array(S.W * S.H);
+    OV.bytes = new Uint8Array(S.W * S.H);
+    OV.dirty = true;
+  }
+  if (key !== OV.key) {
+    OV.key = key;
+    const c = overlayCfg(key);
+    OV.cfg[0] = c[0]; OV.cfg[1] = c[1]; OV.cfg[2] = c[2]; OV.cfg[3] = 0;
+    OV.dirty = true;
+  }
+  if (!OV.dirty) return;
+  OV.dirty = false;
+  // two-pass chamfer distance (tiles, capped) to the nearest road / building / zoned tile
+  const Wd = S.W, Hd = S.H, N = Wd * Hd, d = OV.dist, rd = S.road, bd = S.bld, zn = S.zone, D2 = 1.4142;
+  for (let i = 0; i < N; i++) d[i] = rd[i] || bd[i] || zn[i] ? 0 : 9;
+  for (let z = 0; z < Hd; z++)
+    for (let x = 0, i = z * Wd; x < Wd; x++, i++) {
+      let v = d[i];
+      if (!v) continue;
+      if (x > 0 && d[i - 1] + 1 < v) v = d[i - 1] + 1;
+      if (z > 0) {
+        const j = i - Wd;
+        if (d[j] + 1 < v) v = d[j] + 1;
+        if (x > 0 && d[j - 1] + D2 < v) v = d[j - 1] + D2;
+        if (x < Wd - 1 && d[j + 1] + D2 < v) v = d[j + 1] + D2;
+      }
+      d[i] = v;
+    }
+  for (let z = Hd - 1; z >= 0; z--)
+    for (let x = Wd - 1, i = z * Wd + x; x >= 0; x--, i--) {
+      let v = d[i];
+      if (!v) continue;
+      if (x < Wd - 1 && d[i + 1] + 1 < v) v = d[i + 1] + 1;
+      if (z < Hd - 1) {
+        const j = i + Wd;
+        if (d[j] + 1 < v) v = d[j] + 1;
+        if (x < Wd - 1 && d[j + 1] + D2 < v) v = d[j + 1] + D2;
+        if (x > 0 && d[j - 1] + D2 < v) v = d[j - 1] + D2;
+      }
+      d[i] = v;
+    }
+  // relevance: 1 up to one tile from development, smooth falloff to 0 at four tiles
+  const out = OV.bytes;
+  for (let i = 0; i < N; i++) {
+    const t = M.clamp((4 - d[i]) / 3, 0, 1);
+    out[i] = Math.round(t * t * (3 - 2 * t) * 255);
+  }
+  gl.bindTexture(gl.TEXTURE_2D, OV.tex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, Wd, Hd, gl.RED, gl.UNSIGNED_BYTE, out);
+}
+
+function setDirty(c) {
+  if (c.dirty) return;
+  c.dirty = true;
+  T.dirty.push(c);
+}
+
+/* ------------------------------------------------------------------ */
+/* Road connectivity (reads the bound state)                            */
+/* ------------------------------------------------------------------ */
+let S = null, W = 0, H = 0;
+function bindState(st) {
+  S = st;
+  W = st.W;
+  H = st.H;
+}
+/** Road level: land level, DECK_LVL for bridges, -1 if no road / off map. */
+function RL(x, z) {
+  if (x < 0 || z < 0 || x >= W || z >= H) return -1;
+  const i = z * W + x;
+  if (!S.road[i]) return -1;
+  const h = S.height[i];
+  return h < SEA ? DECK_LVL : h;
+}
+function isBridge(x, z) {
+  const i = z * W + x;
+  return S.road[i] !== 0 && S.height[i] < SEA;
+}
+function rawMask(x, z) {
+  const r = RL(x, z);
+  if (r < 0) return 0;
+  let m = 0;
+  for (let d = 0; d < 4; d++) {
+    const n = RL(x + DX[d], z + DZ[d]);
+    if (n >= 0 && n - r <= 1 && r - n <= 1) m |= 1 << d;
+  }
+  return m;
+}
+/** Ramp code: 0 flat, else 1 + dir * 2 + (down ? 1 : 0). Only straight land roads ramp (first match wins). */
+function rampOf(x, z) {
+  const r = RL(x, z);
+  if (r < 0 || isBridge(x, z)) return 0;
+  const m = rawMask(x, z);
+  if (!m || (m & 3 && m & 12)) return 0;
+  for (let d = 0; d < 4; d++) {
+    if (!(m & (1 << d))) continue;
+    const nx = x + DX[d], nz = z + DZ[d], n = RL(nx, nz);
+    if (n === r + 1) return 1 + d * 2;
+    if (n === r - 1 && isBridge(nx, nz)) return 2 + d * 2;
+  }
+  return 0;
+}
+/** True if road tile (x, z) connects to its neighbour in dir d (symmetric). */
+function link(x, z, d) {
+  const r = RL(x, z), nx = x + DX[d], nz = z + DZ[d], n = RL(nx, nz);
+  if (r < 0 || n < 0) return false;
+  const dh = n - r;
+  if (dh === 0) return true;
+  if (dh === 1) return rampOf(x, z) === 1 + d * 2 || (isBridge(x, z) && rampOf(nx, nz) === 2 + OPP[d] * 2);
+  if (dh === -1) return rampOf(nx, nz) === 1 + OPP[d] * 2 || (isBridge(nx, nz) && rampOf(x, z) === 2 + d * 2);
+  return false;
+}
+function finalMask(x, z) {
+  if (RL(x, z) < 0) return 0;
+  let m = 0;
+  for (let d = 0; d < 4; d++) if (link(x, z, d)) m |= 1 << d;
+  return m;
+}
+/** Surface height of a tile at local (u, v) for base level lv and ramp code rc. */
+function rampY(lv, rc, u, v) {
+  let y = lv * STEP;
+  if (rc) {
+    const d = (rc - 1) >> 1;
+    const t = d === 0 ? u : d === 1 ? 1 - u : d === 2 ? v : 1 - v;
+    y += (rc - 1) & 1 ? -STEP * t : STEP * t;
+  }
+  return y;
+}
+/** Normal index of a ramp surface (rises toward d for up-ramps, toward OPP[d] for down-ramps). */
+function rampNormal(rc) {
+  const d = (rc - 1) >> 1;
+  return 6 + ((rc - 1) & 1 ? OPP[d] : d);
+}
+
+/* per-chunk cache of final masks & ramp codes (chunk + 1 tile margin) */
+const CM = CH + 2;
+const cacheFM = new Uint8Array(CM * CM), cacheRC = new Uint8Array(CM * CM);
+let cx0 = 0, cz0 = 0;
+function prepCache(x0, z0) {
+  cx0 = x0 - 1;
+  cz0 = z0 - 1;
+  for (let j = 0; j < CM; j++)
+    for (let i = 0; i < CM; i++) {
+      const x = cx0 + i, z = cz0 + j, k = j * CM + i;
+      if (RL(x, z) < 0) { cacheFM[k] = 0; cacheRC[k] = 0; continue; }
+      cacheFM[k] = finalMask(x, z);
+      cacheRC[k] = rampOf(x, z);
+    }
+}
+function cFM(x, z) {
+  const i = x - cx0, j = z - cz0;
+  return i < 0 || j < 0 || i >= CM || j >= CM ? finalMask(x, z) : cacheFM[j * CM + i];
+}
+function cRC(x, z) {
+  const i = x - cx0, j = z - cz0;
+  return i < 0 || j < 0 || i >= CM || j >= CM ? rampOf(x, z) : cacheRC[j * CM + i];
+}
+let SKB = SKIRT_Y; // skirt bottom of the chunk being built (OCEAN_SKIRT in ocean mode)
+/** Top height of tile (x, z) at its local corner (u, v); the skirt bottom off the map. */
+function cornerY(x, z, u, v) {
+  if (x < 0 || z < 0 || x >= W || z >= H) return SKB;
+  const i = z * W + x, lv = S.height[i];
+  return rampY(lv, S.road[i] && lv >= SEA ? cRC(x, z) : 0, u, v);
+}
+
+/* ------------------------------------------------------------------ */
+/* Vertex writer                                                        */
+/* ------------------------------------------------------------------ */
+/*
+ * Faces are sorted into four DRAW GROUPS, each drawn with a shader specialised for it (keeps
+ * fragment shaders small: far cheaper on weak GPUs and software rasterizers):
+ *   0 land tops · 1 road surfaces (road, sidewalk, kerb, median) · 2 structures · 3 cliff sides + seabed
+ */
+const GROUP = [0, 1, 3, 1, 1, 1, 2, 2, 2, 2, 2, 3]; // kind -> draw group
+const NG = 4;
+const GB = [];
+for (let g = 0; g < NG; g++) {
+  const buf = new ArrayBuffer(48 * (g === 0 || g === 3 ? 8192 : 2048));
+  GB.push({ buf, i16: new Int16Array(buf), u8: new Uint8Array(buf), nv: 0 });
+}
+let cur = GB[0];
+let aKind = 0, aB = 0, aC = 0, aD = 0; // attributes of the face being written
+function setKind(k) {
+  aKind = k;
+  cur = GB[GROUP[k]];
+}
+function ensure(quads) {
+  const need = (cur.nv + quads * 4) * 12;
+  if (need <= cur.buf.byteLength) return;
+  const nb = new ArrayBuffer(Math.max(need, cur.buf.byteLength * 2));
+  new Uint8Array(nb).set(cur.u8.subarray(0, cur.nv * 12));
+  cur.buf = nb;
+  cur.i16 = new Int16Array(nb);
+  cur.u8 = new Uint8Array(nb);
+}
+function V(x, y, z, w, nrm) {
+  const b = cur, v = b.nv, o = v * 6, u = v * 12 + 8, I16 = b.i16, U8 = b.u8;
+  I16[o] = Math.round(x * Q);
+  I16[o + 1] = Math.round(y * Q);
+  I16[o + 2] = Math.round(z * Q);
+  I16[o + 3] = Math.round(w * Q);
+  U8[u] = nrm | (aKind << 4);
+  U8[u + 1] = aB;
+  U8[u + 2] = aC;
+  U8[u + 3] = aD;
+  b.nv = v + 1;
+}
+function resetGroups() {
+  for (const b of GB) b.nv = 0;
+}
+/** Concatenates the group buffers (group order) into one upload buffer; returns quad counts per group. */
+let UP = new Uint8Array(48 * 16384);
+function packGroups(counts) {
+  let total = 0;
+  for (let g = 0; g < NG; g++) { counts[g] = GB[g].nv >> 2; total += GB[g].nv * 12; }
+  if (UP.length < total) UP = new Uint8Array(Math.max(total, UP.length * 2));
+  let o = 0;
+  for (const b of GB) { UP.set(b.u8.subarray(0, b.nv * 12), o); o += b.nv * 12; }
+  return total;
+}
+/** Horizontal-ish quad over [x0,x1]x[z0,z1] with corner heights y0 (x0,z0), y1 (x1,z0), y2 (x1,z1), y3 (x0,z1). */
+function topQ(x0, z0, x1, z1, y0, y1, y2, y3, nrm) {
+  ensure(1);
+  V(x0, y3, z1, 0, nrm);
+  V(x1, y2, z1, 0, nrm);
+  V(x1, y1, z0, 0, nrm);
+  V(x0, y0, z0, 0, nrm);
+}
+/** Vertical face at x = xf spanning z0..z1; b0,b1 / t0,t1 = bottom / top heights at z0 and z1. */
+function sideX(xf, z0, z1, b0, b1, t0, t1, pos) {
+  ensure(1);
+  if (pos) { V(xf, b1, z1, t1, 0); V(xf, b0, z0, t0, 0); V(xf, t0, z0, t0, 0); V(xf, t1, z1, t1, 0); }
+  else { V(xf, b0, z0, t0, 1); V(xf, b1, z1, t1, 1); V(xf, t1, z1, t1, 1); V(xf, t0, z0, t0, 1); }
+}
+/** Vertical face at z = zf spanning x0..x1; b0,b1 / t0,t1 = bottom / top heights at x0 and x1. */
+function sideZ(zf, x0, x1, b0, b1, t0, t1, pos) {
+  ensure(1);
+  if (pos) { V(x0, b0, zf, t0, 4); V(x1, b1, zf, t1, 4); V(x1, t1, zf, t1, 4); V(x0, t0, zf, t0, 4); }
+  else { V(x1, b1, zf, t1, 5); V(x0, b0, zf, t0, 5); V(x0, t0, zf, t0, 5); V(x1, t1, zf, t1, 5); }
+}
+/**
+ * Prism over [x0,x1]x[z0,z1] with bottom corner heights b0..b3 (same corner order as topQ) and
+ * thickness h. faces: 1 +X, 2 -X, 4 +Z, 8 -Z, 16 top.
+ */
+function prism(x0, z0, x1, z1, b0, b1, b2, b3, h, faces, kTop, kSide, nTop) {
+  const t0 = b0 + h, t1 = b1 + h, t2 = b2 + h, t3 = b3 + h;
+  if (faces & 16) { setKind(kTop); topQ(x0, z0, x1, z1, t0, t1, t2, t3, nTop); }
+  setKind(kSide);
+  if (faces & 1) sideX(x1, z0, z1, b1, b2, t1, t2, true);
+  if (faces & 2) sideX(x0, z0, z1, b0, b3, t0, t3, false);
+  if (faces & 4) sideZ(z1, x0, x1, b3, b2, t3, t2, true);
+  if (faces & 8) sideZ(z0, x0, x1, b0, b1, t0, t1, false);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tile mesher                                                          */
+/* ------------------------------------------------------------------ */
+let curLv = 0, curRc = 0, curN = 2; // road surface of the tile being built (for extras)
+function sY(u, v) {
+  return rampY(curLv, curRc, u, v);
+}
+/** Prism in tile-local coords [u0,u1]x[v0,v1] sitting on the road surface (+ yOff). */
+function pr(x, z, u0, v0, u1, v1, h, yOff, faces, kTop, kSide) {
+  prism(x + u0, z + v0, x + u1, z + v1, sY(u0, v0) + yOff, sY(u1, v0) + yOff, sY(u1, v1) + yOff, sY(u0, v1) + yOff, h, faces | 16, kTop, kSide, curN);
+}
+
+function higher(x, z, lv) {
+  return x >= 0 && z >= 0 && x < W && z < H && S.height[z * W + x] > lv;
+}
+function isWet(x, z) {
+  return x >= 0 && z >= 0 && x < W && z < H && S.height[z * W + x] < SEA;
+}
+/** AO bits: neighbours higher than the tile (edges not linked by road; corners only where no edge bit). */
+function aoMask(x, z, lv, fm) {
+  let m = 0;
+  if (!(fm & 1) && higher(x + 1, z, lv)) m |= 1;
+  if (!(fm & 2) && higher(x - 1, z, lv)) m |= 2;
+  if (!(fm & 4) && higher(x, z + 1, lv)) m |= 4;
+  if (!(fm & 8) && higher(x, z - 1, lv)) m |= 8;
+  if (!(m & 5) && higher(x + 1, z + 1, lv)) m |= 16;
+  if (!(m & 6) && higher(x - 1, z + 1, lv)) m |= 32;
+  if (!(m & 9) && higher(x + 1, z - 1, lv)) m |= 64;
+  if (!(m & 10) && higher(x - 1, z - 1, lv)) m |= 128;
+  return m;
+}
+/** Bits of the 8 neighbours that are water (same bit order as aoMask) — only for low land near the sea level. */
+function waterMask(x, z, lv) {
+  if (lv < SEA || lv > SEA + 1) return 0;
+  return (isWet(x + 1, z) ? 1 : 0) | (isWet(x - 1, z) ? 2 : 0) | (isWet(x, z + 1) ? 4 : 0) | (isWet(x, z - 1) ? 8 : 0) |
+    (isWet(x + 1, z + 1) ? 16 : 0) | (isWet(x - 1, z + 1) ? 32 : 0) | (isWet(x + 1, z - 1) ? 64 : 0) | (isWet(x - 1, z - 1) ? 128 : 0);
+}
+function nbInter(x, z, fm) {
+  let b = 0;
+  for (let d = 0; d < 4; d++) if (fm & (1 << d) && POP[cFM(x + DX[d], z + DZ[d])] >= 3) b |= 1 << d;
+  return b;
+}
+
+/** Side face of tile (x, z) toward dir d if it sticks out above the neighbour (tA,tB own tops; bA,bB neighbour tops). */
+function sideFace(x, z, d, tA, tB, bA, bB) {
+  if (tA <= bA + 1e-4 && tB <= bB + 1e-4) return;
+  const b0 = Math.min(bA, tA), b1 = Math.min(bB, tB);
+  const nx = x + DX[d], nz = z + DZ[d], skirt = nx < 0 || nz < 0 || nx >= W || nz >= H;
+  aD = skirt ? 255 : M.clamp(Math.round(Math.min(b0, b1) / STEP), 0, 254);
+  if (d === 0) sideX(x + 1, z, z + 1, b0, b1, tA, tB, true);
+  else if (d === 1) sideX(x, z, z + 1, b0, b1, tA, tB, false);
+  else if (d === 2) sideZ(z + 1, x, x + 1, b0, b1, tA, tB, true);
+  else sideZ(z, x, x + 1, b0, b1, tA, tB, false);
+}
+
+function emitTile(x, z) {
+  const i = z * W + x;
+  const lv = S.height[i], water = lv < SEA, rt = S.road[i], terr = S.terr[i];
+  const landRoad = rt !== 0 && !water;
+  const rc = landRoad ? cRC(x, z) : 0;
+  const fm = rt ? cFM(x, z) : 0;
+  const nbi = rt ? nbInter(x, z, fm) : 0;
+  const y0 = rampY(lv, rc, 0, 0), y1 = rampY(lv, rc, 1, 0), y2 = rampY(lv, rc, 1, 1), y3 = rampY(lv, rc, 0, 1);
+  // ---- top ----
+  setKind(landRoad ? K.ROAD : water ? K.SEABED : K.TOP);
+  aB = terr | (landRoad ? rt << 3 : 0) | (rc ? 64 : 0);
+  aC = landRoad ? fm | (nbi << 4) : water ? 0 : waterMask(x, z, lv);
+  aD = aoMask(x, z, lv, landRoad ? fm : 0);
+  topQ(x, z, x + 1, z + 1, y0, y1, y2, y3, rc ? rampNormal(rc) : 2);
+  // ---- sides toward lower neighbours (and skirts at the map edge) ----
+  setKind(K.SIDE);
+  aB = terr | (landRoad ? rt << 3 : 0);
+  aC = 0;
+  sideFace(x, z, 0, y1, y2, cornerY(x + 1, z, 0, 0), cornerY(x + 1, z, 0, 1));
+  sideFace(x, z, 1, y0, y3, cornerY(x - 1, z, 1, 0), cornerY(x - 1, z, 1, 1));
+  sideFace(x, z, 2, y3, y2, cornerY(x, z + 1, 0, 0), cornerY(x, z + 1, 1, 0));
+  sideFace(x, z, 3, y0, y1, cornerY(x, z - 1, 0, 1), cornerY(x, z - 1, 1, 1));
+  if (rt) roadExtras(x, z, rt, fm, nbi, water, lv, rc, terr);
+}
+
+function roadExtras(x, z, rt, fm, nbi, bridge, lv, rc, terr) {
+  curLv = bridge ? DECK_LVL : lv;
+  curRc = bridge ? 0 : rc;
+  curN = curRc ? rampNormal(curRc) : 2;
+  aB = terr | (rt << 3) | (bridge ? 32 : 0) | (curRc ? 64 : 0);
+  aC = fm | (nbi << 4);
+  aD = 0;
+  if (bridge) {
+    // deck surface
+    setKind(K.ROAD);
+    topQ(x, z, x + 1, z + 1, DECK_Y, DECK_Y, DECK_Y, DECK_Y, 2);
+    // fascia along open edges
+    setKind(K.DECKSIDE);
+    const yb = DECK_Y - DECK_T;
+    if (!(fm & 1)) sideX(x + 1, z, z + 1, yb, yb, DECK_Y, DECK_Y, true);
+    if (!(fm & 2)) sideX(x, z, z + 1, yb, yb, DECK_Y, DECK_Y, false);
+    if (!(fm & 4)) sideZ(z + 1, x, x + 1, yb, yb, DECK_Y, DECK_Y, true);
+    if (!(fm & 8)) sideZ(z, x, x + 1, yb, yb, DECK_Y, DECK_Y, false);
+    // underside: closes the deck, so it is the back-face caster of the (front-culled) shadow pass
+    ensure(1);
+    V(x, yb, z, DECK_Y, 3);
+    V(x + 1, yb, z, DECK_Y, 3);
+    V(x + 1, yb, z + 1, DECK_Y, 3);
+    V(x, yb, z + 1, DECK_Y, 3);
+    piers(x, z, fm, lv);
+  }
+  if (rt === 3) {
+    strips(x, z, fm, BAR_W, BAR_H, 0, K.BARRIER, K.BARRIER, true);
+  } else {
+    strips(x, z, fm, SW[rt], CURB, 0, K.WALK, K.CURB, true);
+    if (bridge) railings(x, z, fm);
+  }
+  if (rt === 2 && (fm === 3 || fm === 12)) median(x, z, fm, nbi);
+}
+
+/** Raised strips along the open (non-connected) edges + corner squares between two connections. */
+function strips(x, z, fm, w, h, yOff, kTop, kSide, corners) {
+  const sPX = !(fm & 1), sNX = !(fm & 2), sPZ = !(fm & 4), sNZ = !(fm & 8);
+  if (sNZ) pr(x, z, 0, 0, 1, w, h, yOff, 4 | 8, kTop, kSide);
+  if (sPZ) pr(x, z, 0, 1 - w, 1, 1, h, yOff, 4 | 8, kTop, kSide);
+  const v0 = sNZ ? w : 0, v1 = sPZ ? 1 - w : 1;
+  if (sPX) pr(x, z, 1 - w, v0, 1, v1, h, yOff, 1 | 2, kTop, kSide);
+  if (sNX) pr(x, z, 0, v0, w, v1, h, yOff, 1 | 2, kTop, kSide);
+  if (!corners) return;
+  if (!sPX && !sPZ) pr(x, z, 1 - w, 1 - w, 1, 1, h, yOff, 2 | 8, kTop, kSide);
+  if (!sNX && !sPZ) pr(x, z, 0, 1 - w, w, 1, h, yOff, 1 | 8, kTop, kSide);
+  if (!sPX && !sNZ) pr(x, z, 1 - w, 0, 1, w, h, yOff, 2 | 4, kTop, kSide);
+  if (!sNX && !sNZ) pr(x, z, 0, 0, w, w, h, yOff, 1 | 4, kTop, kSide);
+}
+
+/** Bridge railings: posts every 1/8 unit + a top rail along open edges, on top of the sidewalk. */
+function railings(x, z, fm) {
+  const y = CURB, rw = POST, ph = RAIL_H - 1 / 64;
+  for (let d = 0; d < 4; d++) {
+    if (fm & (1 << d)) continue;
+    const alongX = d >= 2; // edge runs along X for ±Z edges
+    const e0 = d === 0 ? 1 - rw * 1.5 : d === 1 ? rw * 0.5 : d === 2 ? 1 - rw * 1.5 : rw * 0.5; // across-edge position
+    // top rail
+    if (alongX) pr(x, z, 0, e0 - rw * 0.25, 1, e0 + rw * 1.25, 1.2 / 64, y + ph, 4 | 8, K.RAIL, K.RAIL);
+    else pr(x, z, e0 - rw * 0.25, 0, e0 + rw * 1.25, 1, 1.2 / 64, y + ph, 1 | 2, K.RAIL, K.RAIL);
+    for (let p = 0; p < 8; p++) {
+      const a = p / 8 + 1 / 16 - rw * 0.5;
+      if (alongX) pr(x, z, a, e0, a + rw, e0 + rw, ph, y, 15, K.RAIL, K.RAIL);
+      else pr(x, z, e0, a, e0 + rw, a + rw, ph, y, 15, K.RAIL, K.RAIL);
+    }
+  }
+}
+
+/** Raised green median on straight avenue tiles; stops short before intersections / road ends. */
+function median(x, z, fm, nbi) {
+  const ax = fm === 3;
+  const dN = ax ? 1 : 3, dP = ax ? 0 : 2;
+  const cont = (d) => {
+    const nx = x + DX[d], nz = z + DZ[d];
+    return RL(nx, nz) >= 0 && S.road[nz * W + nx] === 2 && cFM(nx, nz) === fm;
+  };
+  let a0 = 0, a1 = 1, faces = ax ? 4 | 8 : 1 | 2;
+  if (!cont(dN)) { a0 = (nbi >> dN) & 1 ? 0.3 : 0.14; faces |= ax ? 2 : 8; }
+  if (!cont(dP)) { a1 = 1 - ((nbi >> dP) & 1 ? 0.3 : 0.14); faces |= ax ? 1 : 4; }
+  const m0 = 0.5 - MED_HW, m1 = 0.5 + MED_HW;
+  if (ax) pr(x, z, a0, m0, a1, m1, CURB, 0, faces, K.MEDIAN, K.CURB);
+  else pr(x, z, m0, a0, m1, a1, CURB, 0, faces, K.MEDIAN, K.CURB);
+}
+
+/** Bridge piers down to the seabed: every other tile along straight spans, always under junctions. */
+function piers(x, z, fm, lv) {
+  const ax = fm === 3 ? 1 : fm === 12 ? 2 : 0;
+  if ((ax === 1 && x & 1) || (ax === 2 && z & 1)) return;
+  const yb = lv * STEP, capH = 0.07, yc = DECK_Y - DECK_T - capH;
+  const col = (u0, v0, u1, v1) => prism(x + u0, z + v0, x + u1, z + v1, yb, yb, yb, yb, yc - yb, 15, K.PILLAR, K.PILLAR, 2);
+  const cap = (u0, v0, u1, v1) => prism(x + u0, z + v0, x + u1, z + v1, yc, yc, yc, yc, capH, 15, K.PILLAR, K.PILLAR, 2);
+  if (ax === 1) {
+    col(0.44, 0.15, 0.56, 0.27);
+    col(0.44, 0.73, 0.56, 0.85);
+    cap(0.41, 0.08, 0.59, 0.92);
+  } else if (ax === 2) {
+    col(0.15, 0.44, 0.27, 0.56);
+    col(0.73, 0.44, 0.85, 0.56);
+    cap(0.08, 0.41, 0.92, 0.59);
+  } else {
+    col(0.4, 0.4, 0.6, 0.6);
+    cap(0.28, 0.28, 0.72, 0.72);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Chunks                                                               */
+/* ------------------------------------------------------------------ */
+/** Hash of everything the chunk mesh depends on (height/terr/road in chunk + 3 tile margin). */
+function chunkHash(c) {
+  let h = 2166136261;
+  const x0 = Math.max(0, c.x0 - 3), z0 = Math.max(0, c.z0 - 3), x1 = Math.min(W, c.x1 + 3), z1 = Math.min(H, c.z1 + 3);
+  const hg = S.height, tr = S.terr, rd = S.road;
+  for (let z = z0; z < z1; z++)
+    for (let i = z * W + x0, e = z * W + x1; i < e; i++) h = Math.imul(h ^ (hg[i] | (tr[i] << 8) | (rd[i] << 12)), 16777619);
+  return h >>> 0;
+}
+
+function buildChunk(c) {
+  c.dirty = false;
+  const hsh = chunkHash(c);
+  if (c.base >= 0 && hsh === c.hash) { T.stats.skipped++; return false; }
+  c.hash = hsh;
+  SKB = T._ocean ? OCEAN_SKIRT : SKIRT_Y;
+  prepCache(c.x0, c.z0);
+  resetGroups();
+  let minY = 1e9, maxY = -1e9;
+  for (let z = c.z0; z < c.z1; z++)
+    for (let x = c.x0; x < c.x1; x++) {
+      const i = z * W + x, lv = S.height[i];
+      emitTile(x, z);
+      const y = lv * STEP;
+      if (y < minY) minY = y;
+      const top = S.road[i] && lv < SEA ? DECK_Y : y;
+      if (top > maxY) maxY = top;
+    }
+  if (c.x0 === 0 || c.z0 === 0 || c.x1 === W || c.z1 === H) minY = Math.min(minY, SKB);
+  c.minY = minY - 0.05;
+  c.maxY = maxY + 0.3;
+  const bytes = packGroups(c.q);
+  const quads = bytes / QB;
+  arenaUpload(c, quads, bytes);
+  T.stats.quads += quads - c.quads;
+  c.quads = quads;
+  T.stats.rebuilt++;
+  return true;
+}
+
+/** Rebuilds dirty chunks: everything after a reset, otherwise nearest-first within the time budget. */
+function process() {
+  const G = VC.gfx, st = VC.state;
+  if (!st || T._frame === G.frameCount) return;
+  T._frame = G.frameCount;
+  if (!T.dirty.length) return;
+  bindState(st);
+  const t0 = performance.now();
+  const list = T.dirty;
+  if (T.full) {
+    for (const c of list) buildChunk(c);
+    list.length = 0;
+    T.full = false;
+    T.stats.fullMs = performance.now() - t0;
+    return;
+  }
+  if (list.length > 1) {
+    const cam = VC.camera;
+    for (const c of list) c.dist = Math.hypot((c.x0 + c.x1) / 2 - cam.tx, (c.z0 + c.z1) / 2 - cam.tz);
+    list.sort((a, b) => a.dist - b.dist);
+  }
+  let n = 0;
+  while (n < list.length) {
+    const t1 = performance.now();
+    if (buildChunk(list[n])) T.stats.maxChunkMs = Math.max(T.stats.maxChunkMs * 0.98, performance.now() - t1);
+    n++;
+    if (performance.now() - t0 > T.budgetMs) break;
+  }
+  list.splice(0, n);
+  T.stats.lastMs = performance.now() - t0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Vertex arena: every chunk mesh lives in ONE vertex buffer + VAO      */
+/* ------------------------------------------------------------------ */
+// A chunk owns the slot [base, base + cap) (in quads) with some slack, so most edits rewrite in place.
+// Freed slots are reused first-fit (merged with free neighbours); when the arena is full it grows and is
+// compacted on the GPU (one copyBufferSubData per live slot). Draws index the shared quad index buffer at
+// the slot offset, so no base-vertex support is needed.
+const QB = 48; // bytes per quad (4 vertices x 12 bytes)
+const A = { vbo: null, vao: null, cap: 0, top: 0, free: [], md: null, slots: [] };
+function arenaInit(gl) {
+  A.md = gl.getExtension('WEBGL_multi_draw');
+  A.vao = gl.createVertexArray();
+  A.vbo = gl.createBuffer();
+  A.cap = 1 << 15;
+  gl.bindBuffer(gl.ARRAY_BUFFER, A.vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, A.cap * QB, gl.STATIC_DRAW);
+  arenaBind(gl);
+  arenaClear();
+}
+/** Points the arena VAO at the current vertex buffer + the shared quad index buffer (sized to the arena). */
+function arenaBind(gl) {
+  const ib = VC.gfx.quadIndexBuffer(A.cap); // (unbinds VAOs) — call before binding ours
+  gl.bindVertexArray(A.vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, A.vbo);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 4, gl.SHORT, false, 12, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 12, 8);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  gl.bindVertexArray(null);
+}
+function arenaClear() {
+  A.top = 0;
+  A.free.length = 0;
+  A.slots.length = 0;
+  if (T.plinth) { T.plinth.base = -1; T.plinth.cap = 0; T.plinth.quads = 0; }
+}
+/** Makes the (empty) arena hold at least `quads` quads without growing during the first full build. */
+function arenaReserve(quads) {
+  if (A.cap >= quads || A.top) return;
+  const gl = VC.gfx.gl;
+  A.cap = quads;
+  gl.bindBuffer(gl.ARRAY_BUFFER, A.vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, A.cap * QB, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  arenaBind(gl);
+}
+/** Returns slot [base, cap) to the free list (sorted, merged; trims the top). */
+function arenaFree(base, cap) {
+  const f = A.free;
+  let i = 0;
+  while (i < f.length && f[i] < base) i += 2;
+  f.splice(i, 0, base, cap);
+  if (i + 2 < f.length && f[i] + f[i + 1] === f[i + 2]) { f[i + 1] += f[i + 3]; f.splice(i + 2, 2); }
+  if (i > 0 && f[i - 2] + f[i - 1] === f[i]) { f[i - 1] += f[i + 1]; f.splice(i, 2); i -= 2; }
+  if (f[i] + f[i + 1] === A.top) { A.top = f[i]; f.splice(i, 2); }
+}
+/** Grows the arena to hold `extra` more quads, compacting live slots into the new buffer. */
+function arenaGrow(gl, extra) {
+  let used = 0;
+  for (const s of A.slots) used += s.cap;
+  const cap = Math.max(A.cap, Math.ceil((used + extra) * 1.4) + 4096);
+  const nb = gl.createBuffer();
+  gl.bindBuffer(gl.COPY_WRITE_BUFFER, nb);
+  gl.bufferData(gl.COPY_WRITE_BUFFER, cap * QB, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.COPY_READ_BUFFER, A.vbo);
+  let top = 0;
+  for (const s of A.slots) {
+    if (s.quads) gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER, s.base * QB, top * QB, s.quads * QB);
+    s.base = top;
+    top += s.cap;
+  }
+  gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+  gl.bindBuffer(gl.COPY_WRITE_BUFFER, null);
+  gl.deleteBuffer(A.vbo);
+  A.vbo = nb;
+  A.cap = cap;
+  A.top = top;
+  A.free.length = 0;
+  arenaBind(gl);
+  T.stats.grows++;
+}
+/** Stores `quads` quads (UP[0..bytes)) for slot owner s ({base, cap, quads}), moving it if it outgrew its slot. */
+function arenaUpload(s, quads, bytes) {
+  const gl = VC.gfx.gl;
+  if (s.base < 0 || s.cap < quads) {
+    if (s.base >= 0) {
+      arenaFree(s.base, s.cap);
+      A.slots.splice(A.slots.indexOf(s), 1);
+    }
+    s.base = -1;
+    const need = quads + (quads >> 3) + 32; // slack for small edits
+    const f = A.free;
+    for (let i = 0; i < f.length; i += 2)
+      if (f[i + 1] >= need) {
+        s.base = f[i];
+        if (f[i + 1] - need < 64) { s.cap = f[i + 1]; f.splice(i, 2); }
+        else { s.cap = need; f[i] += need; f[i + 1] -= need; }
+        break;
+      }
+    if (s.base < 0) {
+      if (A.top + need > A.cap) arenaGrow(gl, need);
+      s.base = A.top;
+      s.cap = need;
+      A.top += need;
+    }
+    A.slots.push(s);
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, A.vbo);
+  if (bytes) gl.bufferSubData(gl.ARRAY_BUFFER, s.base * QB, UP, 0, bytes);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  T.stats.arenaQuads = A.cap;
+  T.stats.arenaUsed = A.top;
+}
+
+/* ------------------------------------------------------------------ */
+/* Diorama plinth (wooden base ring around the slab; diorama mode only) */
+/* ------------------------------------------------------------------ */
+function buildPlinth(st) {
+  if (!T.plinth) T.plinth = { base: -1, cap: 0, quads: 0, q: [0, 0, 0, 0] };
+  const P = T.plinth;
+  if (T._ocean) { P.quads = 0; P.q[2] = 0; return; } // hidden under the sea: not built, not drawn
+  const w = st.W, h = st.H, p = PLINTH, yb = SKIRT_Y - 0.32, th = 0.44;
+  resetGroups();
+  aB = 0; aC = 0; aD = 0;
+  const ring = (x0, z0, x1, z1, faces) => prism(x0, z0, x1, z1, yb, yb, yb, yb, th, faces | 16, K.PLINTH, K.PLINTH, 2);
+  ring(-p, -p, w + p, 0, 1 | 2 | 8);
+  ring(-p, h, w + p, h + p, 1 | 2 | 4);
+  ring(-p, 0, 0, h, 2);
+  ring(w, 0, w + p, h, 1);
+  const bytes = packGroups(P.q); // all faces are group 2
+  const quads = bytes / QB;
+  arenaUpload(P, quads, bytes);
+  P.quads = quads;
+}
+
+/* ------------------------------------------------------------------ */
+/* Drawing + frustum culling                                            */
+/* ------------------------------------------------------------------ */
+const PL = new Float32Array(24);
+const visible = [];
+/** Frustum planes (a, b, c, d) x 6 from a column-major view-projection matrix (Gribb-Hartmann). */
+function extractPlanes(m) {
+  for (let r = 0, o = 0; r < 3; r++, o += 8) {
+    for (let k = 0; k < 4; k++) {
+      PL[o + k] = m[3 + k * 4] + m[r + k * 4];
+      PL[o + 4 + k] = m[3 + k * 4] - m[r + k * 4];
+    }
+  }
+}
+const byDist = (a, b) => a.dist - b.dist;
+function boxVisible(x0, y0, z0, x1, y1, z1) {
+  for (let p = 0; p < 24; p += 4) {
+    const a = PL[p], b = PL[p + 1], c = PL[p + 2], d = PL[p + 3];
+    if (a * (a > 0 ? x1 : x0) + b * (b > 0 ? y1 : y0) + c * (c > 0 ? z1 : z0) + d < 0) return false;
+  }
+  return true;
+}
+
+// multi-draw lists: counts (indices) + byte offsets into the shared quad index buffer
+let mdCount = new Int32Array(512), mdOff = new Int32Array(512), mdN = 0;
+function mdPush(firstQuad, quads) {
+  if (mdN === mdCount.length) {
+    const c = new Int32Array(mdN * 2), o = new Int32Array(mdN * 2);
+    c.set(mdCount); o.set(mdOff);
+    mdCount = c; mdOff = o;
+  }
+  mdCount[mdN] = quads * 6;
+  mdOff[mdN] = firstQuad * 24;
+  mdN++;
+}
+function mdFlush(gl) {
+  if (!mdN) return;
+  if (A.md) A.md.multiDrawElementsWEBGL(gl.TRIANGLES, mdCount, 0, gl.UNSIGNED_INT, mdOff, 0, mdN);
+  else for (let i = 0; i < mdN; i++) gl.drawElements(gl.TRIANGLES, mdCount[i], gl.UNSIGNED_INT, mdOff[i]);
+  T.stats.draws += A.md ? 1 : mdN;
+  mdN = 0;
+}
+
+function draw(ctx, shadow) {
+  const gl = ctx.gl;
+  if (!T.chunks.length || !A.vao) return;
+  if (T._statF !== VC.gfx.frameCount) { T._statF = VC.gfx.frameCount; T.stats.draws = 0; }
+  // uViewProj of the current pass (the light's matrix during the shadow pass) lives in frameData[0..15]
+  extractPlanes(VC.gfx.frameData);
+  visible.length = 0;
+  const cp = ctx.cam.pos;
+  for (const c of T.chunks) {
+    if (!c.quads || c.base < 0) continue;
+    if (!boxVisible(c.x0, c.minY, c.z0, c.x1, c.maxY, c.z1)) continue;
+    c.dist = (c.x0 + CH * 0.5 - cp[0]) ** 2 + (c.z0 + CH * 0.5 - cp[2]) ** 2;
+    visible.push(c);
+  }
+  const pl = T.plinth && T.plinth.quads && T.plinth.base >= 0 && !T._ocean ? T.plinth : null;
+  gl.bindVertexArray(A.vao);
+  if (shadow) {
+    // one depth-only multi-draw for every visible chunk (all groups are contiguous in a slot)
+    T.progShadow.use();
+    for (const c of visible) mdPush(c.base, c.quads);
+    if (pl) mdPush(pl.base, pl.quads);
+    mdFlush(gl);
+    gl.bindVertexArray(null);
+    return;
+  }
+  visible.sort(byDist); // front to back for early-z
+  // tiny structures (railings, barriers, piers) are sub-pixel far away: skip them beyond this distance²
+  const far2 = Math.pow(Math.max(90, VC.gfx.quality().lodDist * 2.2), 2);
+  const f = features(ctx.env);
+  if (T._feat !== f) {
+    T._feat = f;
+    T.progs = [0, 1, 2, 3].map((g) => program(g, f));
+  }
+  const ov = f & F_OVERLAY ? T.overlayInfo() : null;
+  if (ov) {
+    gl.activeTexture(gl.TEXTURE0 + OV_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, ov.tex);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+  gl.bindSampler(VC.gfx.UNIT.NOISE, T.sampler);
+  for (let g = 0; g < NG; g++) {
+    const P = T.progs[g];
+    P.use();
+    if (ov && P.u.uOvCfg) gl.uniform4fv(P.u.uOvCfg, ov.cfg);
+    for (const c of visible) {
+      const n = c.q[g];
+      if (!n || (g === 2 && c.dist > far2)) continue;
+      let q0 = c.base;
+      for (let k = 0; k < g; k++) q0 += c.q[k];
+      mdPush(q0, n);
+    }
+    if (g === 2 && pl) mdPush(pl.base, pl.quads);
+    mdFlush(gl);
+  }
+  gl.bindSampler(VC.gfx.UNIT.NOISE, null);
+  T.stats.drawn = visible.length;
+  gl.bindVertexArray(null);
+}
+
+/* ------------------------------------------------------------------ */
+/* Shaders                                                              */
+/* ------------------------------------------------------------------ */
+const VS = `
+layout(location=0) in vec4 aP;
+layout(location=1) in uvec4 aI;
+out vec3 vWp; out float vTop; flat out uvec4 vI;
+void main(){
+  vec3 p = aP.xyz * (1.0 / 64.0);
+  vWp = p; vTop = aP.w * (1.0 / 64.0); vI = aI;
+  gl_Position = uViewProj * vec4(p, 1.0);
+}`;
+
+const VS_SHADOW = `
+layout(location=0) in vec4 aP;
+void main(){ gl_Position = uViewProj * vec4(aP.xyz * (1.0 / 64.0), 1.0); }`;
+
+/**
+ * Shared data-overlay GLSL (terrain F_OVERLAY variants + the water). Needs uOvRel bound to unit OV_UNIT
+ * and uOvCfg = overlayInfo().cfg. Fragment shaders only.
+ */
+const OVERLAY_GLSL = `
+uniform sampler2D uOvRel;   // relevance: 1 on / next to developed tiles, soft falloff (LINEAR, tile res)
+uniform vec4 uOvCfg;        // x mode (0 weighted, 1 zero = no data, 2 roads only), y floor, z reveal threshold
+/** Overlay at world xz: x = value 0..1, y = strength 0..1 (0 = nothing to show here). */
+vec2 ovSample(vec2 xz){
+  vec2 q = clamp(xz, vec2(0.0), uMap.xy - 0.001);
+  if (uHover.w > 2.5) { float g = texelFetch(uTileTex, ivec2(q), 0).g; return vec2(g, g > 0.0 ? 1.0 : 0.0); }
+  // smooth (smoothstep-weighted bilinear) value between tile centres
+  vec2 p = q - 0.5, i0 = floor(p), f = p - i0;
+  f = f * f * (3.0 - 2.0 * f);
+  ivec2 mx = ivec2(uMap.xy) - 1, a = clamp(ivec2(i0), ivec2(0), mx), b = clamp(ivec2(i0) + 1, ivec2(0), mx);
+  vec4 t00 = texelFetch(uTileTex, a, 0), t10 = texelFetch(uTileTex, ivec2(b.x, a.y), 0);
+  vec4 t01 = texelFetch(uTileTex, ivec2(a.x, b.y), 0), t11 = texelFetch(uTileTex, b, 0);
+  vec4 g = vec4(t00.g, t10.g, t01.g, t11.g);
+  vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+  if (uOvCfg.x < 0.5) {
+    float v = dot(w, g);
+    float rel = texture(uOvRel, q / uMap.xy).r;
+    if (uOvCfg.z > 0.0) rel = max(rel, smoothstep(uOvCfg.z, uOvCfg.z * 2.5, v));   // plumes over open land
+    return vec2(v, mix(uOvCfg.y, 1.0, rel));
+  }
+  // masked average: only texels that carry data (value > 0, or road tiles) take part
+  vec4 m;
+  if (uOvCfg.x < 1.5) m = step(0.5 / 255.0, g);
+  else m = vec4((uvec4(vec4(t00.b, t10.b, t01.b, t11.b) * 255.0 + 0.5) >> 2u) & 1u);
+  float cov = dot(w, m);
+  float v = cov > 1e-4 ? dot(w * m, g) / cov : 0.0;
+  if (uOvCfg.x < 1.5) return vec2(v, smoothstep(0.05, 0.5, cov));
+  uint ob = uint(texelFetch(uTileTex, ivec2(q), 0).b * 255.0 + 0.5);
+  return vec2(v, float((ob >> 2u) & 1u));
+}
+/** Overlay mode base look: the scene goes mostly grey so the data colours read (keeps light & shadow). */
+vec3 ovBase(vec3 c){
+  return mix(c, vec3(dot(c, vec3(0.3, 0.55, 0.15))), 0.7 * uMap.w / 0.75);
+}
+/** Blends the overlay colour at world xz into c (n: surface normal for the light level; strength 0..1). */
+vec3 ovTint(vec3 c, vec2 xz, vec3 n, float strength){
+  vec2 o = ovSample(xz);
+  float a = clamp(uMap.w * strength * o.y * 1.15, 0.0, 1.0);
+  if (a <= 0.001) return c;
+  float kindR = uHover.w;
+  vec3 oc = srgb2lin(overlayRamp(o.x, kindR));
+  // follow the scene exposure by day; an emissive floor keeps it readable at night
+  vec3 amb = mix(uGroundAmb.rgb, uSkyAmb.rgb, 0.5 + 0.5 * n.y);
+  float lum = dot(amb + uSunColor.rgb * max(dot(n, uSunDir.xyz), 0.0) * uSunDir.w * 0.75, vec3(0.3, 0.55, 0.15));
+  float line = kindR > 2.5 ? 0.0 : 1.0 - smoothstep(0.0, 0.06, 0.5 - abs(fract(o.x * 10.0) - 0.5));
+  vec3 ocol = oc * (max(lum, 0.55) * 0.8 + NIGHT * 0.65) * (1.0 - line * 0.3);
+  return mix(c, ocol, a);
+}
+`;
+
+const FS = `
+in vec3 vWp; in float vTop; flat in uvec4 vI;
+out vec4 fragColor;
+#ifdef F_OVERLAY
+${OVERLAY_GLSL}
+#endif
+
+const vec3 NRM[10] = vec3[10](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1),
+  vec3(-0.2425,0.9701,0.0), vec3(0.2425,0.9701,0.0), vec3(0.0,0.9701,-0.2425), vec3(0.0,0.9701,0.2425));
+const float SW_ST = 0.140625, SW_AV = 0.09375;
+
+// Per-pixel shared inputs (computed once in main, reused by every material):
+float gPx;              // world size of one pixel (texture LOD / AA / detail fade)
+vec4 gN1;               // smooth noise at the voxel centre (scale 0.05; r,g,b,a = 2.5, 1.25, 0.6, 5 unit features)
+float gQ;               // blocky noise: one value per 4x4 voxel block
+float gH0, gH1, gH2;    // three independent per-voxel hashes
+
+/** Integer lattice hash -> [0,1): pattern-free on voxel grids (floor(c) is hashed). */
+float ih(vec2 c){
+  uvec2 q = uvec2(ivec2(floor(c)) + 65536);
+  uint h = (q.x * 0x27d4eb2du) ^ ((q.y + 0x9e3779b9u) * 0x165667b1u);
+  h ^= h >> 15u; h *= 0x2c1b3c6du; h ^= h >> 12u; h *= 0x297a2d39u; h ^= h >> 15u;
+  return float(h >> 8u) * (1.0 / 16777216.0);
+}
+/** Noise texture sampled with an explicit LOD (safe inside divergent branches). */
+vec4 tn(vec2 p, float s){ return textureLod(uNoiseTex, p * s, max(0.0, log2(gPx * s * 256.0))); }
+float bnd(float x, float a, float b, float w){ return smoothstep(a - w, a + w, x) * (1.0 - smoothstep(b - w, b + w, x)); }
+
+/* ---------------- seasons ---------------- */
+float seasonF(){ return mod(uMisc.y, 4.0); }
+vec3 seasonGrass(){
+  float s = seasonF();
+  vec3 sp = vec3(0.40, 0.60, 0.26), su = vec3(0.34, 0.52, 0.22), wi = vec3(0.5, 0.5, 0.35);
+  // autumn is patchy, not one flat mustard: broad meadow noise keeps about half the ground a late-summer
+  // green-brown, the rest turns straw with a few russet swathes (the trees carry the season's colour)
+  float pa = smoothstep(0.38, 0.62, gN1.a);
+  vec3 au = mix(vec3(0.37, 0.48, 0.21), vec3(0.5, 0.47, 0.23), pa);
+  au = mix(au, vec3(0.53, 0.38, 0.2), smoothstep(0.62, 0.8, gN1.b) * pa * 0.7);
+  return s < 1.0 ? mix(sp, su, s) : s < 2.0 ? mix(su, au, s - 1.0) : s < 3.0 ? mix(au, wi, s - 2.0) : mix(wi, sp, s - 3.0);
+}
+float autumnAmt(){ float s = seasonF(); return smoothstep(1.3, 2.0, s) * (1.0 - smoothstep(2.7, 3.2, s)); }
+float flowerAmt(){ float s = seasonF(); return s < 2.0 ? smoothstep(0.0, 0.3, s) * (1.0 - smoothstep(1.3, 1.9, s)) : smoothstep(3.6, 4.0, s); }
+
+/* ---------------- voxel materials (sRGB albedo; cheap: shared noise + hashes only) ---------------- */
+vec3 grassCol(bool meadow, float fade){
+  vec3 g = seasonGrass() * (0.84 + 0.32 * gN1.r);
+  g = mix(g, g * vec3(1.16, 1.05, 0.62), smoothstep(0.55, 0.85, gN1.g) * 0.55);
+  g = mix(g, g * vec3(0.78, 0.95, 0.85), smoothstep(0.6, 0.8, gN1.a) * 0.45);
+  g *= 1.0 + (gH0 - 0.5) * 0.2 * fade;
+  g = mix(g, g * 0.74, step(0.92, gH1) * fade);
+  g = mix(g, g * 1.17, step(gH1, 0.05) * fade);
+  if (meadow) g = mix(g, g * vec3(1.1, 1.08, 0.8), 0.35);
+  vec3 fc = !meadow ? vec3(0.98, 0.9, 0.3) : gH0 < 0.3 ? vec3(0.98, 0.84, 0.22) : gH0 < 0.55 ? vec3(0.98, 0.97, 0.94) : gH0 < 0.8 ? vec3(0.93, 0.45, 0.66) : vec3(0.62, 0.42, 0.9);
+  float fl = meadow ? step(0.95, gH1) * max(flowerAmt(), 0.15) : step(0.993, gH1) * flowerAmt();
+  g = mix(g, fc, fl * fade);
+  return mix(g, vec3(0.78, 0.4, 0.12), step(0.955, gH2) * fade * autumnAmt() * 0.9);
+}
+vec3 sandCol(vec2 cell, float fade){
+  float r = sin(dot(cell, vec2(0.29, 0.49)) * 4.0 + gN1.r * 9.0);
+  vec3 s = vec3(0.84, 0.76, 0.55) * (0.95 + 0.05 * r * fade) * (1.0 + (gH0 - 0.5) * 0.08 * fade);
+  s = mix(s, vec3(0.97, 0.95, 0.9), step(0.975, gH1) * fade);
+  return mix(s, vec3(0.62, 0.56, 0.46), step(0.986, gH2) * fade);
+}
+vec3 dirtCol(float fade){
+  vec3 d = vec3(0.5, 0.38, 0.26) * (0.86 + 0.28 * gN1.g) * (1.0 + (gH0 - 0.5) * 0.18 * fade);
+  d = mix(d, vec3(0.57, 0.47, 0.36), step(0.95, gH1) * fade);
+  return mix(d, seasonGrass() * (0.8 + 0.25 * gH0), step(0.84, gH2) * fade * 0.85);
+}
+vec3 rockCol(float fade){
+  vec3 r = vec3(0.53, 0.51, 0.48) * (0.82 + 0.3 * gN1.b) * (1.0 + (gH0 - 0.5) * 0.16 * fade);
+  r *= 1.0 - (1.0 - smoothstep(0.0, 0.03, abs(gN1.g - 0.5))) * 0.45 * fade; // cracks
+  return mix(r, vec3(0.46, 0.53, 0.33), smoothstep(0.6, 0.72, gN1.a) * 0.45); // lichen
+}
+// off-white (not paper white): keeps winter scenes from washing out; wind-drift ripples + per-voxel grain
+vec3 snowCol(float fade){ return vec3(0.8, 0.84, 0.9) * (0.92 + 0.08 * gN1.b) * (0.96 + 0.06 * gH1 * fade); }
+float sparkle(vec2 cell, vec3 V, float fade){ return step(0.992, hash13(vec3(cell, floor(dot(V, vec3(23.0, 17.0, 29.0)))))) * fade; }
+vec3 terrainTop(uint terr, vec2 cell, float fade){
+  if (terr == 1u) return sandCol(cell, fade);
+  if (terr == 2u) return dirtCol(fade);
+  if (terr == 3u) return rockCol(fade);
+  if (terr == 4u) return snowCol(fade);
+  return grassCol(terr == 5u, fade);
+}
+float topAO(vec2 uv, uint m){
+  float a = 1.0;
+  const float R = 0.34;
+  if ((m & 1u) != 0u) a *= mix(0.58, 1.0, smoothstep(0.0, R, 1.0 - uv.x));
+  if ((m & 2u) != 0u) a *= mix(0.58, 1.0, smoothstep(0.0, R, uv.x));
+  if ((m & 4u) != 0u) a *= mix(0.58, 1.0, smoothstep(0.0, R, 1.0 - uv.y));
+  if ((m & 8u) != 0u) a *= mix(0.58, 1.0, smoothstep(0.0, R, uv.y));
+  if ((m & 16u) != 0u) a *= mix(0.65, 1.0, smoothstep(0.0, R, length(1.0 - uv)));
+  if ((m & 32u) != 0u) a *= mix(0.65, 1.0, smoothstep(0.0, R, length(vec2(uv.x, 1.0 - uv.y))));
+  if ((m & 64u) != 0u) a *= mix(0.65, 1.0, smoothstep(0.0, R, length(vec2(1.0 - uv.x, uv.y))));
+  if ((m & 128u) != 0u) a *= mix(0.65, 1.0, smoothstep(0.0, R, length(uv)));
+  return a;
+}
+#if GROUP >= 2
+/** Animated caustic web from interfering waves (pure ALU). */
+float caustic(vec2 p){
+  float t = TIME * 0.8;
+  vec2 q = p * 2.2;
+  float w = sin(q.x + sin(q.y * 1.3 + t) * 0.9 + t * 0.7) + sin(q.y * 1.1 + sin(q.x * 0.9 - t * 0.8) * 0.9 - t * 0.5);
+  return pow(1.0 - smoothstep(0.0, 0.55, abs(w)), 4.0);
+}
+#endif
+
+#if GROUP == 3
+vec3 seabed(uint terr, vec2 cell, float depth, float fade){
+  vec3 s = terr == 1u ? sandCol(cell, fade) * vec3(0.84, 0.88, 0.78) : vec3(0.36, 0.38, 0.26) * (0.85 + 0.3 * gN1.r) * (1.0 + (gH0 - 0.5) * 0.12 * fade);
+  s = mix(s, vec3(0.2, 0.38, 0.2), smoothstep(0.55, 0.75, gN1.b) * 0.7 * step(0.3, gH2)); // weed beds
+  return s * mix(0.95, 0.55, smoothstep(0.1, 1.2, depth)) * vec3(0.84, 0.97, 0.92);
+}
+/**
+ * Stratified soil / rock on vertical faces: bands every 2 voxels, darker toward the slab bottom.
+ * stepH = height of the whole face: one-level terrace risers are wrapped in the top material entirely
+ * (a dark soil band on every 0.25 step reads as black scratches all over flat maps).
+ */
+vec3 sideCol(vec3 wp, float topY, float stepH, uint terr, uint road, vec2 cell, float fade){
+  float below = topY - wp.y;
+  float band = floor(wp.y * 4.0 + 0.001);
+  float bh = hash11(band * 0.618 + 3.1);
+  vec3 soil = bh < 0.25 ? vec3(0.49, 0.35, 0.23) : bh < 0.5 ? vec3(0.57, 0.43, 0.29) : bh < 0.75 ? vec3(0.43, 0.32, 0.24) : vec3(0.63, 0.51, 0.36);
+  vec3 stone = mix(vec3(0.44, 0.43, 0.41), vec3(0.57, 0.55, 0.51), bh);
+  float rocky = smoothstep(1.4, -0.4, wp.y);
+  if (terr == 3u || terr == 4u) rocky = max(rocky, 0.8);
+  vec3 col = mix(soil, stone, rocky);
+  if (terr == 1u) col = mix(col, vec3(0.8, 0.71, 0.5), smoothstep(0.75, 0.1, below) * (1.0 - rocky));
+  float soilTop = (terr == 0u || terr == 5u || terr == 2u) ? 1.0 : 0.0;
+  col = mix(col, vec3(0.42, 0.31, 0.2), smoothstep(0.42, 0.18, below) * (1.0 - rocky) * soilTop);
+  col *= 1.0 + (gH0 - 0.5) * 0.16 * fade;
+  col = mix(col, stone * 1.08, step(0.955, gH1) * fade * (1.0 - rocky));
+  col *= 1.0 - 0.13 * (1.0 - smoothstep(0.0, 0.14, fract(wp.y * 4.0))) * fade;
+  col *= mix(0.4, 1.0, smoothstep(-3.0, 1.3, wp.y));
+  if (road > 0u) {
+    if (below < 0.07) col = vec3(0.21, 0.215, 0.23);
+    else if (below < 0.16) col = vec3(0.5, 0.48, 0.45) * (0.9 + 0.2 * gH0);
+  } else if (below < (stepH < 0.3 && topY > SEA_Y ? 0.3 : 0.125 * (1.0 + step(0.62, ih(vec2(cell.x, 5.0)))) + SNOW * 0.07)) { // top material wraps the edge
+    col = terr == 0u || terr == 5u ? seasonGrass() * (0.9 + 0.2 * gH2 * fade) : terrainTop(terr, cell, fade);    if (SNOW > 0.2 && terr != 1u) col = mix(col, snowCol(fade), smoothstep(0.2, 0.6, SNOW));
+  }
+  return col;
+}
+#endif
+
+#if GROUP == 0
+/** Distance (tile units) from uv to the nearest edge/corner shared with a water tile (bits from the mesher). */
+float shoreDist(uint m, vec2 uv){
+  float d = 9.0;
+  if ((m & 1u) != 0u) d = min(d, 1.0 - uv.x);
+  if ((m & 2u) != 0u) d = min(d, uv.x);
+  if ((m & 4u) != 0u) d = min(d, 1.0 - uv.y);
+  if ((m & 8u) != 0u) d = min(d, uv.y);
+  if ((m & 16u) != 0u) d = min(d, length(1.0 - uv));
+  if ((m & 32u) != 0u) d = min(d, length(vec2(uv.x, 1.0 - uv.y)));
+  if ((m & 64u) != 0u) d = min(d, length(vec2(1.0 - uv.x, uv.y)));
+  if ((m & 128u) != 0u) d = min(d, length(uv));
+  return d;
+}
+/** Paved / lawn lot base under buildings, by zone. */
+vec3 lotBase(uint zc, vec2 uv, vec2 p, float fade, float aa){
+  uint zt = zc >> 2u, den = zc & 3u;
+  vec2 f = abs(fract(p * 4.0) - 0.5);
+  float joint = 1.0 - smoothstep(0.003, 0.003 + aa, (0.5 - max(f.x, f.y)) * 0.25);
+  vec3 lawn = seasonGrass() * (0.95 + 0.1 * step(0.5, fract(p.x * 2.0))) * (1.0 + (gH0 - 0.5) * 0.1 * fade);
+  vec3 pv = (zt == 3u ? vec3(0.55, 0.54, 0.51) : zt == 2u ? vec3(0.67, 0.65, 0.61) : vec3(0.72, 0.7, 0.66)) * (0.94 + 0.1 * ih(floor(p * 4.0)));
+  pv *= 1.0 - joint * 0.2 * fade;
+  if (zt == 3u) pv = mix(pv, pv * 0.7, smoothstep(0.62, 0.7, gN1.b) * 0.6); // oil stains
+  if (zt == 1u && den == 1u) return lawn;
+  if (zt == 1u && den == 2u) return mix(pv, lawn, smoothstep(0.12, 0.12 + aa, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y))));
+  return pv;
+}
+#endif
+
+#if GROUP == 1
+/** Warm street-lamp light pools (tiles with x+z even; mid-points of open sidewalks). */
+float lampPool(vec2 uv, uint mask, uint road, vec2 tile){
+  if (((uint(tile.x) + uint(tile.y)) & 1u) != 0u) return 0.0;
+  if (road == 3u) {
+    if (mask != 3u && mask != 12u) return 0.0;
+    vec2 d = (uv - 0.5) * (mask == 3u ? vec2(0.7, 1.4) : vec2(1.4, 0.7));
+    return exp(-dot(d, d) * 9.0);
+  }
+  // centred under the lamp head, which overhangs the road by LAMP_REACH from the pole on the sidewalk
+  float h = (road == 1u ? SW_ST : SW_AV) * 0.5 + ${LAMP_REACH.toFixed(3)}, p = 0.0;
+  vec2 d;
+  if ((mask & 1u) == 0u) { d = uv - vec2(1.0 - h, 0.5); p += exp(-dot(d, d) * 14.0); }
+  if ((mask & 2u) == 0u) { d = uv - vec2(h, 0.5); p += exp(-dot(d, d) * 14.0); }
+  if ((mask & 4u) == 0u) { d = uv - vec2(0.5, 1.0 - h); p += exp(-dot(d, d) * 14.0); }
+  if ((mask & 8u) == 0u) { d = uv - vec2(0.5, h); p += exp(-dot(d, d) * 14.0); }
+  return min(p, 1.2);
+}
+/** Painted line from the tile centre toward connection d at lateral offset off (half width hw). */
+float seg(vec2 uv, vec2 wxz, uint d, float off, float hw, float to, float dashF, float aa){
+  float along = d == 0u ? uv.x - 0.5 : d == 1u ? 0.5 - uv.x : d == 2u ? uv.y - 0.5 : 0.5 - uv.y;
+  float lat = d < 2u ? uv.y - 0.5 : uv.x - 0.5;
+  float cov = bnd(along, -hw, to, aa) * bnd(lat, off - hw, off + hw, aa);
+  if (dashF > 0.0) cov *= step(0.5, fract((d < 2u ? wxz.x : wxz.y) * dashF));
+  return cov;
+}
+/** Zebra crossing at the edge toward d + stop line on the approaching lane (right-hand traffic). */
+float crossing(vec2 uv, uint d, float sw, float aa){
+  float e = d == 0u ? 1.0 - uv.x : d == 1u ? uv.x : d == 2u ? 1.0 - uv.y : uv.y;
+  float q = d < 2u ? uv.y : uv.x;
+  float stripes = smoothstep(0.25 - aa * 9.0, 0.25 + aa * 9.0, abs(fract(q * 9.0) - 0.5));
+  float cw = bnd(e, 0.035, 0.2, aa) * bnd(q, sw + 0.025, 1.0 - sw - 0.025, aa) * stripes;
+  float side = d == 0u ? uv.y - 0.5 : d == 1u ? 0.5 - uv.y : d == 2u ? 0.5 - uv.x : uv.x - 0.5;
+  float stp = bnd(e, 0.235, 0.26, aa) * bnd(side, 0.0, 0.5 - sw - 0.012, aa);
+  return max(cw, stp);
+}
+#endif
+
+void main(){
+  uint nIdx = vI.x & 15u, kind = vI.x >> 4u;
+  uint terr = vI.y & 7u, road = (vI.y >> 3u) & 3u;
+  uint mask = vI.z & 15u, nbi = vI.z >> 4u;
+  vec3 n = NRM[nIdx];
+  vec3 wp = vWp;
+  vec3 V = normalize(uCamPos.xyz - wp);
+  gPx = length(fwidth(wp)) + 1e-5;
+  float aa = gPx * 0.6;
+  float fade = 1.0 - smoothstep(0.07, 0.26, gPx);
+  vec2 tileF = floor(wp.xz - n.xz * 0.02);
+  vec2 uv = wp.xz - tileF;
+  bool top = n.y > 0.5;
+  bool under = wp.y < SEA_Y - 0.01;
+  vec2 cellT = floor(wp.xz * 8.0);
+  vec2 cell = top ? cellT : floor(vec2(dot(wp.xz, abs(n.zx)) * 8.0, wp.y * 8.0));
+  gH0 = ih(cell); gH1 = ih(cell + 174.0); gH2 = ih(cell + 211.0);
+  vec2 pc = (cell + 0.5) * 0.125;
+  gN1 = tn(pc, 0.05);
+  gQ = ih(floor(cell * 0.25) + 911.0);
+
+  vec3 alb = vec3(0.5), emis = vec3(0.0);
+  float ao = 1.0, snowF = 0.0, wetP = 0.0, gut = 1.0, pool = 0.0, metal = 0.0, ovA = 0.0, decA = 0.0;
+  vec3 decCol = vec3(0.0);
+#if GROUP <= 1
+  vec4 td = texelFetch(uTileTex, ivec2(clamp(tileF, vec2(0.0), uMap.xy - 1.0)), 0);
+#endif
+
+#if GROUP == 0
+  { // ---------------- land tops
+    uint tfl = uint(td.b * 255.0 + 0.5), zc = uint(td.a * 255.0 + 0.5);
+    {
+      alb = terrainTop(terr, cell, fade);
+      if ((tfl & 8u) != 0u) alb = lotBase(zc, uv, wp.xz, fade, aa);
+      else if (zc > 0u) {
+        uint zt = zc >> 2u, den = zc & 3u;
+        vec3 zcol = zt == 1u ? vec3(0.224, 0.851, 0.541) : zt == 2u ? vec3(0.247, 0.655, 1.0) : vec3(1.0, 0.784, 0.239);
+        float ga = uMisc.w;
+        // planned lot: cleared, calm lawn tinted in the zone colour
+        if (terr == 0u || terr == 2u || terr == 5u) alb = mix(alb, seasonGrass() * (0.94 + 0.08 * gN1.r) * (1.0 + (gH2 - 0.5) * 0.08 * fade), 0.8);
+        alb = mix(alb, zcol, 0.1 + 0.2 * ga);
+        // dashed inset border with solid corners + 1..3 density markers (applied after snow)
+        float ex = min(uv.x, 1.0 - uv.x), ez = min(uv.y, 1.0 - uv.y), e = min(ex, ez);
+        float da = abs((ex < ez ? uv.y : uv.x) - 0.5);
+        float border = bnd(e, 0.05, 0.078, aa) * ((da < 0.14 || da > 0.31) ? 1.0 : 0.0);
+        float mkr = 0.0;
+        for (uint q = 0u; q < 3u; q++) {
+          if (q >= den) break;
+          vec2 dd = abs(uv - vec2(0.5 + (float(q) - (float(den) - 1.0) * 0.5) * 0.2, 0.5));
+          mkr = max(mkr, 1.0 - smoothstep(0.06, 0.06 + aa, max(dd.x, dd.y)));
+        }
+        decA = max(border * (0.6 + 0.35 * ga), mkr * (0.75 + 0.2 * ga));
+        decCol = mkr > border ? zcol : zcol * 0.85;
+        emis += srgb2lin(zcol) * (border * 0.35 + mkr * 0.7) * (0.04 + 0.96 * ga) * (0.35 + NIGHT);
+      }
+      // shoreline: damp band that breathes with the waves (sand), muddy banks (grass/dirt)
+      if (vI.z != 0u && terr != 3u && terr != 4u) {
+        float sd = shoreDist(vI.z, uv);
+        if (sd < 1.0) {
+          float wash = 0.2 + 0.07 * sin(TIME * 0.9 + (wp.x + wp.z) * 0.7) + 0.05 * sin(TIME * 1.7 + wp.x * 2.3);
+          alb *= mix(1.0, terr == 1u ? 0.7 : 0.8, 1.0 - smoothstep(wash - 0.04, wash + 0.12, sd));
+          if (terr == 1u) alb = mix(alb, vec3(0.95, 0.96, 0.94), bnd(sd, wash - 0.02, wash + 0.02, aa) * 0.5 * fade);
+        }
+      }
+      snowF = 1.0;
+      wetP = (terr == 1u || terr == 4u) ? 0.0 : 0.55;
+      ovA = 0.85;
+    }
+    ao = topAO(uv, vI.w);
+  }
+#elif GROUP == 3
+  if (kind == 11u) { // ---------------- seabed
+    alb = seabed(terr, cell, SEA_Y - wp.y, fade);
+    ao = topAO(uv, vI.w);
+  } else { // ---------------- cliffs, seabed steps, diorama skirt
+    float by = vI.w == 255u ? ${SKIRT_Y.toFixed(1)} : float(vI.w) * 0.25;
+    float stepH = vTop - by;
+    alb = sideCol(wp, vTop, stepH, terr, road, cell, fade);
+    ao = mix(stepH < 0.3 ? 0.72 : 0.55, 1.0, smoothstep(0.0, 0.32, wp.y - by));
+    // one-level turf risers are lit like a steep grassy bank (bevelled normal), not a sheer wall: in the
+    // sun's shadow a vertical 0.25 face only sees the weak side ambient and reads as a black scratch
+    if (stepH < 0.3 && vTop > SEA_Y && road == 0u && terr != 3u) n = normalize(n + vec3(0.0, 0.85, 0.0));
+    if (under) alb *= vec3(0.8, 0.93, 0.88) * mix(0.9, 0.6, smoothstep(0.0, 1.2, SEA_Y - wp.y));
+  }
+#elif GROUP == 1
+  if (kind == 1u) { // ---------------- road surface (land, ramps, bridge decks)
+    float sw = road == 1u ? SW_ST : road == 2u ? SW_AV : 0.0;
+    uint cnt = (mask & 1u) + ((mask >> 1u) & 1u) + ((mask >> 2u) & 1u) + ((mask >> 3u) & 1u);
+    bool inter = cnt >= 3u, straight = mask == 3u || mask == 12u;
+    float dk = 9.0;
+    if ((mask & 1u) == 0u) dk = min(dk, 1.0 - uv.x);
+    if ((mask & 2u) == 0u) dk = min(dk, uv.x);
+    if ((mask & 4u) == 0u) dk = min(dk, 1.0 - uv.y);
+    if ((mask & 8u) == 0u) dk = min(dk, uv.y);
+    if (road != 3u) {
+      if ((mask & 5u) == 5u) dk = min(dk, max(1.0 - uv.x, 1.0 - uv.y));
+      if ((mask & 6u) == 6u) dk = min(dk, max(uv.x, 1.0 - uv.y));
+      if ((mask & 9u) == 9u) dk = min(dk, max(1.0 - uv.x, uv.y));
+      if ((mask & 10u) == 10u) dk = min(dk, max(uv.x, uv.y));
+    }
+    gut = dk - sw;
+    if (road == 3u) { // concrete slabs
+      alb = vec3(0.6, 0.59, 0.56) * (0.9 + 0.15 * gN1.r) * (1.0 + (ih(floor(wp.xz * 2.0)) - 0.5) * 0.07) * (1.0 + (gH0 - 0.5) * 0.05 * fade);
+      vec2 jf = fract(wp.xz * 2.0);
+      alb *= 1.0 - (1.0 - smoothstep(0.004, 0.004 + aa, min(min(jf.x, 1.0 - jf.x), min(jf.y, 1.0 - jf.y)) * 0.5)) * 0.22 * fade;
+    } else { // asphalt
+      alb = vec3(0.235, 0.24, 0.255) * (0.88 + 0.12 * gN1.r + 0.1 * gQ) * (1.0 + (gH0 - 0.5) * 0.12 * fade);
+      alb = mix(alb, alb * 0.86, smoothstep(0.64, 0.68, gN1.g) * 0.5);
+      alb = mix(alb, vec3(0.34, 0.34, 0.35), step(0.985, gH2) * fade * 0.6);
+    }
+    alb *= mix(0.78, 1.0, smoothstep(0.0, 0.07, gut));
+    if (road != 3u && straight && gut < 0.04) { // kerb-side storm drains
+      float along = mask == 3u ? uv.x : uv.y;
+      float grate = bnd(along, 0.44, 0.56, aa) * (1.0 - smoothstep(0.035, 0.035 + aa, gut));
+      alb = mix(alb, vec3(0.07, 0.075, 0.08) * (0.6 + 0.8 * step(0.5, fract(along * 70.0))), grate * fade);
+    }
+    if (inter) alb *= 0.97 - 0.07 * smoothstep(0.35, 0.0, length(uv - 0.5));
+    float mk = 0.0, mky = 0.0;
+    if (!inter && cnt > 0u) {
+      for (uint d = 0u; d < 4u; d++) {
+        if ((mask & (1u << d)) == 0u) continue;
+        bool app = ((nbi >> d) & 1u) != 0u;
+        float to = app ? 0.21 : 0.5 + aa;
+        if (road == 1u) mky = max(mky, seg(uv, wp.xz, d, 0.0, 0.013, to, 3.0, aa));
+        else if (road == 2u) {
+          mk = max(mk, max(seg(uv, wp.xz, d, 0.215, 0.009, to, 3.0, aa), seg(uv, wp.xz, d, -0.215, 0.009, to, 3.0, aa)));
+          if (!straight) mky = max(mky, max(seg(uv, wp.xz, d, 0.022, 0.007, to, 0.0, aa), seg(uv, wp.xz, d, -0.022, 0.007, to, 0.0, aa)));
+        } else {
+          mky = max(mky, max(seg(uv, wp.xz, d, 0.02, 0.008, 0.5 + aa, 0.0, aa), seg(uv, wp.xz, d, -0.02, 0.008, 0.5 + aa, 0.0, aa)));
+          mk = max(mk, max(seg(uv, wp.xz, d, 0.25, 0.008, 0.5 + aa, 2.0, aa), seg(uv, wp.xz, d, -0.25, 0.008, 0.5 + aa, 2.0, aa)));
+        }
+        if (road != 3u && app) mk = max(mk, crossing(uv, d, sw, aa));
+      }
+    }
+    if (road == 3u) mk = max(mk, bnd(dk, 0.07, 0.088, aa));
+    float wear = 0.72 + 0.28 * gN1.a;
+    alb = mix(alb, vec3(0.92, 0.91, 0.87), mk * 0.92 * wear);
+    alb = mix(alb, vec3(0.93, 0.74, 0.2), mky * 0.9 * wear);
+    alb = mix(alb, vec3(0.43, 0.42, 0.41), SNOW * 0.25);
+    snowF = max(1.0 - smoothstep(0.01, 0.1, gut), 0.25 * gN1.r);
+    pool = lampPool(uv, mask, road, tileF);
+    wetP = 1.0;
+    ovA = 0.5;
+    ao = topAO(uv, vI.w);
+  } else if (kind == 3u) { // ---------------- sidewalk slabs
+    alb = vec3(0.7, 0.69, 0.66) * (0.93 + 0.1 * ih(floor(wp.xz * 4.0))) * (0.92 + 0.12 * gQ) * (1.0 + (gH0 - 0.5) * 0.06 * fade);
+    vec2 f = abs(fract(wp.xz * 4.0) - 0.5);
+    alb *= 1.0 - (1.0 - smoothstep(0.003, 0.003 + aa, (0.5 - max(f.x, f.y)) * 0.25)) * 0.2 * fade;
+    pool = lampPool(uv, mask, road, tileF);
+    snowF = 0.85; wetP = 0.7; ovA = 0.6;
+  } else if (kind == 4u) { // ---------------- kerb faces
+    alb = vec3(0.76, 0.75, 0.72) * (1.0 + (gH0 - 0.5) * 0.08 * fade);
+    ao = 0.85;
+    snowF = 0.6;
+  } else { // ---------------- green median
+    alb = seasonGrass() * 0.92 * (1.0 + (gH0 - 0.5) * 0.25 * fade);
+    alb = mix(alb, alb * 0.62, step(0.72, ih(floor(wp.xz * 4.0))));
+    alb = mix(alb, vec3(0.95, 0.5, 0.65), step(0.96, gH0) * flowerAmt() * fade);
+    snowF = 1.0; ovA = 0.6;
+  }
+#else
+  if (kind == 6u) { // ---------------- highway jersey barrier
+    alb = vec3(0.8, 0.79, 0.76) * (1.0 + (gH0 - 0.5) * 0.06 * fade);
+    if (!top) {
+      float along = dot(wp.xz, abs(n.zx)), below = vTop - wp.y;
+      alb *= 1.0 - 0.2 * bnd(below, 0.045, 0.058, aa);
+      float refl = bnd(below, 0.014, 0.03, aa) * step(fract(along * 2.0), 0.08);
+      emis += vec3(1.0, 0.5, 0.08) * refl * (0.25 + NIGHT * 2.5);
+    }
+    snowF = 1.0;
+  } else if (kind == 7u) { // ---------------- bridge railing (painted steel)
+    alb = vec3(0.3, 0.5, 0.5);
+    metal = 1.0; snowF = 1.0; ao = top ? 1.0 : 0.85;
+  } else if (kind == 8u) { // ---------------- bridge deck fascia
+    float below = vTop - wp.y;
+    alb = vec3(0.68, 0.67, 0.64) * (0.92 + 0.12 * gQ);
+    alb *= 1.0 - 0.22 * smoothstep(0.05, 0.11, below);
+    alb *= 1.0 - 0.15 * bnd(below, 0.012, 0.022, aa);
+  } else if (kind == 9u) { // ---------------- bridge piers
+    alb = vec3(0.62, 0.61, 0.58) * (0.9 + 0.14 * gQ) * (1.0 + (gH0 - 0.5) * 0.08 * fade);
+    alb = mix(alb, vec3(0.3, 0.36, 0.27), 1.0 - smoothstep(-0.02, 0.1, wp.y - SEA_Y)); // waterline algae
+    if (under) alb *= 0.8;
+  } else { // ---------------- wooden plinth
+    float along = top ? wp.x + wp.z : dot(wp.xz, abs(n.zx));
+    float grain = sin(along * 34.0 + gN1.r * 14.0 + gQ * 3.0) * 0.5 + 0.5;
+    alb = mix(vec3(0.26, 0.15, 0.08), vec3(0.42, 0.26, 0.14), grain * 0.55 + 0.2);
+    if (!top) alb *= mix(0.7, 1.0, smoothstep(${(SKIRT_Y - 0.32).toFixed(2)}, ${(SKIRT_Y + 0.12).toFixed(2)}, wp.y));
+    metal = 0.35;
+  }
+#endif
+
+  ao = mix(ao, 1.0, smoothstep(0.12, 0.45, gPx)); // voxel AO only reads up close
+
+  // ---------------- snow cover ----------------
+  float snowAmt = 0.0;
+#ifdef F_SNOW
+  if (SNOW > 0.01 && top && !under && snowF > 0.0) {
+    float cover = smoothstep(0.08, 0.32, SNOW * 1.3 - gN1.g * 0.42 - gH0 * 0.07 * fade + (wp.y - 2.5) * 0.015) * snowF;
+    alb = mix(alb, snowCol(fade), cover);
+    snowAmt = cover;
+  }
+#endif
+#if GROUP == 0
+  if (terr == 4u) snowAmt = 1.0;
+  alb = mix(alb, decCol, decA); // zone decals stay visible in winter
+#endif
+
+  // ---------------- rain: darkening + puddles ----------------
+#ifdef F_WET
+  float wetS = WET;
+#if GROUP == 1
+  if (kind == 1u) wetS = max(wetS, SNOW * 0.5);
+#endif
+  if (!under) alb *= 1.0 - (top ? 0.3 : 0.15) * wetS * (1.0 - snowAmt);
+#endif
+  vec3 albL = srgb2lin(alb);
+  vec3 c = shade(albL, n, wp, ao);
+#if GROUP <= 1 && defined(F_WET)
+  float pud = 0.0;
+  if (wetP > 0.0 && wetS > 0.05 && n.y > 0.99 && snowAmt < 0.5) {
+    float thr = mix(0.9, 0.56, wetS) - (kind == 1u ? 0.1 * (1.0 - smoothstep(0.0, 0.12, gut)) : 0.0);
+    pud = smoothstep(thr, thr + 0.025, gN1.b) * smoothstep(0.15, 0.45, wetS) * wetP;
+  }
+  float refl = max(pud, (kind == 1u || kind == 3u) ? wetS * 0.21 : 0.0);
+  if (refl > 0.001 && !under) {
+    vec3 pn = n;
+    if (pud > 0.01 && WET > 0.05) { // rain ripples
+      vec2 rp = wp.xz * 5.0, ci = floor(rp);
+      vec2 cf = fract(rp) - 0.5 - (hash22(ci) - 0.5) * 0.5;
+      float ph = fract(TIME * 0.9 + hash12(ci)), r = length(cf);
+      float ring = sin((r - ph * 0.5) * 60.0) * smoothstep(0.1, 0.0, abs(r - ph * 0.5)) * (1.0 - ph);
+      pn = normalize(vec3(cf.x, 0.0, cf.y) * ring * 0.35 * WET + n);
+    }
+    float fres = 0.03 + 0.97 * pow(1.0 - max(dot(pn, V), 0.0), 5.0);
+    c = mix(c, c * 0.55, pud * 0.7);
+    c += skyColor(reflect(-V, pn)) * fres * refl * 1.1 + specular(pn, wp, 220.0, 3.0) * refl;
+    c += vec3(1.0, 0.7, 0.4) * pool * NIGHT * refl * 0.5;
+  }
+#endif
+#if GROUP == 1
+  if (pool > 0.0) c += albL * vec3(1.0, 0.72, 0.42) * pool * NIGHT * (kind == 3u ? 1.4 : 2.0);
+#endif
+  if (snowAmt > 0.2) {
+    // glinting ice crystals: only where the sun actually reaches (specular() reuses shade()'s shadow term)
+    float sp = sparkle(cellT, V, fade);
+    if (sp > 0.0) c += specular(n, wp, 3.0, 4.0) * (sp * snowAmt);
+  }
+#if GROUP == 2
+  if (metal > 0.0) c += specular(n, wp, 60.0, 0.8 * metal);
+#endif
+#if GROUP >= 2
+  if (under) c += albL * uSunColor.rgb * uSunDir.w * caustic(wp.xz + wp.y * 0.3) * 0.55 * exp(-(SEA_Y - wp.y) * 1.1) * (0.4 + 0.6 * max(n.y, 0.0));
+#endif
+
+#if GROUP <= 1
+  // ---------------- build grid + hover ----------------
+  if (top && !under) {
+    float e = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    if (uMisc.w > 0.0) {
+      float gl = 1.0 - smoothstep(0.0, aa * 1.5 + 0.004, e);
+      c = mix(c, c * 0.5 + vec3(0.02, 0.03, 0.04) * (0.3 + NIGHT), gl * uMisc.w * 0.7);
+    }
+    if (abs(tileF.x - uHover.x) < 0.5 && abs(tileF.y - uHover.y) < 0.5)
+      emis += vec3(0.45, 0.85, 1.0) * (exp(-e * 26.0) * 0.9 + 0.08) * (0.85 + 0.15 * sin(TIME * 6.0)) * 1.4;
+  }
+#endif
+  c += emis;
+
+#if GROUP <= 1 && defined(F_OVERLAY)
+  // ---------------- data overlay: smooth heatmap where it matters (see OVERLAY_GLSL) ----------------
+  if (uMap.w > 0.0 && ovA > 0.0) {
+#if GROUP == 1
+    if (uOvCfg.x > 1.5 && kind == 1u) ovA = 1.0; // roads-only overlays (traffic) own the road surface
+#endif
+    c = ovTint(ovBase(c), wp.xz, n, ovA);
+  }
+#endif
+
+  c = applyFog(c, wp);
+  fragColor = vec4(c, 1.0);
+}`;
+
+T.OVERLAY_GLSL = OVERLAY_GLSL;
+T.OV_UNIT = OV_UNIT;

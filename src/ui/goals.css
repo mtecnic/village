@@ -1,0 +1,171 @@
+/* VOXELPOLIS — Mayor's Goals card + Mayor's Desk decision card (ui/hud_goals.js, ui/hud_desk.js).
+ * Both live in one left column under the top bar (where the tutorial card sits). The column stacks at
+ * z 15: above the HUD chrome (0-5), BELOW the windows layer (20), so windows always cover it.
+ * Colours come from the base.css tokens; no color-mix() (Safari 16.0/16.1). */
+/* height-capped: ui/hud_desk.js (VC.deskHud.layout) sets left + top + max-height so the column stops above
+ * the minimap / toolbar / ticker (the CSS value is only the fallback) — or, while a decision needs more room
+ * than that lane has, moves beside the minimap. The desk card's story and the goals list scroll inside it;
+ * the decision's choices never do. No transition on `top`: a card must never slide in under the tutorial card. */
+.gl-col { position: absolute; left: 10px; top: 70px; width: 324px; max-height: calc((100vh - 110px) / var(--ui-scale)); display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 15; transition: transform 0.5s var(--ease-out), opacity 0.4s; }
+.hud.off .gl-col { transform: translateX(-120%); opacity: 0; }
+.hud.no-ticker .gl-col { max-height: calc((100vh - 84px) / var(--ui-scale)); }
+
+/* ================================================================== goals card */
+.gl-card { order: 1; flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; position: relative; border-radius: 17px; padding: 8px 9px 9px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); box-shadow: var(--shadow), var(--hi); animation: glCardIn 0.55s var(--ease); }
+.gl-card.hide { display: none; }
+@keyframes glCardIn { from { opacity: 0; transform: translateX(-40px) scale(0.96); } }
+.gl-head { flex: none; width: 100%; min-height: 24px; display: flex; align-items: center; gap: 7px; padding: 2px 3px; border-radius: 9px; cursor: pointer; transition: background 0.15s; outline: none; }
+.gl-head:hover { background: rgba(255, 255, 255, 0.05); }
+.gl-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.gl-badge { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 10.5px; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold); white-space: nowrap; }
+.gl-target { flex: none; }
+/* the label yields first when the header is crowded (Claim chip + docked desk badge): "Goals", then "Go…" */
+.gl-btext { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.gl-card.claimable .gl-head.has-desk .gl-bpre { display: none; }
+.gl-target { font-size: 13px; letter-spacing: 0; filter: drop-shadow(0 0 6px rgba(255, 209, 102, 0.45)); }
+.gl-count { flex: 1; min-width: 0; font-size: 11px; color: var(--text3); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gl-claimchip { display: none; font-size: 10.5px; font-weight: 850; padding: 1px 7px; border-radius: 9px; color: #2a1d02; background: linear-gradient(180deg, #ffe29a, #ffc34d); box-shadow: 0 0 12px rgba(255, 209, 102, 0.45); white-space: nowrap; }
+.gl-claimchip.show { display: inline-block; animation: glChip 1.6s ease-in-out infinite; }
+@keyframes glChip { 50% { box-shadow: 0 0 20px rgba(255, 209, 102, 0.8); } }
+.gl-chev { flex: none; width: 18px; height: 18px; display: grid; place-items: center; font-size: 12px; color: var(--text3); transition: transform 0.25s var(--ease-out); }
+.gl-card.compact .gl-chev { transform: rotate(-90deg); }
+.gl-list { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; margin-top: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.gl-list > .gl-item { flex: none; }
+.gl-list.more, .dk-story.more { -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); }
+/* peeking at the goals while a decision is open: the list scrolls in at most ~40% of the column and never in
+ * the room the decision's choices need (--gl-peek, set by VC.deskHud.layout) */
+.gl-card.peek .gl-list { max-height: calc(var(--gl-avail, 420px) * 0.4); max-height: min(calc(var(--gl-avail, 420px) * 0.4), var(--gl-peek, 100vh)); }
+/* with a decision on the desk the goals card keeps its (folded / capped) size and the desk card gives way */
+.gl-col.desk-open .gl-card, .gl-card.compact { flex-shrink: 0; }
+/* … unless even then the decision's choices would not fit: the goals card steps aside until it is decided */
+.gl-col.desk-open.gl-yield .gl-card { display: none; }
+.gl-card.compact .gl-list { display: none; }
+/* collapsed: one slim progress bar per goal */
+.gl-mini { flex: none; display: none; gap: 4px; margin: 6px 3px 1px; }
+.gl-card.compact .gl-mini { display: flex; }
+.gl-mini i { position: relative; flex: 1; height: 4px; border-radius: 4px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.gl-mini i b { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px; background: linear-gradient(90deg, #36a6e8, var(--accent)); transition: width 0.6s var(--ease-out); }
+.gl-mini i.done b { background: linear-gradient(90deg, #ffc34d, var(--gold)); }
+
+.gl-item { --c1: rgba(90, 209, 255, 0.42); --c2: rgba(63, 167, 255, 0.14); --gb: linear-gradient(90deg, #36a6e8, #5ad1ff); --gl: rgba(90, 209, 255, 0.4);
+  position: relative; display: flex; gap: 10px; padding: 8px 9px 6px; border-radius: 13px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.025)); border: 1px solid var(--line); transition: background 0.2s, border-color 0.3s, box-shadow 0.3s; }
+.gl-item.new { animation: glItemIn 0.55s var(--ease); }
+.gl-item.out { animation: glItemOut 0.35s ease-in forwards; pointer-events: none; }
+@keyframes glItemIn { from { opacity: 0; transform: translateX(-26px) scale(0.96); } }
+@keyframes glItemOut { to { opacity: 0; transform: translateX(-30px) scale(0.96); height: 0; } }
+.gl-item:hover { background: linear-gradient(180deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.04)); border-color: var(--line2); }
+.gl-item.cat-fix { --c1: rgba(255, 138, 90, 0.48); --c2: rgba(255, 90, 106, 0.14); --gb: linear-gradient(90deg, #ff8a5a, #ffc83d); --gl: rgba(255, 170, 80, 0.4); }
+.gl-item.cat-build { --c1: rgba(61, 220, 132, 0.42); --c2: rgba(90, 209, 255, 0.12); --gb: linear-gradient(90deg, #22b573, #3ddc84); --gl: rgba(61, 220, 132, 0.4); }
+.gl-ico { position: relative; flex: none; width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; font-size: 19px; line-height: 1; background: linear-gradient(135deg, var(--c1), var(--c2)); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14), 0 4px 12px rgba(0, 0, 0, 0.25); }
+.gl-main { flex: 1; min-width: 0; }
+.gl-title { font-weight: 800; font-size: 13px; color: #fff; line-height: 1.25; padding-right: 18px; }
+.gl-desc { margin-top: 2px; font-size: 11.5px; color: var(--text2); line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.gl-prow { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.gl-bar { position: relative; flex: 1; min-width: 60px; height: 6px; border-radius: 6px; background: rgba(255, 255, 255, 0.1); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35); overflow: hidden; }
+.gl-bar i { display: block; height: 100%; width: 0; border-radius: 6px; background: var(--gb); box-shadow: 0 0 10px var(--gl); transition: width 0.6s var(--ease-out); }
+.gl-ptext { flex: none; max-width: 62%; font: 700 10.5px var(--mono); color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gl-row { display: flex; align-items: center; gap: 7px; margin-top: 4px; min-height: 22px; }
+.gl-reward { flex: 1; min-width: 0; font-size: 11px; font-weight: 750; color: var(--gold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gl-act { flex: none; display: flex; }
+.gl-act .btn.small { padding: 3px 8px; font-size: 11.5px; }
+.gl-show { color: var(--accent); }
+.gl-show:hover { color: #fff; }
+.gl-swap { position: absolute; top: 5px; right: 5px; width: 22px; height: 22px; display: grid; place-items: center; border: none; border-radius: 7px; background: transparent; color: var(--text3); font-size: 13px; line-height: 1; cursor: pointer; opacity: 0.4; transition: opacity 0.15s, background 0.15s, color 0.15s, transform 0.3s var(--ease); }
+.gl-item:hover .gl-swap { opacity: 1; }
+.gl-swap:hover { background: rgba(255, 255, 255, 0.1); color: #fff; transform: rotate(90deg); }
+.gl-swap:focus-visible { opacity: 1; }
+/* complete: gold glow + claim button */
+.gl-item.done { border-color: rgba(255, 209, 102, 0.62); background: radial-gradient(ellipse at 15% 0%, rgba(255, 209, 102, 0.2), transparent 70%), linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03)); box-shadow: 0 0 22px rgba(255, 209, 102, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08); }
+.gl-item.done .gl-bar i { background: linear-gradient(90deg, #ffc34d, #ffe29a); box-shadow: 0 0 12px rgba(255, 209, 102, 0.6); }
+.gl-item.done .gl-ptext { color: var(--gold); }
+.gl-item.done .gl-swap { display: none; }
+.gl-item.done .gl-ico::after { content: '✓'; position: absolute; right: -5px; bottom: -5px; width: 17px; height: 17px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 900; color: #04121e; background: var(--good); box-shadow: 0 0 0 2px rgba(16, 20, 34, 0.95), 0 0 10px rgba(61, 220, 132, 0.6); animation: popIn 0.35s var(--ease); }
+.btn.gl-claim { position: relative; overflow: hidden; color: #2a1d02; border-color: rgba(255, 226, 154, 0.8); background: linear-gradient(180deg, #ffe29a 0%, #ffc34d 60%, #f0a92a 100%); box-shadow: 0 3px 14px rgba(255, 190, 60, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.6); font-weight: 850; }
+.btn.gl-claim:hover { filter: brightness(1.07); box-shadow: 0 5px 20px rgba(255, 190, 60, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.6); }
+.btn.gl-claim::after { content: ''; position: absolute; top: 0; bottom: 0; left: -60%; width: 40%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent); transform: skewX(-20deg); animation: glShine 2.4s ease-in-out infinite; }
+@keyframes glShine { 0%, 55% { left: -60%; } 100% { left: 130%; } }
+.gl-float { position: absolute; z-index: 2; pointer-events: none; font-weight: 900; font-size: 15px; color: var(--gold); text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8), 0 0 14px rgba(255, 209, 102, 0.7); white-space: nowrap; animation: glFloat 1.4s var(--ease-out) forwards; }
+@keyframes glFloat { 0% { opacity: 0; transform: translateY(6px) scale(0.8); } 15% { opacity: 1; transform: translateY(0) scale(1.08); } 100% { opacity: 0; transform: translateY(-46px) scale(1); } }
+
+/* ================================================================== desk card */
+.dk-card { --ac: #ffd166; order: 2; flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; position: relative; border-radius: 18px; background: radial-gradient(ellipse at 0% 0%, rgba(255, 209, 102, 0.14), transparent 55%), linear-gradient(180deg, rgba(44, 38, 30, 0.9), rgba(17, 17, 26, 0.93)); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid rgba(255, 209, 102, 0.42); box-shadow: var(--shadow), 0 0 32px rgba(255, 209, 102, 0.14), var(--hi); overflow: hidden; animation: dkIn 0.65s var(--ease); }
+.dk-card.out { animation: dkOut 0.36s ease-in forwards; pointer-events: none; }
+@keyframes dkIn { from { opacity: 0; transform: translateX(-60px) rotate(-3deg) scale(0.94); } }
+@keyframes dkOut { to { opacity: 0; transform: translateX(-40px) scale(0.95); } }
+/* the header and the choices never shrink: the story (title + text) shrinks and scrolls first; only when even
+ * the story's minimum does not fit does the whole card scroll (with a sticky "↓ 3 choices" chip) */
+.dk-full { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 9px 4px 11px 11px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.dk-head { flex: none; display: flex; align-items: center; gap: 9px; padding-right: 3px; }
+.dk-portrait { flex: none; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; background: radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.6), transparent 55%), var(--ac); box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16), 0 0 18px var(--ac); animation: portraitIn 0.6s var(--ease) 0.15s backwards; }
+.dk-portrait span { filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45)); }
+.dk-whot { flex: 1; display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.dk-tag { font-size: 10px; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dk-tag .dk-days { letter-spacing: 0.02em; text-transform: none; font-size: 10.5px; }
+.dk-by { display: flex; align-items: baseline; gap: 6px; min-width: 0; white-space: nowrap; overflow: hidden; }
+.dk-name { font-size: 12.5px; font-weight: 850; color: var(--ac); }
+.dk-role { font-size: 9.5px; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text3); overflow: hidden; text-overflow: ellipsis; }
+.dk-days { color: var(--text3); font-weight: 800; }
+.dk-card.urgent .dk-days { color: var(--warn); }
+.dk-min.win-btn { flex: none; width: 24px; height: 24px; }
+/* (.dk-body only groups them: its parts are flex items of .dk-full, so the story's min-height is what counts) */
+.dk-body { display: contents; }
+.dk-story { flex: 0 1 auto; min-height: 52px; margin-right: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.dk-choices, .dk-out { flex: none; margin-right: 7px; }
+.dk-title { display: flex; align-items: flex-start; gap: 7px; margin: 8px 0 4px; font-size: 14.5px; font-weight: 850; line-height: 1.25; color: #fff; }
+.dk-ticon { flex: none; font-size: 16px; line-height: 1.15; }
+.dk-text { font-size: 12.3px; line-height: 1.42; color: var(--text2); }
+.dk-choices { display: flex; flex-direction: column; gap: 6px; margin-top: 9px; }
+.dk-choice { display: flex; flex-direction: column; align-items: stretch; gap: 4px; width: 100%; padding: 6px 9px 7px; border-radius: 11px; border: 1px solid var(--line2); background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04)); color: var(--text); text-align: left; cursor: pointer; box-shadow: var(--hi); transition: background 0.14s, border-color 0.14s, transform 0.14s var(--ease), box-shadow 0.14s; }
+.dk-choice:hover { border-color: rgba(255, 209, 102, 0.65); background: linear-gradient(180deg, rgba(255, 209, 102, 0.16), rgba(255, 255, 255, 0.05)); transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 209, 102, 0.18), var(--hi); }
+.dk-choice:active { transform: translateY(1px) scale(0.99); transition-duration: 0.05s; }
+.dk-choice:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: var(--hi); border-color: var(--line2); background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)); }
+.dk-choice.ig { background: rgba(255, 255, 255, 0.03); }
+.dk-crow { display: flex; align-items: baseline; gap: 8px; }
+.dk-clabel { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 750; line-height: 1.3; }
+.dk-dur { flex: none; font-size: 10.5px; font-weight: 750; color: var(--text3); white-space: nowrap; }
+.dk-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.dk-chips { gap: 3px 4px; }
+.dk-fx { padding: 0 5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.06); font-size: 10.3px; font-weight: 750; line-height: 1.55; color: var(--text2); white-space: nowrap; }
+.dk-fx.good { color: #6ff0a6; background: rgba(61, 220, 132, 0.12); border-color: rgba(61, 220, 132, 0.28); }
+.dk-fx.bad { color: #ff8d98; background: rgba(255, 90, 106, 0.12); border-color: rgba(255, 90, 106, 0.3); }
+.dk-fx.gold { color: var(--gold); background: rgba(255, 209, 102, 0.12); border-color: rgba(255, 209, 102, 0.32); }
+.dk-fx.risk { color: #d2b8ff; background: rgba(179, 136, 255, 0.14); border-color: rgba(179, 136, 255, 0.35); }
+.dk-timer { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, 0.06); }
+.dk-timer i { display: block; height: 100%; width: 100%; background: linear-gradient(90deg, #ffc34d, var(--gold)); box-shadow: 0 0 8px rgba(255, 209, 102, 0.6); transition: width 0.5s var(--ease-out); }
+.dk-card.urgent .dk-timer i { background: linear-gradient(90deg, var(--bad), var(--warn)); }
+.dk-card.done .dk-timer, .dk-card.done .dk-choices, .dk-card.done .dk-days, .dk-card.done .dk-min, .dk-card.done .dk-more { display: none; }
+/* last resort (a tiny viewport): the card scrolls as a whole; this chip sticks to its bottom while choices are cut */
+.dk-more { position: sticky; bottom: 0; z-index: 1; flex: none; display: none; align-self: center; margin: 6px 0 -4px; padding: 2px 10px; border-radius: 10px; border: 1px solid rgba(255, 209, 102, 0.55); background: linear-gradient(180deg, rgba(70, 58, 34, 0.96), rgba(40, 34, 26, 0.96)); color: var(--gold); font: 800 11px var(--font); cursor: pointer; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45); }
+.dk-full.cut .dk-more { display: block; }
+/* outcome */
+.dk-out { display: none; margin-top: 10px; padding: 9px 10px 10px; border-radius: 12px; background: rgba(61, 220, 132, 0.08); border: 1px solid rgba(61, 220, 132, 0.3); animation: popIn 0.35s var(--ease); }
+.dk-card.done .dk-out { display: block; }
+.dk-out-label { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 800; color: #fff; }
+.dk-out-ok { flex: none; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 900; color: #04121e; background: var(--good); box-shadow: 0 0 10px rgba(61, 220, 132, 0.55); }
+.dk-out-text { margin-top: 5px; font-size: 12.5px; line-height: 1.45; color: var(--text2); }
+.dk-out-row { display: flex; justify-content: flex-end; margin-top: 8px; }
+/* folded: a "📨 1" badge docked in the goals header (the card itself hides) … */
+.dk-card.min.docked { display: none; }
+.dk-badge { position: relative; flex: none; display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 7px 0 6px; border-radius: 11px; border: 1px solid rgba(255, 209, 102, 0.55); background: linear-gradient(180deg, rgba(255, 209, 102, 0.24), rgba(255, 209, 102, 0.1)); color: var(--text); font-size: 13px; line-height: 1; cursor: pointer; box-shadow: 0 0 12px rgba(255, 209, 102, 0.3); animation: dkBadge 2.2s ease-in-out infinite; transition: filter 0.15s, transform 0.15s var(--ease); }
+.dk-badge:hover { filter: brightness(1.2); transform: translateY(-1px); }
+.dk-badge b { min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--bad); color: #fff; font: 850 9.5px/15px var(--font); text-align: center; }
+.dk-badge-d { font: 700 10.5px var(--mono); color: var(--text2); }
+.dk-badge.urgent { border-color: var(--warn); }
+.dk-badge.urgent .dk-badge-d { color: var(--warn); }
+.dk-badge-in { animation: popIn 0.35s var(--ease), dkBadge 2.2s ease-in-out 0.35s infinite; }
+@keyframes dkBadge { 50% { box-shadow: 0 0 20px rgba(255, 209, 102, 0.7); } }
+/* … or, while the goals card is hidden, a slim pill */
+.dk-pill { display: none; width: 100%; align-items: center; gap: 10px; padding: 8px 12px 9px 11px; border: none; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.dk-card.min { border-radius: 14px; animation: dkPulse 2.6s ease-in-out infinite; }
+.dk-card.min .dk-full { display: none; }
+.dk-card.min .dk-pill { display: flex; }
+.dk-card.min .dk-timer { height: 2px; }
+@keyframes dkPulse { 50% { box-shadow: var(--shadow), 0 0 26px rgba(255, 209, 102, 0.38), var(--hi); border-color: rgba(255, 209, 102, 0.7); } }
+.dk-pill:hover { background: rgba(255, 255, 255, 0.05); }
+.dk-pill-ico { position: relative; flex: none; font-size: 19px; line-height: 1; }
+.dk-pill-n { position: absolute; top: -6px; right: -9px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--bad); color: #fff; font: 850 9.5px/15px var(--font); text-align: center; box-shadow: 0 0 0 2px rgba(22, 20, 26, 0.95); }
+.dk-pill-t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.dk-pill-t small { font-size: 9.5px; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold); }
+.dk-pill-t span { font-size: 12.5px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dk-pill-d { flex: none; font: 700 11px var(--mono); color: var(--text3); }
+.dk-card.urgent .dk-pill-d { color: var(--warn); }

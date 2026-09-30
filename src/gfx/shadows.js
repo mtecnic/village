@@ -16,15 +16,22 @@
  *   when > 30 % too big) and the center is snapped to whole shadow texels, so shadows never shimmer while
  *   panning or rotating. The depth range spans every caster on the map toward the light, so nothing is clipped.
  *
+ * BIAS: casters are drawn with FRONT faces culled (core resetState), so the map stores the far side of every
+ *   closed voxel mesh: lit surfaces never compare against themselves (no acne, no peter-panning, LOD casters
+ *   are safe). The receiver side (shaderlib shadowAt) adds a receiver-plane depth bias computed from the
+ *   surface normal, a small texel-sized normal offset and a rotated 12-tap bilinear-compare PCF.
+ * REUSE: the map is re-rendered every `interval` frames (or at once when the view leaves its coverage, the
+ *   cascade layout changes or the light jumps); in between the previous, self-consistent map is reused.
+ *
  * OUTPUT: VC.gfx.setShadow(tex, mat) — mat maps world -> atlas texture space of the near cascade — plus
  *   VC.gfx.shadowFar = {k, ox, oy} (far cascade coords = near * k + o), which core writes into uPad for
- *   shaderlib's shadowAt(). Slope-scaled polygon offset is set through VC.gfx.shadowBias (core applies it
- *   in the shadow pass); the receiver side uses a texel-sized normal offset + rotated 12-tap PCF.
+ *   shaderlib's shadowAt(). Slope-scaled polygon offset goes through VC.gfx.shadowBias (applied by core).
  *
  * EXTRA API: VC.shadows.stats (cascades, half sizes, last pass ms), VC.shadows.viewProj[c] (light VP of
  *   cascade c, valid after render), VC.shadows.maxHeight() (tallest receiver Y, from the height grid).
  */
 const M = VC.M;
+const BIAS = [1.2, 2.0]; // polygon offset factor, units
 const SH = (VC.shadows = {
   tex: null,
   fbo: null,
@@ -42,10 +49,7 @@ const SH = (VC.shadows = {
   cache: { valid: false, n: 0, moon: false, size: 0, frame: -1, L: [0, 0, 0] },
   _err: false,
 
-  init() {
-    const gl = VC.gfx.gl;
-    SH.clampExt = gl.getExtension('EXT_polygon_offset_clamp');
-  },
+  init() {},
   /** Frees the shadow atlas after shadows have been off (quality 'low' / settings) for a few seconds. */
   update(dt, rdt) {
     const G = VC.gfx;
@@ -163,8 +167,8 @@ const SH = (VC.shadows = {
     gl.scissor(0, 0, n * SH.size, SH.size);
     gl.clear(gl.DEPTH_BUFFER_BIT);
     gl.disable(gl.SCISSOR_TEST);
-    // slope-scaled bias; clamp (when supported) keeps steep walls from detaching their contact shadows
-    G.shadowBias = [1.6, 2.5];
+    // slope-scaled bias (matters only for casters drawn without culling: both faces reach the map)
+    G.shadowBias = BIAS;
     for (let c = 0; c < n; c++) {
       gl.viewport(c * SH.size, 0, SH.size, SH.size);
       G.writeFrame(SH.viewProj[c]);

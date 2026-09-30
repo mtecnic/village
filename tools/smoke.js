@@ -3,7 +3,7 @@
  * VOXELPOLIS integration smoke test. Plays a scripted game through the public APIs and
  * checks invariants. Prints a JSON report and screenshots into --outdir.
  *
- *   node tools/smoke.js [--outdir /tmp/smoke] [--size 128] [--days 720] [--quick]
+ *   node tools/smoke.js [--outdir /tmp/smoke] [--size 128] [--days 720] [--quick] [--html file]
  */
 'use strict';
 const path = require('path');
@@ -17,7 +17,7 @@ const SIZE = +opt('size', 128);
 const DAYS = +opt('days', 720);
 const QUICK = argv.includes('--quick');
 fs.mkdirSync(OUT, { recursive: true });
-const html = path.resolve(__dirname, '..', 'Voxelpolis.html');
+const html = path.resolve(opt('html', path.join(__dirname, '..', 'Voxelpolis.html')));
 
 (async () => {
   const browser = await chromium.launch({ args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });

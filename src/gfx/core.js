@@ -621,33 +621,33 @@ G.computeEnv = function (S) {
 /* Frame UBO                                                            */
 /* ------------------------------------------------------------------ */
 /** Writes the Frame UBO. vp overrides uViewProj (used by the shadow pass). */
+const RAMP = { good: 0, bad: 1, value: 2, net: 3 };
+function v4(f, o, a, b, c, d) { f[o] = a; f[o + 1] = b; f[o + 2] = c; f[o + 3] = d; }
 G.writeFrame = function (vp) {
   const gl = G.gl, f = G.frameData, cam = VC.camera, e = G.env, S = VC.state;
   f.set(vp || cam.viewProj, 0);
   f.set(cam.view, 16);
   f.set(cam.proj, 32);
   f.set(G.shadowMat || cam.viewProj, 48);
-  let o = 64;
-  const v4 = (a, b, c, d) => { f[o++] = a; f[o++] = b; f[o++] = c; f[o++] = d; };
-  v4(cam.pos[0], cam.pos[1], cam.pos[2], G.time % 3600);
-  v4(e.sunDir[0], e.sunDir[1], e.sunDir[2], e.keyVis);
-  v4(e.sunColor[0], e.sunColor[1], e.sunColor[2], e.night);
-  v4(e.skyAmb[0], e.skyAmb[1], e.skyAmb[2], e.snow);
-  v4(e.groundAmb[0], e.groundAmb[1], e.groundAmb[2], e.wet);
-  v4(e.fog[0], e.fog[1], e.fog[2], e.fogDensity);
-  v4(e.wind[0], e.wind[1], e.windStrength, e.cloud);
-  const ov = VC.OVERLAYS.find((x) => x.key === G.overlay);
-  v4(S ? S.W : 1, S ? S.H : 1, VC.C.SEA_Y, G.overlay !== 'none' ? 0.75 : 0);
-  v4(G.rw, G.rh, 1 / G.rw, 1 / G.rh);
+  v4(f, 64, cam.pos[0], cam.pos[1], cam.pos[2], G.time % 3600);
+  v4(f, 68, e.sunDir[0], e.sunDir[1], e.sunDir[2], e.keyVis);
+  v4(f, 72, e.sunColor[0], e.sunColor[1], e.sunColor[2], e.night);
+  v4(f, 76, e.skyAmb[0], e.skyAmb[1], e.skyAmb[2], e.snow);
+  v4(f, 80, e.groundAmb[0], e.groundAmb[1], e.groundAmb[2], e.wet);
+  v4(f, 84, e.fog[0], e.fog[1], e.fog[2], e.fogDensity);
+  v4(f, 88, e.wind[0], e.wind[1], e.windStrength, e.cloud);
+  if (G._ovKey !== G.overlay) { G._ovKey = G.overlay; G._ov = VC.OVERLAYS.find((x) => x.key === G.overlay); }
+  const ov = G._ov;
+  v4(f, 92, S ? S.W : 1, S ? S.H : 1, VC.C.SEA_Y, G.overlay !== 'none' ? 0.75 : 0);
+  v4(f, 96, G.rw, G.rh, 1 / G.rw, 1 / G.rh);
   const grid = VC.tools && VC.tools.gridAlpha ? VC.tools.gridAlpha() : 0;
-  v4(G.shadowTex ? 1 : 0, e.season, e.lightning, grid);
+  v4(f, 100, G.shadowTex ? 1 : 0, e.season, e.lightning, grid);
   const hov = (VC.tools && VC.tools.hover) || null;
   const sel = (VC.tools && VC.tools.selectedId) || 0;
-  const ramp = ov ? { good: 0, bad: 1, value: 2, net: 3 }[ov.ramp] || 0 : 0;
-  v4(hov ? hov.x : -1, hov ? hov.z : -1, sel, ramp);
+  v4(f, 104, hov ? hov.x : -1, hov ? hov.z : -1, sel, ov ? RAMP[ov.ramp] || 0 : 0);
   // uPad: far shadow cascade mapping (k, offset) relative to the near cascade, and the sun path angle
   const sf = G.shadowTex && G.shadowFar;
-  v4(sf ? sf.k : 0, sf ? sf.ox : 0, sf ? sf.oy : 0, e.sunAngle || 0);
+  v4(f, 108, sf ? sf.k : 0, sf ? sf.ox : 0, sf ? sf.oy : 0, e.sunAngle || 0);
   gl.bindBuffer(gl.UNIFORM_BUFFER, G.ubo);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, f);
 };
@@ -811,10 +811,12 @@ function drawGizmos() {
   GZ.prog.use();
   gl.bindVertexArray(GZ.vao);
   gl.bindBuffer(gl.ARRAY_BUFFER, GZ.vbo);
-  const all = new Float32Array(GZ.tris.length + GZ.lines.length);
+  const n = GZ.tris.length + GZ.lines.length;
+  if (!GZ.buf || GZ.buf.length < n) GZ.buf = new Float32Array(Math.max(n, 4096) * 2); // grows, reused
+  const all = GZ.buf;
   all.set(GZ.tris, 0);
   all.set(GZ.lines, GZ.tris.length);
-  gl.bufferData(gl.ARRAY_BUFFER, all, gl.STREAM_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, all.subarray(0, n), gl.STREAM_DRAW);
   const nt = GZ.tris.length / 7, nl = GZ.lines.length / 7;
   if (nt) gl.drawArrays(gl.TRIANGLES, 0, nt);
   if (nl) gl.drawArrays(gl.LINES, nt, nl);
@@ -826,13 +828,14 @@ function drawGizmos() {
 /* Frame                                                                */
 /* ------------------------------------------------------------------ */
 /*
- * FRAME PACING: a fence is inserted after every rendered frame and at most 2 frames may be in flight on the
- * GPU. While the GPU is behind, render() skips the frame (the canvas keeps the previous image, game logic keeps
- * running), which bounds input latency on slow GPUs and lets the resolution controller see the real frame rate
- * (the requestAnimationFrame interval alone does not reflect GPU cost everywhere). Fence status only updates
- * between tasks; a generous timeout guards against a fence that never reports.
+ * FRAME PACING: a fence is inserted after every rendered frame and at most FP.max (3) frames may be in flight
+ * on the GPU (fence status only updates between tasks and can lag a frame, hence 3). While the GPU is behind,
+ * render() skips the frame (the canvas keeps the previous image, game logic keeps running), which bounds input
+ * latency on slow GPUs and lets the resolution controller see the real frame rate (the requestAnimationFrame
+ * interval alone does not reflect GPU cost everywhere). A generous timeout guards against a fence that never
+ * reports.
  */
-const FP = { fences: [], times: [], lagMs: 16 };
+const FP = { fences: [], times: [], lagMs: 16, max: 3 };
 function gpuReady(gl, now) {
   while (FP.fences.length) {
     if (gl.getSyncParameter(FP.fences[0], gl.SYNC_STATUS) !== gl.SIGNALED) break;
@@ -840,7 +843,7 @@ function gpuReady(gl, now) {
     gl.deleteSync(FP.fences.shift());
     FP.times.shift();
   }
-  if (FP.fences.length < 2) return true;
+  if (FP.fences.length < FP.max) return true;
   if (now - FP.times[0] > Math.max(1000, FP.lagMs * 3)) { // never wait forever
     gl.deleteSync(FP.fences.shift());
     FP.times.shift();
@@ -853,7 +856,7 @@ function gpuFence(gl, now) {
   if (!f) return;
   FP.fences.push(f);
   FP.times.push(now);
-  while (FP.fences.length > 3) { gl.deleteSync(FP.fences.shift()); FP.times.shift(); }
+  while (FP.fences.length > FP.max + 1) { gl.deleteSync(FP.fences.shift()); FP.times.shift(); }
   gl.flush();
 }
 G.framesSkipped = 0;
@@ -888,7 +891,9 @@ G.render = function (dt, rdt, force) {
   cam.computeMatrices();
 
   G.frustumPlanes(cam.viewProj, G.camFrustum);
-  const ctx = { gl, pass: '', S, time: G.time, dt, rdt, cam, env: G.env, viewProj: cam.viewProj, frustum: G.camFrustum, cascade: -1 };
+  const ctx = G._ctx || (G._ctx = {});
+  ctx.gl = gl; ctx.pass = ''; ctx.S = S; ctx.time = G.time; ctx.dt = dt; ctx.rdt = rdt; ctx.cam = cam; ctx.env = G.env;
+  ctx.viewProj = cam.viewProj; ctx.frustum = G.camFrustum; ctx.cascade = -1;
 
   // shared textures
   gl.activeTexture(gl.TEXTURE0 + U.NOISE);

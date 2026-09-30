@@ -443,7 +443,7 @@ const I2_ARCH = [
       K.facade(g, 0, 1, 0, w, H, d, (u, v, f, len) => (u > 0 && u < len - 1 && u % 4 === 2 && v >= 2 && v <= H - 2 ? P.WIN : 0));
       // glowing furnace door at the front
       g.box(2, 1, d - 1, 3, 3, 1, P.FIRE);
-      g.light(3.5, 2, d + 0.5, [1, 0.5, 0.15], 1.1, true);
+      g.light(3.5, 2, d + 0.5, [1, 0.5, 0.15], 1.1);
       g.emit(3.5, 4, d + 0.5, 'fire', 0.25);
       K.roof(g, 0, 1 + H, 0, w, d, { type: 'gable', c: c.pk(1, IPAL.roof), fill: brick, pitch: 0.6, stripe: P.METAL_D, oh: 0 });
       // monitor (raised ridge vent)
@@ -561,7 +561,7 @@ const I3_HEAVY = [
       const fx = W - 1.5, fz = 1.5, fh = c.sh(22 + c.L * 8);
       K.stack(g, fx, 1, fz, 0.8, fh, P.METAL_D, P.RED, 'fire', 1.2);
       g.set(Math.floor(fx), fh + 2, Math.floor(fz), P.FIRE);
-      g.light(fx, fh + 2.5, fz, [1, 0.55, 0.15], 1.6, true);
+      g.light(fx, fh + 2.5, fz, [1, 0.55, 0.15], 1.6);
       K.lamp(g, 0, 1, D - 2, 5, P.LAMP_WHITE, P.METAL_D, 0.8);
       for (let k = 0; k < cols; k += 2) g.light(2.5 + k * 3.2, 8, 3.5, [1, 0.85, 0.5], 0.5);
     },
@@ -611,7 +611,7 @@ const I3_HEAVY = [
       const sz = Math.max(9, D - 7);
       shed(c, 0, sz, W, D - sz - 1, { wall: P.RUST, roof: P.METAL_D, doors: 2, h: 6, rib: P.METAL_D });
       g.box(1, 1, sz - 1, 3, 2, 1, P.FIRE);
-      g.light(2.5, 2, sz - 0.5, [1, 0.45, 0.1], 1.2, true);
+      g.light(2.5, 2, sz - 0.5, [1, 0.45, 0.1], 1.2);
       for (let k = 0; k < 2; k++) K.stack(g, W - 1.5 - k * 3, 1, 1.5, 1, c.sh(20 + c.L * 6), P.CHIMNEY, P.CHIMNEY_RED, 'smoke', 1);
       g.ellipsoid(W - 4, 1, sz - 3, 2.4, 1.8, 2, P.CONCRETE_DD); // coke pile
     },
@@ -687,7 +687,7 @@ const I3_HEAVY = [
       // ingot stacks glowing hot
       g.box(1, 1, D - 2, 4, 1, 1, P.METAL);
       g.box(1, 2, D - 2, 3, 1, 1, P.FIRE);
-      g.light(2.5, 2.5, D - 1.5, [1, 0.5, 0.15], 0.8, true);
+      g.light(2.5, 2.5, D - 1.5, [1, 0.5, 0.15], 0.8);
     },
   },
   {

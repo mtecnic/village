@@ -2,9 +2,10 @@
  * Both live in one left column under the top bar (where the tutorial card sits). The column stacks at
  * z 15: above the HUD chrome (0-5), BELOW the windows layer (20), so windows always cover it.
  * Colours come from the base.css tokens; no color-mix() (Safari 16.0/16.1). */
-/* height-capped: ui/hud_desk.js (VC.deskHud.layout) sets top + max-height so the column stops above the
- * minimap / toolbar / ticker (the CSS value is only the fallback); the desk card's body and the goals list
- * scroll inside it. No transition on `top`: a card must never slide in underneath the tutorial card. */
+/* height-capped: ui/hud_desk.js (VC.deskHud.layout) sets left + top + max-height so the column stops above
+ * the minimap / toolbar / ticker (the CSS value is only the fallback) — or, while a decision needs more room
+ * than that lane has, moves beside the minimap. The desk card's story and the goals list scroll inside it;
+ * the decision's choices never do. No transition on `top`: a card must never slide in under the tutorial card. */
 .gl-col { position: absolute; left: 10px; top: 70px; width: 324px; max-height: calc((100vh - 110px) / var(--ui-scale)); display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 15; transition: transform 0.5s var(--ease-out), opacity 0.4s; }
 .hud.off .gl-col { transform: translateX(-120%); opacity: 0; }
 .hud.no-ticker .gl-col { max-height: calc((100vh - 84px) / var(--ui-scale)); }
@@ -16,7 +17,11 @@
 .gl-head { flex: none; width: 100%; min-height: 24px; display: flex; align-items: center; gap: 7px; padding: 2px 3px; border-radius: 9px; cursor: pointer; transition: background 0.15s; outline: none; }
 .gl-head:hover { background: rgba(255, 255, 255, 0.05); }
 .gl-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.gl-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold); white-space: nowrap; }
+.gl-badge { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 10.5px; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold); white-space: nowrap; }
+.gl-target { flex: none; }
+/* the label yields first when the header is crowded (Claim chip + docked desk badge): "Goals", then "Go…" */
+.gl-btext { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.gl-card.claimable .gl-head.has-desk .gl-bpre { display: none; }
 .gl-target { font-size: 13px; letter-spacing: 0; filter: drop-shadow(0 0 6px rgba(255, 209, 102, 0.45)); }
 .gl-count { flex: 1; min-width: 0; font-size: 11px; color: var(--text3); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gl-claimchip { display: none; font-size: 10.5px; font-weight: 850; padding: 1px 7px; border-radius: 9px; color: #2a1d02; background: linear-gradient(180deg, #ffe29a, #ffc34d); box-shadow: 0 0 12px rgba(255, 209, 102, 0.45); white-space: nowrap; }
@@ -26,11 +31,14 @@
 .gl-card.compact .gl-chev { transform: rotate(-90deg); }
 .gl-list { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; margin-top: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .gl-list > .gl-item { flex: none; }
-.gl-list.more, .dk-body.more { -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); }
-/* peeking at the goals while a decision is open: the list scrolls in ~40% of the column, the decision keeps the rest */
-.gl-card.peek .gl-list { max-height: calc(var(--gl-avail, 420px) * 0.4); }
+.gl-list.more, .dk-story.more { -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); }
+/* peeking at the goals while a decision is open: the list scrolls in at most ~40% of the column and never in
+ * the room the decision's choices need (--gl-peek, set by VC.deskHud.layout) */
+.gl-card.peek .gl-list { max-height: calc(var(--gl-avail, 420px) * 0.4); max-height: min(calc(var(--gl-avail, 420px) * 0.4), var(--gl-peek, 100vh)); }
 /* with a decision on the desk the goals card keeps its (folded / capped) size and the desk card gives way */
 .gl-col.desk-open .gl-card, .gl-card.compact { flex-shrink: 0; }
+/* … unless even then the decision's choices would not fit: the goals card steps aside until it is decided */
+.gl-col.desk-open.gl-yield .gl-card { display: none; }
 .gl-card.compact .gl-list { display: none; }
 /* collapsed: one slim progress bar per goal */
 .gl-mini { flex: none; display: none; gap: 4px; margin: 6px 3px 1px; }
@@ -84,7 +92,9 @@
 .dk-card.out { animation: dkOut 0.36s ease-in forwards; pointer-events: none; }
 @keyframes dkIn { from { opacity: 0; transform: translateX(-60px) rotate(-3deg) scale(0.94); } }
 @keyframes dkOut { to { opacity: 0; transform: translateX(-40px) scale(0.95); } }
-.dk-full { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 9px 4px 11px 11px; }
+/* the header and the choices never shrink: the story (title + text) shrinks and scrolls first; only when even
+ * the story's minimum does not fit does the whole card scroll (with a sticky "↓ 3 choices" chip) */
+.dk-full { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 9px 4px 11px 11px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .dk-head { flex: none; display: flex; align-items: center; gap: 9px; padding-right: 3px; }
 .dk-portrait { flex: none; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; background: radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.6), transparent 55%), var(--ac); box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16), 0 0 18px var(--ac); animation: portraitIn 0.6s var(--ease) 0.15s backwards; }
 .dk-portrait span { filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45)); }
@@ -97,7 +107,10 @@
 .dk-days { color: var(--text3); font-weight: 800; }
 .dk-card.urgent .dk-days { color: var(--warn); }
 .dk-min.win-btn { flex: none; width: 24px; height: 24px; }
-.dk-body { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 7px; }
+/* (.dk-body only groups them: its parts are flex items of .dk-full, so the story's min-height is what counts) */
+.dk-body { display: contents; }
+.dk-story { flex: 0 1 auto; min-height: 60px; margin-right: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.dk-choices, .dk-out { flex: none; margin-right: 7px; }
 .dk-title { display: flex; align-items: flex-start; gap: 7px; margin: 8px 0 4px; font-size: 14.5px; font-weight: 850; line-height: 1.25; color: #fff; }
 .dk-ticon { flex: none; font-size: 16px; line-height: 1.15; }
 .dk-text { font-size: 12.3px; line-height: 1.42; color: var(--text2); }
@@ -120,7 +133,10 @@
 .dk-timer { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, 0.06); }
 .dk-timer i { display: block; height: 100%; width: 100%; background: linear-gradient(90deg, #ffc34d, var(--gold)); box-shadow: 0 0 8px rgba(255, 209, 102, 0.6); transition: width 0.5s var(--ease-out); }
 .dk-card.urgent .dk-timer i { background: linear-gradient(90deg, var(--bad), var(--warn)); }
-.dk-card.done .dk-timer, .dk-card.done .dk-choices, .dk-card.done .dk-days, .dk-card.done .dk-min { display: none; }
+.dk-card.done .dk-timer, .dk-card.done .dk-choices, .dk-card.done .dk-days, .dk-card.done .dk-min, .dk-card.done .dk-more { display: none; }
+/* last resort (a tiny viewport): the card scrolls as a whole; this chip sticks to its bottom while choices are cut */
+.dk-more { position: sticky; bottom: 0; z-index: 1; flex: none; display: none; align-self: center; margin: 6px 0 -4px; padding: 2px 10px; border-radius: 10px; border: 1px solid rgba(255, 209, 102, 0.55); background: linear-gradient(180deg, rgba(70, 58, 34, 0.96), rgba(40, 34, 26, 0.96)); color: var(--gold); font: 800 11px var(--font); cursor: pointer; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45); }
+.dk-full.cut .dk-more { display: block; }
 /* outcome */
 .dk-out { display: none; margin-top: 10px; padding: 9px 10px 10px; border-radius: 12px; background: rgba(61, 220, 132, 0.08); border: 1px solid rgba(61, 220, 132, 0.3); animation: popIn 0.35s var(--ease); }
 .dk-card.done .dk-out { display: block; }

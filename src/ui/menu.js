@@ -4,6 +4,8 @@
  *                 menu: extruded voxel-letter logo (canvas-drawn cubes, floating wave), tagline, Continue
  *                 (latest save), New City (menu_newcity.js), Load City (save list + import), Settings,
  *                 How to Play, Credits, rotating tips. The demo state is flagged S.demo = true.
+ *                 fitMenu() keeps the block inside the viewport at any UI scale (--menu-scale; on show,
+ *                 resize, settings and when the buttons change); the logo is at most half the screen wide.
  *   PAUSE MENU    pause(): Resume, Save City, Settings, How to Play, Main Menu (confirm). Pauses the sim
  *                 and restores the previous speed on resume(). The overlay sits above every window: windows
  *                 open when pausing are hidden until resume; windows opened from the pause card come on top
@@ -94,8 +96,10 @@ function letterCanvas(ch, s) {
 function buildLogo() {
   const box = MN.logo;
   if (!box) return;
-  const w = Math.min(window.innerWidth * 0.5, 860);
-  const s = VC.M.clamp(Math.floor(w / 62), 7, 15);
+  // at most half the screen wide ON SCREEN whatever the UI scale (the menu block is scaled by --menu-scale)
+  const us = (VC.ui && VC.ui.scale && VC.ui.scale()) || 1;
+  const w = Math.min(window.innerWidth * 0.5, 860) / us;
+  const s = VC.M.clamp(Math.floor(w / 62), 5, 15);
   if (s === MN.logoW && box.children.length) return;
   MN.logoW = s;
   box.innerHTML = '';
@@ -173,7 +177,29 @@ function build() {
     h('div', { class: 'vpm-foot' }, h('span', null, 'v' + VC.VERSION), h('span', null, '100% procedural · one HTML file · zero cubes harmed')));
   const ui = VC.ui;
   ui.root.insertBefore(MN.el, ui.layer);
-  window.addEventListener('resize', () => { if (menu.active) buildLogo(); });
+  window.addEventListener('resize', () => { if (menu.active) fitMenu(); });
+  // the Interface scale can change from the Settings window over the title screen
+  VC.bus.on('settings', () => { if (menu.active) fitMenu(); });
+}
+const MENU_TOP = 14, MENU_FOOT = 46; // screen px kept free above the menu block / for the footer line
+/**
+ * Fits the title menu (logo, tagline, buttons) to the viewport height: --menu-scale = the UI scale, or less
+ * when the block would not fit between the top edge and the footer (then the tagline / button gaps tighten
+ * first, .tight). The block is centred in the space above the footer, so the footer never sits on a button.
+ */
+function fitMenu() {
+  if (!MN.main || !MN.el) return;
+  buildLogo();
+  const us = (VC.ui && VC.ui.scale && VC.ui.scale()) || 1;
+  const avail = Math.max(120, window.innerHeight - MENU_TOP - MENU_FOOT);
+  MN.el.classList.remove('tight');
+  let hgt = MN.main.offsetHeight; // (layout size: the `scale` property does not change it)
+  if (hgt * us > avail) {
+    MN.el.classList.add('tight');
+    hgt = MN.main.offsetHeight;
+  }
+  const fit = hgt > 0 ? Math.min(us, avail / hgt) : us;
+  MN.el.style.setProperty('--menu-scale', String(Math.round(fit * 1000) / 1000));
 }
 function menuBtn(icon, label, sub, onClick, cls) {
   return h('button', { class: 'vpm-btn ' + (cls || ''), onclick: () => { VC.bus.emit('sfx', { name: 'click' }); onClick(); } },
@@ -187,8 +213,14 @@ function renderButtons(list) {
   const add = (b, i) => { b.style.animationDelay = 0.35 + i * 0.06 + 's'; MN.btns.appendChild(b); };
   let i = 0;
   if (latest) {
-    const sub = [latest.name, latest.pop != null ? VC.fmt.short(latest.pop) + ' citizens' : null, ago(latest.time)].filter(Boolean).join(' · ');
-    add(menuBtn('▶️', 'Continue', sub, () => loadGame(latest.slot), 'primary'), i++);
+    // "Port Cobbleholm · 228 citizens · 9 min ago": a long city name is what gets the ellipsis, never the
+    // citizens / save age
+    const meta = [latest.pop != null ? VC.fmt.short(latest.pop) + ' citizens' : null, ago(latest.time)].filter(Boolean).join(' · ');
+    const sub = [h('span', { class: 'vpm-sub-name' }, latest.name), meta ? h('span', { class: 'vpm-sub-meta' }, ' · ' + meta) : null];
+    const b = menuBtn('▶️', 'Continue', sub, () => loadGame(latest.slot), 'primary');
+    const sm = b.querySelector('small');
+    if (sm) { sm.classList.add('vpm-sub-split'); sm.title = [latest.name, meta].filter(Boolean).join(' · '); }
+    add(b, i++);
   }
   add(menuBtn('🏗️', 'New City', 'Found a brand-new metropolis', () => menu.newCity && menu.newCity(), latest ? '' : 'primary'), i++);
   const nc = list && list.length ? cityCount(list) : 0;
@@ -196,6 +228,7 @@ function renderButtons(list) {
   add(menuBtn('⚙️', 'Settings', 'Graphics, audio, controls', () => VC.hud.openSettings('graphics')), i++);
   add(menuBtn('❓', 'How to Play', 'Controls and a quick guide', () => VC.hud.openHelp('guide')), i++);
   add(menuBtn('🎬', 'Credits', 'The people (and cubes) behind it', openCredits), i++);
+  if (menu.active) fitMenu(); // (a Continue button adds a row)
 }
 function rotateTip() {
   const tips = (VC.hud && VC.hud.TIPS) || TIPS_FALLBACK;
@@ -507,8 +540,8 @@ const menu = (VC.menu = {
     void MN.el.offsetWidth; // restart entrance animations
     MN.el.classList.add('show');
     MN.logoW = 0;
-    buildLogo();
     refreshButtons();
+    fitMenu();
     rotateTip();
     clearInterval(MN.tipTimer);
     MN.tipTimer = setInterval(rotateTip, 9000);

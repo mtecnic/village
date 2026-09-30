@@ -4,19 +4,24 @@
  * ui/hud_desk.js). The column stacks BELOW the windows layer (z 15 < 20): windows always cover it, never
  * the other way round.
  *   ITEMS     icon, title (live: problem goals keep their count current), why, live progress bar + text,
- *             reward, "Show me" (VC.goals.focusOf: camera, overlay, panel, palette, tool), "↻" swap (dim,
+ *             reward, "Show me" (VC.goals.focusOf: camera, overlay, panel, tool — in the palette of the tool's
+ *             own group (VC.tools.info), highlighted — else the focus group), "↻" swap (dim,
  *             full on hover). Completed goals glow gold with a Claim button; the real time a completed goal
  *             is on screen (game running) is counted into g.shown — VC.goals only auto-claims after
  *             AUTO_CLAIM_SEC of it, so fast-forwarding never skips the Claim button.
  *   HEADER    click to collapse / expand (remembered per browser); collapsed it shows mini progress bars and
- *             a "🎁 Claim" chip. While a desk decision is open the list folds away (the header peeks it;
- *             peeking, the list scrolls within ~40% of the column so the decision stays in view).
+ *             a "🎁 Claim" chip. A click never leaves keyboard focus on it (Space stays "pause"). While a
+ *             desk decision is open the list folds away (the header peeks it; peeking, the list scrolls in
+ *             at most ~40% of the column and never in the room the decision's choices need — with no useful
+ *             room left the decision folds into its header badge instead). Where even the header does not
+ *             fit beside the choices, the card steps aside until the decision is made (hud_desk.js).
  *   LAYOUT    the column is laid out by ui/hud_desk.js (VC.deskHud.layout): under the top bar / tutorial
  *             card, height-capped above the minimap, toolbar and ticker; the goals list scrolls when the
  *             column is too short for it.
  *   CELEBRATE bus 'goalDone' -> ONE toast (VC.ui.toast, sfx 'achievement') + VC.fx.confetti at the camera
- *             target — unless a milestone banner went up in the last MS_QUIET_MS (that party is enough;
- *             the item still glows gold). Claiming plays 'cash' and floats the reward over the item.
+ *             target (not with VC.settings.juice === false) — unless a milestone banner went up in the last
+ *             MS_QUIET_MS (that party is enough; the item still glows gold). Claiming plays 'cash' and floats
+ *             the reward over the item.
  *             A goal rotated out for lack of progress (bus 'goalRotated') gets a quiet info toast.
  *             Nothing in the demo.
  * Polls VC.goals.list() at 2 Hz (in-place DOM updates, no rebuild unless the set of goals changed).
@@ -51,9 +56,20 @@ function build() {
   GL.chip = h('span', { class: 'gl-claimchip' }, '🎁 Claim');
   GL.list = h('div', { class: 'gl-list' });
   GL.mini = h('div', { class: 'gl-mini' });
-  // a div (not a button): the folded desk badge (hud_desk.js) docks in here as its own button
-  const head = h('div', { class: 'gl-head', role: 'button', tabindex: '0', 'aria-label': 'Show or hide goals', onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } },
-    h('span', { class: 'gl-badge' }, h('span', { class: 'gl-target' }, '🎯'), 'Mayor’s Goals'), GL.count, GL.chip, h('span', { class: 'gl-chev', 'data-tip': 'Show / hide goals' }, '▾'));
+  // a div (not a button): the folded desk badge (hud_desk.js) docks in here as its own button.
+  // A mouse click / tap never focuses it (mousedown default prevented), so Space keeps meaning "pause"
+  // afterwards; with keyboard focus (Tab), Enter / Space only fold the card (stopPropagation: no pause too).
+  const head = h('div', { class: 'gl-head', role: 'button', tabindex: '0', 'aria-label': 'Show or hide goals', onclick: toggle,
+    onmousedown: (e) => e.preventDefault(),
+    onkeydown: (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      if (e.target !== e.currentTarget) return; // (Enter / Space on the docked desk badge: its own click)
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) toggle();
+    } },
+    // "Mayor’s" drops out when the Claim chip and a docked desk badge share the header (goals.css)
+    h('span', { class: 'gl-badge' }, h('span', { class: 'gl-target' }, '🎯'), h('span', { class: 'gl-btext' }, h('span', { class: 'gl-bpre' }, 'Mayor’s '), 'Goals')), GL.count, GL.chip, h('span', { class: 'gl-chev', 'data-tip': 'Show / hide goals' }, '▾'));
   GL.card = h('div', { class: 'gl-card pe hide' }, head, GL.mini, GL.list);
   GL.col.appendChild(GL.card);
   // the desk card opening / closing folds the list right away (hud_desk dispatches this on the column)
@@ -68,13 +84,18 @@ function moreHint() {
 function saveCollapsed() {
   try { localStorage.setItem(LS_KEY, GL.collapsed ? '1' : '0'); } catch (e) { /* private mode / blocked storage */ }
 }
+const PEEK_USEFUL = 64; // CSS px: a peeked list any shorter than this would show no whole goal
 function toggle() {
   VC.bus.emit('sfx', { name: 'click' });
   if (deskOpen()) {
-    // a decision is open (list folded for it): the click peeks at the goals / folds them again
+    // a decision is open (list folded for it): the click peeks at the goals / folds them again. Where the
+    // decision's choices leave no room for the list, the decision folds into the header badge instead
+    // ("Decide later": one click on the 📨 badge brings it back) and the goals open normally.
     if (GL.card.classList.contains('compact')) {
-      GL.peek = true;
       if (GL.collapsed) { GL.collapsed = false; saveCollapsed(); }
+      const D = VC.deskHud;
+      if (D && D.peekRoom && D.fold && D.peekRoom() < PEEK_USEFUL && D.fold()) { GL.peek = false; applyCompact(); return; }
+      GL.peek = true;
     } else GL.peek = false;
   } else {
     GL.collapsed = !GL.collapsed;
@@ -165,6 +186,7 @@ function syncItems(goals) {
   const txt = claimable ? '' : `${n} active`;
   if (GL.count.textContent !== txt) GL.count.textContent = txt;
   GL.chip.classList.toggle('show', claimable > 0);
+  GL.card.classList.toggle('claimable', claimable > 0);
 }
 function refresh() {
   if (!GL.card) return;
@@ -189,8 +211,14 @@ function showMe(id) {
     if (f.overlay && VC.gfx && VC.gfx.setOverlay) VC.gfx.setOverlay(f.overlay);
     if (isFinite(f.x) && isFinite(f.z) && VC.camera && VC.camera.focus) VC.camera.focus(f.x, f.z, f.dist || Math.min((VC.camera.goal && VC.camera.goal.dist) || 30, 30));
     if (f.panel && VC.hud.openPanel) VC.hud.openPanel(f.panel);
-    if (f.group && VC.hud.openPalette) VC.hud.openPalette(f.group);
-    if (f.tool && VC.tools && VC.tools.select && (!VC.tools.isTool || VC.tools.isTool(f.tool))) VC.tools.select(f.tool);
+    // the palette that really holds the tool (its registered group wins over the goal's hint) with the
+    // tool's card highlighted, as the tutorial does
+    const T = VC.tools;
+    const tool = f.tool && T && T.select && (!T.isTool || T.isTool(f.tool)) ? f.tool : null;
+    const info = tool && T.info ? T.info(tool) : null;
+    const group = (info && info.group) || f.group;
+    if (group && VC.hud.openPalette) VC.hud.openPalette(group, tool ? { highlight: tool } : undefined);
+    if (tool) T.select(tool);
   } catch (e) { console.error('[goals] show me', e); }
 }
 function claimGoal(it) {
@@ -222,8 +250,9 @@ function celebrate(g) {
     onClick: () => { if (GL.collapsed) toggle(); },
   });
   try {
+    // 'Growth popups & celebrations' off (VC.settings.juice === false): the toast only, no confetti
     const cam = VC.camera;
-    if (VC.fx && VC.fx.confetti && cam && isFinite(cam.tx)) VC.fx.confetti(cam.tx, cam.tz, 140);
+    if (!(VC.settings && VC.settings.juice === false) && VC.fx && VC.fx.confetti && cam && isFinite(cam.tx)) VC.fx.confetti(cam.tx, cam.tz, 140);
   } catch (e) { /* fx optional */ }
   refresh();
 }

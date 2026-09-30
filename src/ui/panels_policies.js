@@ -6,7 +6,8 @@
  * state, description, effect chips scaled live to the level, an INTENSITY SLIDER (0-100 %, step 5,
  * labelled with def.unit, e.g. "Patrol hours") and the monthly cost at that level vs. at 100 %.
  * Binary policies (def.levels === false) only get the on/off toggle. Slider cards also keep a
- * toggle: on = the level last used for that policy (100 % the first time), off = repeal.
+ * toggle: on = the level last used for that policy in this city (100 % the first time; forgotten on New City /
+ * load: bus 'started' + panel reset), off = repeal.
  *
  * DRAG = PREVIEW, RELEASE = COMMIT: while a slider moves, chips, cost and the header totals preview
  * the new level locally; on release VC.econ.setPolicy(key, level) is called once. One change -> one
@@ -296,11 +297,21 @@ function tempPill() {
   return el;
 }
 
+/** A new city / a loaded save: no slider level (or drag preview) carries over from the previous city. */
+function forgetLevels() {
+  for (const k in lastLevel) delete lastLevel[k];
+  for (const k in preview) delete preview[k];
+}
+
 P.defs.policies = {
   title: 'Policies & Ordinances',
   icon: '📜',
   width: 720,
   place: 'center',
+  init() {
+    VC.bus.on('started', forgetLevels);
+  },
+  reset: forgetLevels,
   build(p) {
     const kAct = U.kpi('Active', { icon: '✅' });
     const kCost = U.kpi('Monthly cost', { icon: '💸', tip: 'Total monthly cost of all active policies at their current levels and population. Updates live while you drag a slider.' });

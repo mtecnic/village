@@ -11,8 +11,9 @@
  *               colour, message, Details -> advisors panel, auto-dismiss timer). At most one new advisor card
  *               per 10 s; the rest wait in a short queue (bad first) and expire after 90 s.
  *               good -> one toast; info -> nothing here (the dock's inbox badge shows it).
- *   MILESTONE   bus 'milestone' {index, milestone, unlocked:[keys]} -> banner + confetti listing exactly
- *               `unlocked` (fallback when absent: items of the milestone's range not already announced).
+ *   MILESTONE   bus 'milestone' {index, milestone, unlocked:[keys]} -> banner (+ a DOM confetti shower unless
+ *               VC.settings.juice === false) listing exactly `unlocked` (fallback when absent: items of the
+ *               milestone's range not already announced).
  *               Milestones arriving while a banner is up merge into it (path, summed rewards, all unlocks).
  *               The banner sits above windows and toasts; toasts and advisor cards move out of its way.
  *   UNLOCK      bus 'unlock' {keys} -> one toast "New: A, B unlocked".
@@ -21,7 +22,7 @@
  *   DISASTER    bus 'disaster' {phase:'start', type, x, z, id} -> one red alert card whose "Show me" follows
  *               the LIVE VC.disasters.active entry (by id; start point as fallback). Closes on phase 'end'.
  *   DEMO        nothing at all while VC.state.demo (title-screen city) or the title menu is up.
- *   JUICE       floating "+12 👥" / "⭐ Level 2!" / "💰 +$" pills over growing buildings, month-end cha-ching
+ *   JUICE       floating "+12 👥" / "⭐ Level 2!" / "💰 +$42/mo" pills over growing buildings, month-end cha-ching
  *               with coin showers, a small celebration every 25 % toward the next milestone (see JUICE below;
  *               VC.settings.juice === false turns it off). Never notifications: no toasts, at most one sound.
  * API (on VC.hud): pushNews(text, breaking?), showMilestone(index, milestone?, unlockItems?),
@@ -499,7 +500,8 @@ function renderBanner(fresh) {
     if (MS.banner) MS.banner.remove();
     MS.banner = h('div', { class: 'ms-banner pe', onclick: closeBanner }, kids);
     VC.hud.root.appendChild(MS.banner);
-    confetti();
+    // 'Growth popups & celebrations' off: the banner still shows, without the confetti shower
+    if (!(VC.settings && VC.settings.juice === false)) confetti();
   } else {
     MS.banner.innerHTML = '';
     MS.banner.append(...kids.filter(Boolean));
@@ -563,7 +565,8 @@ function claimNotifications() {
  *     move-in list (polled every 0.5 s for up to 60 game days): each bulk gain (>= 30 % of its capacity, at
  *     least 3 residents) floats "+N 👥" from its roof.
  *   - level-ups (bldChange with b.level above the level seen before, growables only): "⭐ Level N!", plus
- *     "💰 +$" and a small shower of 'coin' particles for commercial / industrial. The sparkle burst is the
+ *     "💰 +$42/mo" (the monthly tax of the new jobs at today's rates; "Business boom!" / "Industry boom!" when
+ *     that is under $5) and a small shower of 'coin' particles for commercial / industrial. The sparkle burst is the
  *     particle module's own level-up effect and the 'levelup' sound comes from the sim (no sound here).
  *   - month end (a profitable month, at most every 6 s real time, never in sandbox): ONE gentle 'chaching'
  *     (skipped while a milestone banner celebrates), a coin shower over the busiest commercial building on
@@ -787,11 +790,32 @@ function onJuiceBldChange(b) {
   J.lastPop.set(b.id, performance.now());
   popAt(x, y, z, jt('⭐ Level ' + b.level + '!', 'Level ' + b.level + '!'), 'jp-lvl', 0);
   if (b.zt === 2 || b.zt === 3) {
-    // the money side of it: a second pill beside the first (no extra token: same event) + coins
-    popAt(x, y, z, jt('💰 +$', '+$'), 'jp-cash', 400, 72, 22);
+    // the money side of it: a second pill beside the first (no extra token: same event) + coins. It shows
+    // the monthly tax the new jobs bring at today's rates, or a word when that is only a few dollars.
+    const gain = levelTaxGain(b, prev);
+    const word = b.zt === 2 ? 'Business boom!' : 'Industry boom!';
+    const txt = gain >= 5 ? '+' + VC.fmt.money(gain) + '/mo' : word;
+    popAt(x, y, z, jt('💰 ' + txt, txt), 'jp-cash', 400, 72, 22);
     const Pt = VC.particles;
     if (Pt && Pt.coins) Pt.coins(x, y - 0.2, z, 8 + b.w * b.d * 2);
   }
+}
+/**
+ * Monthly tax ($, rounded) the extra jobs of a commercial / industrial growable's level-up bring in at the
+ * current tax rate — the same per-job model as VC.econ's forecast (TAX_K x wealth x tax modifiers). 0 when
+ * unknown.
+ */
+function levelTaxGain(b, prev) {
+  const S = VC.state, E = VC.econ, Z = VC.ZONES && VC.ZONES[b.zt];
+  const g = Z && VC.GROW && VC.GROW[Z.key] && VC.GROW[Z.key][b.den];
+  if (!S || !E || !g || !g.cap || !S.tax || !S.tax[Z.key] || S.sandbox) return 0;
+  const cap = (l) => (+g.cap[VC.M.clamp(l | 0, 1, 3) - 1] || 0) * (b.w || 1) * (b.d || 1);
+  const jobs = cap(b.level) - cap(prev);
+  const w = VC.M.clamp(b.wealth | 0, 0, 2);
+  const k = (E.TAX_K && +E.TAX_K[Z.key]) || 0, wm = (E.WEALTH_MUL && +E.WEALTH_MUL[w]) || 1;
+  const mul = Math.max(0, 1 + ((S.mods && +S.mods['tax' + Z.key]) || 0));
+  const v = jobs * ((+S.tax[Z.key][w] || 0) / 100) * wm * k * mul;
+  return v > 0 && isFinite(v) ? Math.round(v) : 0;
 }
 function pollBuilding(S) {
   if (!J.building.size) return;

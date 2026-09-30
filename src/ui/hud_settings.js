@@ -7,8 +7,9 @@
  *       VC.disasters.setEnabled, new cities = VC.settings.disasters; autosave, edge scrolling, invert zoom,
  *       grid, tutorial hints + restart), Interface (UI scale, news ticker, reset). Every settings change is
  *       persisted with VC.saveSettings() (emits 'settings'); sliders apply live while dragging.
- *   VC.hud.openHelp(tab?)      window 'help': Controls (VC.input.KEYMAP or built-in list), How to Play
- *       (illustrated guide), Overlays (every overlay + "try it"), Tips.
+ *   VC.hud.openHelp(tab?)      window 'help': Controls (VC.input.KEYMAP or built-in list: alternatives ', ' or
+ *       ' / ', chords ' + ', see keyChips; the camera rows carry this keyboard layout's labels, with a note while
+ *       VC.input does not know them yet), How to Play (illustrated guide), Overlays (every overlay + "try it"), Tips.
  * Both toggle when called while open with no tab argument.
  */
 const h = VC.h;
@@ -210,13 +211,16 @@ function openHelp(tab) {
 }
 const MOUSE_RE = /drag|click|wheel|scroll|tap|pinch/i;
 /**
- * 'Wheel / + / −' -> [Wheel] or [+] or [−]; 'Ctrl + Z' -> [Ctrl]+[Z]; 'W A S D / Arrows' -> 4 caps or [Arrows].
- * Alternatives are separated by a slash with spaces around it, chords by a plus with spaces around it (or
- * glued, as in 'Ctrl+Z'); a lone '+' or '/' is a key of its own. Mouse gestures render as mouse chips.
+ * KEYMAP key strings -> chips: 'Wheel, Pinch, +, −' -> 🖱 Wheel or 🖱 Pinch or [+] or [−]; 'Ctrl + Z' ->
+ * [Ctrl]+[Z]; 'W A S D, Arrows' -> 4 caps or [Arrows]; 'Right-click, Esc' -> 🖱 Right-click or [Esc].
+ * Alternatives are separated by ', ' (VC.input.KEYMAP) or ' / ' (the built-in list), chords by ' + ' (or glued,
+ * as in 'Ctrl+Z'); a lone ',' '+' '/' or '−' is a key of its own. Each chord part is a mouse chip when it names
+ * a mouse gesture, else a key cap.
  */
 function keyChips(keys) {
   const wrap = h('span', { class: 'hk-keys' });
-  const alts = String(keys).trim().split(/\s+\/\s+/);
+  const str = String(keys).trim();
+  const alts = str.length === 1 ? [str] : str.split(/\s*,\s+|\s+\/\s+/).filter((a) => a !== '');
   alts.forEach((alt, i) => {
     if (i) wrap.appendChild(h('span', { class: 'hk-or' }, 'or'));
     let chord = alt.split(/\s+\+\s+/);
@@ -225,7 +229,7 @@ function keyChips(keys) {
       if (j) wrap.appendChild(h('span', { class: 'hk-or' }, '+'));
       if (MOUSE_RE.test(k)) { wrap.appendChild(h('span', { class: 'hk-mouse' }, '🖱️ ' + k)); return; }
       // "W A S D" -> four caps; multi-word labels stay together
-      const parts = /^([A-Z0-9] )+[A-Z0-9]$/.test(k) ? k.split(' ') : [k];
+      const parts = /^([A-Za-z0-9À-ɏͰ-ӿ] )+[A-Za-z0-9À-ɏͰ-ӿ]$/.test(k) ? k.split(' ') : [k];
       parts.forEach((p) => wrap.appendChild(h('kbd', { class: 'kbd' }, p)));
     });
   });
@@ -244,6 +248,11 @@ function renderControls(c) {
     grid.appendChild(h('div', { class: 'hk-group' }, h('div', { class: 'section-title' }, g), list.map((k) => h('div', { class: 'hk-row' }, keyChips(k.keys || k.key || ''), h('span', { class: 'hk-act' }, k.action || k.desc || '')))));
   }
   c.appendChild(grid);
+  // the camera letter keys work by POSITION: until VC.input knows this keyboard's labels for them, say so
+  const I = VC.input;
+  if (I && typeof I.posKnown === 'function' && !I.posKnown()) {
+    c.appendChild(VC.ui.note('⌨️ The camera keys work by position: W A S D and Q E are the keys where those letters sit on a US keyboard (Z Q S D and A E on a French AZERTY keyboard).'));
+  }
 }
 function renderGuide(c) {
   const list = h('div', { class: 'guide' });

@@ -11,7 +11,7 @@
   --line2: rgba(255, 255, 255, 0.16);
   --text: #e9eef8;
   --text2: #a9b3c7;
-  --text3: #707b92;
+  --text3: #9aa5ba; /* >= 4.5:1 (WCAG AA small text) on every glass panel tone, still dimmer than --text2 */
   --accent: #5ad1ff;
   --accent2: #b388ff;
   --good: #3ddc84;

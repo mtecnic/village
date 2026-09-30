@@ -17,8 +17,16 @@
  *   - big flat color regions + regular patterns (greedy-mesher friendly); grids are cropped
  *     to the used height (K.finish) so construction reveal & LOD use the true height
  *   - night: MAT.WINDOW colors light randomly, NEON/SIGN/BEACON always glow, LAMP at night;
- *     g.light() halos for lamps & signs, always-on blinking beacons on towers > ~80 voxels;
+ *     g.light() halos for lamps & signs, always-on blinking beacons on towers > ~80 voxels
+ *     (K.finish adds one automatically if a generator forgot);
  *     g.emit() smoke / steam / fire / fountain at chimney tops etc.
+ *   - big lots (3x3+) may put towers on a podium (K.planPodium before building, K.podium after)
+ *   - grid.meta.style = '<zone><den>_<archetype>' (e.g. 'R2_brownstone'), handy for tooltips/tests
+ *
+ * VC.growKit (K) sections: grid basics & identity rng · facade painters (facade, skin, STYLES) ·
+ * shapes & roofs · vegetation · lot props (cars, trucks, fences, pools, lamps, signs, billboards)
+ * · rooftop & industrial equipment · lot context (lotCtx, occupancy, house walls) · tower helpers
+ * (towerFloors, section, balconies, lobby, plaza, roofTop, podium, crown) · construction site.
  */
 const P = VC.P, M = VC.M;
 
@@ -627,15 +635,11 @@ K.billboard = function (g, x, y, z, w, h, rng, face = 0, posts = 2) {
       if (face === 0) g.set(x + i, y + j, z, at(i, j));
       else g.set(x, y + j, z + w - 1 - i, at(i, j));
     }
-  // posts & back
+  // support posts behind the panel, running down until they meet a roof / the ground
   for (let p = 0; p < posts; p++) {
     const i = posts === 1 ? w >> 1 : p === 0 ? 1 : w - 2;
-    for (let yy = y - 1; yy >= 0 && yy >= y - 60; yy--) {
-      const px = face === 0 ? x + i : x, pz = face === 0 ? z - 1 : z + w - 1 - i;
-      const qx = face === 0 ? px : px - 1, qz = face === 0 ? pz : pz;
-      if (g.get(qx, yy, qz)) break;
-      g.set(qx, yy, qz, P.METAL_D);
-    }
+    const px = face === 0 ? x + i : x - 1, pz = face === 0 ? z - 1 : z + w - 1 - i;
+    for (let yy = y - 1; yy >= 0 && !g.get(px, yy, pz); yy--) g.set(px, yy, pz, P.METAL_D);
   }
   const rgb = K.glowRGB(bg);
   if (face === 0) g.light(x + w / 2, y + h / 2, z + 1.2, rgb, 0.5 + w * 0.1);

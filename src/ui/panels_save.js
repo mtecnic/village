@@ -4,6 +4,11 @@
  * time, Load / Overwrite / Delete / Import (all confirmed), Export files. Every VC.save call may be
  * synchronous or return a Promise; buttons are disabled while an operation is in flight. Save names are
  * user text: always escaped (U.esc) before they go into HTML. Esc in the name field closes the panel.
+ * OVERWRITE: "Save city" only asks to overwrite when a MANUAL save with that exact slot id exists (an
+ * autosave carrying the city's name is a different slot and is never replaced by it).
+ * WHERE SAVES LIVE: a footer note explains that saves stay in this browser for this copy of the game (a moved
+ * or re-downloaded file:// page starts with an empty list; private windows forget them) and to Export
+ * backups; when storage is unavailable (VC.save.storageInfo().mode 'memory') it says so loudly.
  */
 const P = VC.panels, U = P.util, h = VC.h;
 
@@ -60,7 +65,7 @@ P.defs.save = {
     const saveBtn = VC.ui.button('Save city', () => doSave(input.value), { icon: '💾', cls: 'primary' });
     p.body.appendChild(h('div', { class: 'pn-card pn-save-new' }, h('div', { class: 'pn-save-new-title' }, '💾 Save current city'), h('div', { class: 'pn-save-new-row' }, input, saveBtn)));
     const list = h('div', { class: 'pn-slots' });
-    const empty = U.empty('🗂️', 'No saved cities yet', 'Save your city above. Saves are stored in this browser on this computer.');
+    const empty = U.empty('🗂️', 'No saved cities yet', 'Save your city above, or import a city file you exported earlier.');
     const loading = h('div', { class: 'pn-muted-note pn-save-loading' }, 'Loading saves…');
     const countEl = h('span', { class: 'pn-muted-note' });
     p.body.appendChild(h('div', { class: 'pn-sec' }, h('div', { class: 'pn-toolbar' }, h('span', { class: 'pn-sec-title pn-inline' }, 'Saved cities'), countEl), loading, list, empty));
@@ -76,6 +81,15 @@ P.defs.save = {
     }), { title: '📥 Import city', yes: 'Choose file…' }), { icon: '⬆️', cls: 'small', tip: 'Load a city from a previously exported file' });
     const autoNote = h('span', { class: 'pn-muted-note' });
     p.body.appendChild(h('div', { class: 'pn-save-foot' }, expBtn, impBtn, h('span', { class: 'pn-grow' }), autoNote));
+    // where saves live (checked once per opening: storageInfo reads every slot's size)
+    let mode = 'local';
+    try { mode = (has('storageInfo') && VC.save.storageInfo().mode) || 'local'; } catch (e) { mode = 'local'; }
+    const local = typeof location !== 'undefined' && location.protocol === 'file:';
+    const where = mode === 'memory'
+      ? '⚠️ This browser is blocking storage, so saves only last until you close the tab. Use <b>Export file</b> to keep your city.'
+      : '💡 Saves live in this browser' + (local ? ', for this copy of Voxelpolis.html — keep the file in one place' : '') + '. Private windows and clearing site data erase them: use <b>Export file</b> for backups or to move a city to another computer.';
+    const whereEl = h('div', { class: 'pn-banner t-' + (mode === 'memory' ? 'warn' : 'info') + ' pn-save-where' }, h('span', { html: where, style: { fontWeight: '550', lineHeight: '1.45' } }));
+    p.body.appendChild(whereEl);
 
     function setBusy(b) {
       busy = b;
@@ -97,7 +111,8 @@ P.defs.save = {
     function doSave(name) {
       name = String(name || '').trim() || S.name || 'My City';
       if (!has('save')) return fail('Saving is not available.');
-      const exists = slots.some((s) => String(s.slot) === name || s.name === name);
+      // only a manual save in the very slot this writes to gets replaced (autosaves have their own slots)
+      const exists = slots.some((s) => !s.auto && String(s.slot) === name);
       const go = () => run(() => VC.save.save(name), `City saved as <b>${U.esc(name)}</b>.`, 'Save failed — storage may be full or unavailable.');
       if (exists) VC.ui.confirm(`Overwrite the save <b>${U.esc(name)}</b>?`, go, { title: '💾 Overwrite save', yes: 'Overwrite' });
       else go();

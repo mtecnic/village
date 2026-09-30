@@ -5,9 +5,14 @@
  *   the data catalog while the tools module returns nothing — each with icon, name, cost, footprint, lock
  *   overlay and a rich tooltip (upkeep, outputs, jobs, coverage, pollution, land value…). Zoning uses a
  *   R/C/I x density matrix. Current tool is highlighted (bus 'tool'); bus 'toolGroup' {key} opens a
- *   palette (keyboard); an "active tool" chip shows hints + cancel while building.
- * API (on VC.hud): openPalette(group), closePalette(), paletteOpen() -> group|null, toolList(group),
- *   describeTool(t), toolGroupOf(key), toolTipHtml(t)
+ *   palette (keyboard); an "active tool" chip shows hints + cancel while building (it fades out while a drag
+ *   is in progress so the cursor label never lands on it).
+ *   ZONE DEMAND: every zone card and row carries a demand arrow (▲▲ / ▲ / – / ▼ from S.demand, refreshed with
+ *   the palette's 1 s timer) and the card tooltip lists the strongest demand factors (VC.sim.demandFactors).
+ *   LAYERING: while a palette is open the toolbar wrap is raised above the windows layer (.pal-open), so a
+ *   palette opened over the Budget / Policies window is never hidden behind it.
+ * API (on VC.hud): openPalette(group, {highlight: toolKey}?), closePalette(), paletteOpen() -> group|null,
+ *   toolList(group), describeTool(t), toolGroupOf(key), toolTipHtml(t)
  */
 const h = VC.h;
 const TB = { groups: new Map(), pal: null, palGroup: null, palSig: '', keyGroup: new Map() };
@@ -63,7 +68,44 @@ function zoneDesc(t, d) {
   const z = VC.ZONES[t];
   const what = { 1: 'homes', 2: 'shops and offices', 3: 'factories and warehouses' }[t];
   const den = { 1: 'Small, low-rise', 2: 'Mid-rise', 3: 'Dense high-rise' }[d];
-  return `${den} ${what}. Needs road access, power and water to grow.` + (z && d === 3 && t === 1 ? ' Towers!' : '');
+  // same rule as the sim (growReason): low density needs a street + power; medium / high also need water
+  return `${den} ${what}. Needs a street within ${VC.C.ROAD_ACCESS} tiles and power${d >= 2 ? ', plus water' : ''} to grow.` + (z && d === 3 && t === 1 ? ' Towers!' : '');
+}
+/** Policy active? (numeric levels; VC.econ.isPolicyOn when present, else a truthy / > 0 S.policies value). */
+function policyOn(key) {
+  try {
+    if (VC.actions && VC.actions.policyOn) return VC.actions.policyOn(key);
+    if (VC.econ && VC.econ.isPolicyOn) return !!VC.econ.isPolicyOn(key);
+  } catch (e) { /* fall through */ }
+  const v = VC.state && VC.state.policies ? VC.state.policies[key] : 0;
+  return v === true || v > 0;
+}
+/* ---------------- zone demand ---------------- */
+const ZKEY = { 1: 'R', 2: 'C', 3: 'I' };
+/** Demand arrow for a zone type: {t: '▲▲'|'▲'|'–'|'▼', cls, word, v (-1..1)}. */
+function demandArrow(zt) {
+  const S = VC.state;
+  const v = S && S.demand ? VC.M.clamp(+S.demand[ZKEY[zt]] || 0, -1, 1) : 0;
+  if (v > 0.5) return { t: '▲▲', cls: 'up2', word: 'Strong demand', v };
+  if (v > 0.12) return { t: '▲', cls: 'up', word: 'Some demand', v };
+  if (v < -0.12) return { t: '▼', cls: 'down', word: 'Oversupplied', v };
+  return { t: '–', cls: 'flat', word: 'Little demand', v };
+}
+/** Strongest demand factors of a zone type: [{label, value}] (up to n, by magnitude). */
+function topFactors(zt, n) {
+  let f = null;
+  try { f = VC.sim && VC.sim.demandFactors ? VC.sim.demandFactors() : null; } catch (e) { f = null; }
+  const list = f && Array.isArray(f[ZKEY[zt]]) ? f[ZKEY[zt]].slice() : [];
+  return list.filter((x) => x && Math.abs(+x.value || 0) > 0.01).sort((a, b) => Math.abs(b.value) - Math.abs(a.value)).slice(0, n);
+}
+/** Refreshes the demand arrows of an open zones palette in place. */
+function refreshDemand() {
+  if (!TB.pal) return;
+  for (const el of TB.pal.querySelectorAll('[data-dem]')) {
+    const a = demandArrow(+el.dataset.dem);
+    if (el._t !== a.t) { el._t = a.t; el.textContent = a.t; }
+    if (el._c !== a.cls) { if (el._c) el.classList.remove(el._c); el.classList.add(a.cls); el._c = a.cls; }
+  }
 }
 /** Tool list for a group: VC.tools.list(group) if it returns anything, else fallback descriptors. */
 function toolList(group) {
@@ -89,7 +131,7 @@ function describeTool(t) {
     if (d.unique && VC.state) {
       try { o.built = VC.world.count(d.key) > 0; } catch (e) { o.built = false; }
     }
-    if (d.requiresPolicy && VC.state && !(VC.state.policies || {})[d.requiresPolicy]) o.needsPolicy = d.requiresPolicy;
+    if (d.requiresPolicy && VC.state && !policyOn(d.requiresPolicy)) o.needsPolicy = d.requiresPolicy;
   }
   if (o.kind === 'road' && !o.road) o.road = Object.values(VC.ROADS).find((r) => 'road_' + r.key === o.key) || null;
   if (o.kind === 'zone') {
@@ -116,6 +158,7 @@ function costText(t) {
 function levelWord(v) {
   return v >= 160 ? 'High' : v >= 80 ? 'Medium' : 'Low';
 }
+const VARIABLE_POWER = { wind_turbine: 'wind', solar_farm: 'sun' };
 const SERVICE_ICON = { police: '🚓', fire: '🚒', health: '🏥', edu: '🎓', park: '🌳', transit: '🚌', garbage: '♻️' };
 const SERVICE_NAME = { police: 'Police', fire: 'Fire', health: 'Health', edu: 'Education', park: 'Leisure', transit: 'Transit', garbage: 'Garbage' };
 function toolTipHtml(t) {
@@ -128,7 +171,8 @@ function toolTipHtml(t) {
   if (d) {
     s += row('📐 Size', `${d.size[0]}×${d.size[1]} tiles`);
     if (d.upkeep) s += row('🔧 Upkeep', fmt.money(d.upkeep * (mul || 1)) + '/mo', 'warn');
-    if (d.power) s += row('⚡ Power', '+' + fmt.num(d.power) + ' MW', 'good');
+    // wind and sun vary: the catalog output is the best case
+    if (d.power) s += row('⚡ Power', (VARIABLE_POWER[d.key] ? 'up to ' : '+') + fmt.num(d.power) + ' MW' + (VARIABLE_POWER[d.key] ? ' (' + VARIABLE_POWER[d.key] + ')' : ''), 'good');
     if (d.water) s += row('💧 Water', '+' + fmt.num(d.water) + ' kL', 'good');
     if (d.jobs) s += row('👷 Jobs', fmt.num(d.jobs));
     if (d.housing) s += row('🏠 Residents', fmt.num(d.housing), 'good');
@@ -147,8 +191,16 @@ function toolTipHtml(t) {
   } else if (t.kind === 'zone' && t.zt) {
     const g = VC.GROW[VC.ZONES[t.zt].key][t.den];
     if (g) s += row(t.zt === 1 ? '🏠 Residents/tile' : '👷 Jobs/tile', g.cap[0] + '–' + g.cap[2]);
+    if (VC.state) {
+      const a = demandArrow(t.zt);
+      s += row('📊 Demand', `${a.t} ${a.word} (${a.v >= 0 ? '+' : '−'}${Math.round(Math.abs(a.v) * 100)})`, a.v > 0.12 ? 'good' : a.v < -0.12 ? 'bad' : '');
+    }
   }
   s += '</div>';
+  if (t.kind === 'zone' && t.zt && VC.state) {
+    const f = topFactors(t.zt, 2);
+    if (f.length) s += '<div class="tt-foot">' + f.map((x) => `${x.value >= 0 ? '▲' : '▼'} ${esc(x.label)}`).join(' · ') + '</div>';
+  }
   if (d && d.needsWater) s += '<div class="tt-foot">🌊 Must be placed next to water.</div>';
   if (d && d.unique) s += `<div class="tt-foot">⭐ Unique — one per city.${t.built ? ' <b>Already built.</b>' : ''}</div>`;
   if (t.needsPolicy) { const p = VC.POLICY[t.needsPolicy]; s += `<div class="tt-lock">📜 Requires the “${esc(p ? p.name : t.needsPolicy)}” policy</div>`; }
@@ -206,7 +258,8 @@ function selectTool(key) {
 }
 
 /* ---------------- palette ---------------- */
-function openPalette(group) {
+/** Opens a group's palette. opts.highlight: a tool key whose card pulses (tutorial "Show me"). */
+function openPalette(group, opts) {
   if (!VC.hud.visible || !TB.bar) return;
   const g = VC.TOOL_GROUPS.find((x) => x.key === group);
   if (!g) return;
@@ -215,12 +268,15 @@ function openPalette(group) {
   const wasOpen = !!TB.palGroup;
   if (TB.pal) TB.pal.remove();
   TB.palGroup = group;
+  TB.hl = (opts && opts.highlight) || null;
   const list = toolList(group);
   TB.palSig = sigOf(list);
   TB.pal = renderPalette(g, list);
   if (wasOpen) TB.pal.classList.add('instant');
   TB.bar.parentNode.appendChild(TB.pal);
+  TB.wrap.classList.add('pal-open'); // above the windows layer while open
   positionPalette();
+  refreshDemand();
   for (const [k, b] of TB.groups) b.classList.toggle('open', k === group);
   refreshChip();
   clearInterval(palTimer);
@@ -229,10 +285,17 @@ function openPalette(group) {
 function closePalette() {
   if (!TB.palGroup) return;
   TB.palGroup = null;
+  TB.hl = null;
   clearInterval(palTimer);
   const p = TB.pal;
   TB.pal = null;
-  if (p) { p.classList.add('out'); setTimeout(() => p.remove(), 160); }
+  if (p) {
+    p.classList.add('out');
+    setTimeout(() => {
+      p.remove();
+      if (!TB.palGroup && TB.wrap) TB.wrap.classList.remove('pal-open');
+    }, 160);
+  } else if (TB.wrap) TB.wrap.classList.remove('pal-open');
   for (const b of TB.groups.values()) b.classList.remove('open');
   refreshChip();
 }
@@ -242,6 +305,7 @@ function sigOf(list) {
 /** Re-renders the open palette when unlocks / costs / uniques change. */
 function refreshPalette() {
   if (!TB.palGroup) return;
+  refreshDemand();
   const list = toolList(TB.palGroup);
   const sig = sigOf(list);
   if (sig === TB.palSig) return;
@@ -252,6 +316,7 @@ function refreshPalette() {
   TB.pal.classList.add('instant');
   old.replaceWith(TB.pal);
   positionPalette();
+  refreshDemand();
 }
 /** Tool card. disp = optional {icon (string|Node), name} display overrides. */
 function toolCard(t, cls, disp) {
@@ -268,6 +333,8 @@ function toolCard(t, cls, disp) {
   else if (t.needsPolicy) card.appendChild(h('span', { class: 'tc-lock' }, '📜 Policy'));
   else if (t.built) card.appendChild(h('span', { class: 'tc-badge' }, '✔ Built'));
   if (t.def && t.def.unique && !t.built && !t.locked) card.appendChild(h('span', { class: 'tc-star', 'data-tip': 'Unique' }, '⭐'));
+  if (t.kind === 'zone' && t.zt && !t.locked) card.appendChild(h('span', { class: 'tc-dem', 'data-dem': String(t.zt) }));
+  if (TB.hl && t.key === TB.hl) card.classList.add('hl');
   return card;
 }
 function pickTool(t, card) {
@@ -293,7 +360,7 @@ function renderPalette(g, list) {
     const rest = list.filter((t) => !(t.kind === 'zone' && t.zt));
     for (const zt of [1, 2, 3]) {
       const z = VC.ZONES[zt];
-      body.appendChild(h('span', { class: 'pz-rowh', style: { color: z.color } }, h('b', null, z.icon), z.name));
+      body.appendChild(h('span', { class: 'pz-rowh', style: { color: z.color } }, h('b', null, z.icon), z.name, h('i', { class: 'pz-dem', 'data-dem': String(zt) })));
       for (const d of [1, 2, 3]) {
         const t = zones.find((x) => x.zt === zt && x.den === d);
         const bars = h('span', { class: 'zden d' + d }, h('i'), h('i'), h('i'));
@@ -418,6 +485,14 @@ VC.hud.register({
     TB.keyGroup.clear();
     closePalette();
     refreshToolHighlight();
+  },
+  update() {
+    // the active-tool chip steps aside while a drag is in progress (the cost label follows the cursor there)
+    const d = !!(VC.tools && VC.tools.drag);
+    if (d !== TB.dragging && TB.chip) {
+      TB.dragging = d;
+      TB.chip.classList.toggle('dragging', d);
+    }
   },
   onShow() {
     refreshToolHighlight();

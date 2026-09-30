@@ -5,6 +5,16 @@
  * EMITS domain events; the HUD displays them and audio plays the matching sound from the same bus event,
  * so nothing here emits 'toast' or 'sfx' for them.
  *
+ * INBOX HYGIENE: a rule that fires again while its earlier message (same key) is younger than DEDUPE_DAYS
+ * updates that entry in place (new text / day, moved to the top, `repeat` count) instead of adding a copy;
+ * it only turns unread again when the severity got worse. When a rule's condition clears, its unread
+ * message is marked read + `resolved` (e.g. "No power plant!" once a plant exists). Unread info / praise
+ * older than INFO_STALE_DAYS is marked read, so the unread badge only counts what still matters.
+ * FIRST-PLAY ADVICE: zoned lots are classified in the month snapshot (no road reach / no power / no water,
+ * with an example tile), producers whose footprint touches no conductor are "isolated" (VC.actions.gridLink):
+ * advisors then say "your new plant isn't connected" / "N zoned lots have no electricity" (with x, z and the
+ * power overlay) and the "zone more X" demand nags stay quiet while lots of that type are blocked anyway.
+ *
  * ADVISORS: on bus 'month' (after econ) a context snapshot of the city is gathered once and every
  * RULE is evaluated. During live play that work runs one frame after the month tick (the sim's month
  * frame already carries econ's bookkeeping); a synchronous fast-forward (VC.debug.run) evaluates at once. Triggered rules respect per-rule cooldowns; at most MAX_PER_MONTH new messages
@@ -39,6 +49,9 @@
  */
 const M = VC.M, C = VC.C;
 const INBOX_CAP = 60, NEWS_CAP = 40, MAX_PER_MONTH = 2;
+const DEDUPE_DAYS = 360, INFO_STALE_DAYS = 150;
+const NO_DEDUPE = { annual: 1, milestone: 1, unlock: 1, welcome: 1 };
+const ZKEY = { 1: 'R', 2: 'C', 3: 'I' };
 const SEV_RANK = { bad: 3, warn: 2, good: 1, info: 1 };
 const HL = () => VC.headlines || { POOL: ['{city} news'], CTX: {}, fill: (t) => t };
 const CARD_GAP_MS = 10000; // min real time between two advisor broadcasts (cards / praise toasts)
@@ -86,6 +99,9 @@ function gather(force) {
     // industry fire safety: job-weighted fire coverage (0..1) and share of jobs with little coverage
     indN: 0, indJobs: 0, indFire: 1, indUncov: 0,
     zoned: 0, zonedEmpty: 0, noAccess: 0, roads: 0, roadType: [0, 0, 0, 0], jam: 0, trafficAvg: 0,
+    // empty zoned lots that cannot grow (per zone type), and an example tile index per blocker
+    zonedNoPower: 0, zonedNoWater: 0, blocked: { R: 0, C: 0, I: 0 }, exAccess: -1, exPower: -1, exWater: -1,
+    isolated: [], // producers (power / water) whose footprint touches nothing that carries their output
     mapsOn: sawMaps || (S.ver && S.ver.maps > 0), flagsOn: sawFlags || (S.ver && S.ver.flags > 0),
     avg: {}, homeAvg: {},
   };
@@ -129,6 +145,10 @@ function gather(force) {
     c.dept[def.dept] = (c.dept[def.dept] || 0) + 1;
     if (PARKS[b.key]) c.parks++;
     if (def.group === 'landmarks') c.landmarks++;
+    if ((def.power > 0 || def.water > 0) && VC.actions && VC.actions.gridLink) {
+      const link = VC.actions.gridLink(b.x, b.z, b.w, b.d, b.id);
+      if (def.power > 0 ? !link.power : !link.water) c.isolated.push(b);
+    }
     if (def.power) {
       c.powerCap += def.power;
       if (RENEWABLE[b.key]) c.renewCap += def.power;
@@ -156,14 +176,20 @@ function gather(force) {
   }
   // tiles: zoning, road access, traffic
   const zone = S.zone, bld = S.bld, flags = S.flags, road = S.road, traffic = S.maps.traffic;
-  const ACC = VC.F.ACCESS;
+  const ACC = VC.F.ACCESS, POW = VC.F.POWER, WAT = VC.F.WATER;
+  const blocked = c.blocked;
+  const rawPow = [0, 0, 0, 0]; // lots without power / water by zone type (incl. inner lots that are only waiting)
   let tsum = 0;
   for (let i = 0; i < N; i++) {
-    if (zone[i]) {
+    const zc = zone[i];
+    if (zc) {
       c.zoned++;
       if (!bld[i]) {
         c.zonedEmpty++;
-        if (!(flags[i] & ACC)) c.noAccess++;
+        const f = flags[i];
+        if (!(f & ACC)) { c.noAccess++; blocked[ZKEY[zc >> 2]]++; if (c.exAccess < 0) c.exAccess = i; }
+        else if (!(f & POW)) { c.zonedNoPower++; rawPow[zc >> 2]++; if (c.exPower < 0) c.exPower = i; }
+        else if ((zc & 3) >= 2 && !(f & WAT)) { c.zonedNoWater++; rawPow[zc >> 2]++; if (c.exWater < 0) c.exWater = i; }
       }
     }
     const r = road[i];
@@ -176,6 +202,15 @@ function gather(force) {
     }
   }
   c.trafficAvg = c.roads ? tsum / c.roads / 255 : 0;
+  // power / water: only lots the network cannot reach count as blocked (inner lots get supplied as the
+  // street-side lots are built); VC.actions.zoneSupply classifies them (raw counts without it)
+  const zs = VC.actions && VC.actions.zoneSupply;
+  if (zs && c.flagsOn) {
+    const zp = zs(0), zw = zs(1);
+    c.zonedNoPower = zp.blocked; c.exPower = zp.ex;
+    c.zonedNoWater = zw.blocked; c.exWater = zw.ex;
+    for (let t = 1; t <= 3; t++) blocked[ZKEY[t]] += zp.byType[t] + zw.byType[t];
+  } else for (let t = 1; t <= 3; t++) blocked[ZKEY[t]] += rawPow[t];
   c.jamFrac = c.roads ? c.jam / c.roads : 0;
   const tax = S.tax;
   c.taxAvg = (tax.R[0] + tax.R[1] + tax.R[2] + tax.C[0] + tax.C[1] + tax.C[2] + tax.I[0] + tax.I[1] + tax.I[2]) / 9;
@@ -190,6 +225,8 @@ function gather(force) {
   c.fund = (d) => (VC.econ && VC.econ.getFunding ? VC.econ.getFunding(d) : 1);
   c.lowFund = (d) => (c.econ.lowFund && c.econ.lowFund[d]) || 0;
   c.powerKnown = st.powerDemand > 0 || st.powerSupply > 0;
+  c.tile = (i) => (i >= 0 ? { x: i % W, z: (i - (i % W)) / W } : null);
+  c.isoPower = c.isolated.filter((b) => (VC.BLD[b.key] || {}).power > 0);
   c.waterKnown = st.waterDemand > 0 || st.waterSupply > 0;
   ctxCache = c; ctxDay = S.time.day; ctxS = S;
   return c;
@@ -198,7 +235,8 @@ function gather(force) {
 /* ------------------------------------------------------------------ */
 /* Advisor rules                                                        */
 /* key, adv, sev ('info'|'warn'|'bad'|'good' or fn), cd (cooldown days), when(c), title, text (string |  */
-/* [variants] | fn(c)), panel (panel key the UI may offer), overlay (overlay key)                        */
+/* [variants] | fn(c)), panel (panel key the UI may offer), overlay (overlay key), at(c) -> {x, z} (a spot */
+/* the UI can fly to: the message carries x, z)                                                          */
 /* ------------------------------------------------------------------ */
 const RULES = [
   /* ---- Finance: Penny Pincher ---- */
@@ -329,7 +367,7 @@ const RULES = [
   { key: 'e_coal', adv: 'environment', sev: 'info', cd: 300, when: (c) => c.has('coal_plant') && c.pop >= 8000 && (c.unlocked('gas_plant') || c.unlocked('solar_farm')),
     title: 'Retire the coal plant?',
     text: 'That coal plant is a dragon made of soot. Wind, solar or gas would love to replace it.' },
-  { key: 'e_garbage', adv: 'environment', sev: 'warn', cd: 120, when: (c) => c.pop >= 1500 && !c.hasAny('landfill', 'incinerator', 'recycling'),
+  { key: 'e_garbage', adv: 'environment', sev: 'warn', cd: 120, when: (c) => (c.pop >= 400 || ((c.st.garbage || 0) >= 0.2 && c.pop >= 100)) && !c.hasAny('landfill', 'incinerator', 'recycling'),
     title: 'Garbage is piling up',
     text: ["Trash is piling up with nowhere to go. A Landfill isn't glamorous, but neither are rats.", 'The garbage has started forming its own neighbourhood association. Build a Landfill!'] },
   { key: 'e_garbage_cov', adv: 'environment', sev: 'warn', cd: 150, overlay: 'garbage',
@@ -374,6 +412,20 @@ const RULES = [
   { key: 'u_no_power', adv: 'utilities', sev: 'bad', cd: 60, overlay: 'power', when: (c) => c.powerCap === 0 && (c.growN > 0 || c.zoned >= 16),
     title: 'No power plant!',
     text: ["We have zones but zero power plants. Buildings won't grow in the dark! Build a Coal Plant or some Wind Turbines.", 'No power plant yet! Without electricity this city is just a very ambitious campsite.'] },
+  { key: 'u_isolated', adv: 'utilities', sev: (c) => (c.isoPower.length && c.isoPower.length === countPlants(c) ? 'bad' : 'warn'), cd: 45, overlay: 'power',
+    when: (c) => c.isolated.length > 0, at: (c) => ({ x: c.isolated[c.isolated.length - 1].x, z: c.isolated[c.isolated.length - 1].z }),
+    title: 'Not connected to the grid',
+    text: (c) => {
+      const b = c.isolated[c.isolated.length - 1], d = VC.BLD[b.key] || { name: 'plant' };
+      const more = c.isolated.length > 1 ? ` (${num(c.isolated.length - 1)} more like it)` : '';
+      return d.power > 0
+        ? `Your new ${d.name}${more} isn't connected to anything — its power can't leave the fence. Link it to your streets with a road or a power line. Zoning more won't help until the lights are on.`
+        : `Your new ${d.name}${more} isn't beside a road, so its water can't reach any pipes. Water flows under roads — connect it with one.`;
+    } },
+  { key: 'u_zones_dark', adv: 'utilities', sev: 'warn', cd: 60, overlay: 'power',
+    when: (c) => c.flagsOn && c.powerCap > 0 && c.zonedNoPower >= 8 && !(c.st.powerDemand > c.st.powerSupply), at: (c) => c.tile(c.exPower),
+    title: 'Zones without electricity',
+    text: (c) => `${num(c.zonedNoPower)} zoned lots have no electricity, so nothing grows there. Power flows along roads, power lines and buildings — not across empty zones. Connect those streets to your power plant.` },
   { key: 'u_power_short', adv: 'utilities', sev: 'bad', cd: 75, overlay: 'power', when: (c) => c.st.powerDemand > c.st.powerSupply && c.st.powerDemand > 0,
     title: 'Power shortage!',
     text: (c) => choose([
@@ -387,7 +439,7 @@ const RULES = [
   { key: 'u_no_water', adv: 'utilities', sev: 'warn', cd: 90, overlay: 'water', when: (c) => c.waterCap === 0 && (c.growN >= 20 || c.pop >= 300),
     title: 'No water supply',
     text: 'No water supply! A Water Pump by the shore or a Water Tower anywhere will get things flowing.' },
-  { key: 'u_water_short', adv: 'utilities', sev: 'bad', cd: 75, overlay: 'water', when: (c) => c.st.waterDemand > c.st.waterSupply && c.st.waterDemand > 0,
+  { key: 'u_water_short', adv: 'utilities', sev: 'bad', cd: 75, overlay: 'water', when: (c) => c.waterCap > 0 && c.st.waterDemand > c.st.waterSupply && c.st.waterDemand > 0,
     title: 'Water shortage!',
     text: (c) => `Water demand (${num(c.st.waterDemand)} kL) is more than we pump (${num(c.st.waterSupply)} kL). Taps are sputtering! ` +
       (c.waterDark ? waterDarkText(c) : 'Build another Water Pump by the shore or a Water Tower — and make sure it has power.') },
@@ -416,22 +468,22 @@ const RULES = [
   { key: 'p_start', adv: 'planning', sev: 'info', cd: 99999, when: (c) => c.zoned === 0 && c.pop === 0 && c.day < 90 + 150,
     title: 'Getting started',
     text: 'Zone Residential along your roads, add Commercial and Industrial for jobs, and give them power. Then watch it grow!' },
-  { key: 'p_demand_R', adv: 'planning', sev: 'info', cd: 120, when: (c) => c.S.demand.R > 0.6 && c.day > 150,
+  { key: 'p_demand_R', adv: 'planning', sev: 'info', cd: 120, when: (c) => c.S.demand.R > 0.6 && c.day > 150 && !(c.flagsOn && c.blocked.R >= 10),
     title: 'Citizens want more homes!',
     text: ['Residential demand is through the roof. Zone more homes near jobs and services.', 'People are lining up to move in! Zone more Residential.'] },
-  { key: 'p_demand_C', adv: 'planning', sev: 'info', cd: 120, when: (c) => c.S.demand.C > 0.6 && c.day > 150,
+  { key: 'p_demand_C', adv: 'planning', sev: 'info', cd: 120, when: (c) => c.S.demand.C > 0.6 && c.day > 150 && !(c.flagsOn && c.blocked.C >= 10),
     title: 'Shops wanted',
     text: ['Shoppers are restless — zone more Commercial, ideally near homes.', 'Commercial demand is high. Nobody likes driving across town for milk.'] },
-  { key: 'p_demand_I', adv: 'planning', sev: 'info', cd: 120, when: (c) => c.S.demand.I > 0.6 && c.day > 150,
+  { key: 'p_demand_I', adv: 'planning', sev: 'info', cd: 120, when: (c) => c.S.demand.I > 0.6 && c.day > 150 && !(c.flagsOn && c.blocked.I >= 10),
     title: 'Industry wants room',
     text: ['Industry is itching to expand. More Industrial zones — downwind, please.', 'Factories want land! Zone Industrial away from homes.'] },
   { key: 'p_demand_low', adv: 'planning', sev: 'info', cd: 240, panel: 'budget',
     when: (c) => c.pop > 500 && c.S.demand.R < -0.2 && c.S.demand.C < -0.2 && c.S.demand.I < -0.2,
     title: 'Weak demand',
     text: 'Demand is weak across the board. Lower taxes or better services will attract newcomers.' },
-  { key: 'p_access', adv: 'planning', sev: 'warn', cd: 120, when: (c) => c.flagsOn && c.noAccess >= 10,
+  { key: 'p_access', adv: 'planning', sev: 'warn', cd: 120, when: (c) => c.flagsOn && c.noAccess >= 10, at: (c) => c.tile(c.exAccess),
     title: 'Zones without roads',
-    text: (c) => `${num(c.noAccess)} zoned tiles are too far from a street to grow. Keep zones within ${C.ROAD_ACCESS} tiles of a road.` },
+    text: (c) => `${num(c.noAccess)} zoned tiles are too far from a street to grow. Keep zones within ${C.ROAD_ACCESS} tiles of a street or avenue — or dezone the far ones.` },
   { key: 'p_unemployment', adv: 'planning', sev: 'warn', cd: 120, when: (c) => c.pop >= 1000 && c.st.unemployment >= 0.12,
     title: 'Unemployment',
     text: (c) => `Unemployment is ${pct(c.st.unemployment)}%. Zone Commercial or Industrial so people have somewhere to work.` },
@@ -471,6 +523,12 @@ for (const d of VC.DEPARTMENTS) {
   });
 }
 
+/** Power plants in the snapshot. */
+function countPlants(c) {
+  let n = 0;
+  for (const k in c.count) if ((VC.BLD[k] || {}).power > 0) n += c.count[k];
+  return n;
+}
 /** "2 Water Towers and 1 Water Pump have no power: …" (what, why, what to do). */
 function waterDarkText(c) {
   const n = c.waterDark;
@@ -517,6 +575,11 @@ function ensureAdv(S) {
     for (const u of unlocksBetween(0, a.unlockPop)) a.announced[u.key] = 1;
   }
   if (!Array.isArray(a.burnLog)) a.burnLog = [];
+  if (!a.polOn || typeof a.polOn !== 'object') {
+    // last known on/off per policy (slider moves inside "on" are not news); seeded from the city's policies
+    a.polOn = {};
+    for (const k in S.policies || {}) if (policyOn(k)) a.polOn[k] = 1;
+  }
   if (!a.stats) a.stats = { spent: 0 };
   if (a.prevPop == null) a.prevPop = S.stats.pop || 0;
   if (a.prevTax == null) a.prevTax = null;
@@ -539,14 +602,39 @@ function post(advKey, msg) {
   if (!live(S)) return null;
   const a = ensureAdv(S);
   const def = VC.ADVISORS[advKey] || VC.ADVISORS.planning;
-  const m = Object.assign({
-    id: a.nextId++, advisor: advKey, name: def.name, role: def.role, icon: def.icon, color: def.color,
-    title: '', text: '', severity: 'info', day: S.time.day, read: false,
-  }, msg);
-  const silent = !!m.silent;
-  delete m.silent;
-  a.inbox.unshift(m);
-  if (a.inbox.length > INBOX_CAP) a.inbox.length = INBOX_CAP;
+  const silent = !!(msg && msg.silent);
+  const key = msg && msg.key;
+  const old = key && !NO_DEDUPE[key] && !/^disaster_/.test(key) ? a.inbox.find((e) => e.key === key && S.time.day - (e.day || 0) <= DEDUPE_DAYS) : null;
+  let m;
+  if (old) {
+    // the same nag again: refresh the existing entry (keeps its id) instead of piling up copies; it only
+    // turns unread again when it got worse, or when the problem had been resolved and came back
+    const sev = msg.severity || 'info';
+    const worse = SEV_RANK[sev] > SEV_RANK[old.severity];
+    const wasRead = !!old.read && old.resolved == null;
+    old.title = msg.title || old.title;
+    old.text = msg.text || old.text;
+    old.severity = sev;
+    old.day = S.time.day;
+    for (const k of ['panel', 'overlay', 'x', 'z']) {
+      if (msg[k] !== undefined) old[k] = msg[k];
+      else delete old[k];
+    }
+    old.repeat = (old.repeat || 1) + 1;
+    delete old.resolved;
+    old.read = msg.read ? true : wasRead && !worse;
+    a.inbox.splice(a.inbox.indexOf(old), 1);
+    a.inbox.unshift(old);
+    m = old;
+  } else {
+    m = Object.assign({
+      id: a.nextId++, advisor: advKey, name: def.name, role: def.role, icon: def.icon, color: def.color,
+      title: '', text: '', severity: 'info', day: S.time.day, read: false,
+    }, msg);
+    delete m.silent;
+    a.inbox.unshift(m);
+    if (a.inbox.length > INBOX_CAP) a.inbox.length = INBOX_CAP;
+  }
   if (silent) return m;
   if (m.severity === 'warn' || m.severity === 'bad') {
     // pop a HUD card; a repeated warning within 180 days only lands in the inbox
@@ -593,6 +681,13 @@ function monthlyAdvice(S, c) {
   const a = ensureAdv(S);
   const day = S.time.day;
   const hits = [];
+  // unread inbox entries by rule key (to resolve the ones whose problem went away)
+  const unread = new Map();
+  for (const m of a.inbox) {
+    if (m.read) continue;
+    if ((m.severity === 'info' || m.severity === 'good') && day - (m.day || 0) > INFO_STALE_DAYS) { m.read = true; continue; }
+    if (m.key && !unread.has(m.key)) unread.set(m.key, m);
+  }
   for (const r of RULES) {
     let ok = false;
     try { ok = !!r.when(c); } catch (err) { ok = false; }
@@ -600,6 +695,8 @@ function monthlyAdvice(S, c) {
     if (!ok) {
       // a resolved problem may be reported again a month after it comes back
       if (cd > day + 30 && r.cd < 9999) a.cooldown[r.key] = day + 30;
+      const m = unread.get(r.key);
+      if (m && r.sev !== 'good') { m.read = true; m.resolved = day; }
       continue;
     }
     if (cd > day) continue;
@@ -615,7 +712,13 @@ function monthlyAdvice(S, c) {
     if (h.sev === 'good' && (problems || rnd() < 0.5)) continue; // praise only in quiet months
     let text;
     try { text = textOf(h.r, c); } catch (err) { console.error('[advisors] rule ' + h.r.key, err); continue; }
-    post(h.r.adv, { key: h.r.key, title: h.r.title, text, severity: h.sev, panel: h.r.panel, overlay: h.r.overlay });
+    const msg = { key: h.r.key, title: h.r.title, text, severity: h.sev, panel: h.r.panel, overlay: h.r.overlay };
+    if (h.r.at) {
+      let at = null;
+      try { at = h.r.at(c); } catch (err) { at = null; }
+      if (at && Number.isFinite(at.x) && Number.isFinite(at.z)) { msg.x = at.x; msg.z = at.z; }
+    }
+    post(h.r.adv, msg);
     a.cooldown[h.r.key] = day + h.r.cd;
     used.add(h.r.adv);
     posted++;
@@ -875,7 +978,7 @@ const ACH = [
   { key: 'happy_city', name: 'Utopia', icon: '😊', desc: 'Happiness above 85% with 5,000+ citizens.', check: (c) => c.pop >= 5000 && c.happy >= 0.85 },
   { key: 'tax_haven', name: 'Tax Haven', icon: '🎈', desc: '3,000+ citizens with every tax at 5% or less.', noSandbox: true, check: (c) => c.pop >= 3000 && c.taxMax <= 5 },
   { key: 'tourist_trap', name: 'Tourist Trap', icon: '📸', desc: 'Earn $3,000 from tourism in one month.', check: (c) => (c.S.ledger.last.tourism || 0) >= 3000 },
-  { key: 'policy_wonk', name: 'Policy Wonk', icon: '📜', desc: 'Have 8 policies active at once.', check: (c) => Object.keys(c.S.policies).filter((k) => c.S.policies[k]).length >= 8 },
+  { key: 'policy_wonk', name: 'Policy Wonk', icon: '📜', desc: 'Have 8 policies active at once.', check: (c) => Object.keys(c.S.policies || {}).filter((k) => policyOn(k)).length >= 8 },
   { key: 'full_service', name: 'Full Service', icon: '🏥', desc: 'Police, fire, health, school, park, transit and waste all in service.',
     check: (c) => ['police', 'fire', 'health', 'education', 'parks', 'transit', 'waste'].every((d) => (c.dept[d] || 0) > 0) },
   { key: 'wonders', name: 'Wonder Builder', icon: '🏛️', desc: 'Build 5 different landmarks.', check: (c) => VC.CATALOG.filter((d) => d.group === 'landmarks' && c.has(d.key)).length >= 5 },
@@ -974,11 +1077,24 @@ function onBldAdd(b) {
   }
 }
 
-function onPolicy(key) {
+/** Policy active? Numeric levels (0..1) or old booleans; VC.econ.isPolicyOn when present. */
+function policyOn(key) {
+  const E = VC.econ;
+  if (E && E.isPolicyOn) { try { return !!E.isPolicyOn(key); } catch (err) { /* fall through */ } }
+  const S = S_(), v = S && S.policies ? S.policies[key] : 0;
+  return v === true || v > 0;
+}
+function onPolicy(ev) {
   const S = S_();
+  const key = ev && typeof ev === 'object' ? ev.key : ev;
   const def = VC.POLICY[key];
   if (!live(S) || !S.adv || !def || !A._live) return;
-  const on = !!S.policies[key];
+  const on = policyOn(key);
+  // sliders fire many changes: only an on <-> off transition is news (S.adv.polOn remembers the last state)
+  const pol = S.adv.polOn || (S.adv.polOn = {});
+  const was = !!pol[key];
+  pol[key] = on ? 1 : 0;
+  if (was === on) return;
   // venues that need a policy (the casino) close / reopen with it. The player just flipped the policy,
   // so the reopening is only an inbox note; the closure (lost income, easy to miss) gets a card.
   for (const d of VC.CATALOG) {

@@ -2,19 +2,30 @@
  * VOXELPOLIS — HUD core (VC.hud).
  *   TOP BAR     city name + milestone progress, date / weather / clock, speed controls, funds (animated,
  *               monthly net), population (+trend), approval face (neutral '—' until the first residents),
- *               RCI demand meter, power/water load pills, mute / fullscreen / pause-menu buttons. Rich live
- *               tooltips on every segment. Compacts (c1..c4) while overflowing; re-measured every 5 s so a
- *               transient overflow does not keep it compact.
+ *               RCI demand meter, power/water load pills, PROBLEMS CHIP, mute / fullscreen / pause-menu buttons.
+ *               Rich live tooltips on every segment. Compacts (c1..c4) while overflowing; re-measured every 5 s
+ *               so a transient overflow does not keep it compact.
+ *   PROBLEMS    "Why isn't it growing?": a chip that cycles the city's blockers (every 1.5 s, only while the HUD
+ *               shows; e.g. "⚡ 12 lots without power", "🚫 30 zoned tiles without road"). Counts: VC.sim.issues();
+ *               power / water lots via VC.actions.zoneSupply (only lots the network cannot reach — inner lots
+ *               that get power once the street side is built are not a problem).
+ *               Click: the camera flies to an example tile (found by a tile scan on click only; repeated clicks
+ *               visit the next example), a pulsing marker (VC.tools.ping) shows it and a popover explains the
+ *               reason (VC.sim.growReason of that tile) with the fix (overlay / palette / panel buttons).
+ *               Hidden when nothing blocks growth.
+ *   FULLSCREEN  standard + webkit-prefixed API (Safari 16), promise rejections caught; hidden if unsupported.
  *   DOCK        right-side manager buttons (VC.panels.list, or a built-in fallback list) + overlays,
  *               photo mode, settings, help. Active-window highlight, unread-advisor badge, auto-compacts.
- *   READOUT     bottom-right FPS (VC.settings.showFps) + hovered tile info.
+ *   READOUT     bottom-right FPS (VC.settings.showFps) + hovered tile info (+ why an empty zoned lot is not
+ *               growing, VC.sim.growReason).
  *   VISIBILITY  show()/hide() (game vs title screen), toggleUI(visible?) (H), photoMode(on?) (UI off +
  *               cinematic camera + screenshot button), floating money deltas over the funds display.
  *   HOTKEYS     fallback handling ONLY when VC.input has no KEYMAP (the foundation input); the real
  *               input module handles keys centrally and emits 'toolGroup'.
  * Sub-parts (hud_*.js) register with VC.hud.register({name, order, init(root), reset(S), update(dt, rdt),
  * onShow(), onHide()}). Public API: show, hide, toggleUI, photoMode, openSettings, openHelp, isVisible,
- * panel(key), openPalette(group), closePalette(), openOverlayPicker(anchor, side), startTutorial().
+ * panel(key), openPalette(group), closePalette(), openOverlayPicker(anchor, side), startTutorial(),
+ * findProblem(kind, nth) (example lot of a growth blocker, see PROBLEMS).
  */
 const h = VC.h, M = VC.M;
 
@@ -38,7 +49,7 @@ const PANEL_FALLBACK = [
   { key: 'population', name: 'Population & Demand', icon: '👥', hotkey: 'KeyU' },
   { key: 'services', name: 'City Services', icon: '🚓', hotkey: 'KeyV' },
   { key: 'utilities', name: 'Power & Water', icon: '⚡', hotkey: 'KeyY' },
-  { key: 'advisors', name: 'Advisors', icon: '🧑‍💼', hotkey: 'KeyN' },
+  { key: 'advisors', name: 'Advisors', icon: '💼', hotkey: 'KeyN' },
   { key: 'milestones', name: 'Milestones', icon: '🏆', hotkey: 'KeyJ' },
   { key: 'disasters', name: 'Disasters', icon: '🌪️', hotkey: 'KeyX' },
   { key: 'save', name: 'Save & Load', icon: '💾', hotkey: 'KeyK' },
@@ -53,7 +64,7 @@ const WEATHER_NAMES = { clear: 'Clear skies', cloudy: 'Cloudy', overcast: 'Overc
 const T = {}; // top bar element refs
 const D = { btns: new Map(), sig: '' }; // dock
 const cache = new Map(); // el -> last text (avoid redundant DOM writes)
-let tAcc = 0, slowAcc = 0, infoAcc = 0, fpsAcc = 0, layoutAcc = 0;
+let tAcc = 0, slowAcc = 0, infoAcc = 0, fpsAcc = 0, layoutAcc = 0, probAcc = 1.5;
 let popRing = [];
 let netCache = { t: -1, net: 0, fc: null };
 let moneyAcc = 0, moneyT = 0;
@@ -132,11 +143,19 @@ const hud = (VC.hud = {
       mouseOnCanvas = e.target === VC.gfx.canvas;
       if (hud.photo) pokePhotoHint();
     }, { passive: true });
-    document.addEventListener('fullscreenchange', () => setCls(T.fs, 'on', !!document.fullscreenElement));
+    const fsSync = () => setCls(T.fs, 'on', !!fsElement());
+    document.addEventListener('fullscreenchange', fsSync);
+    document.addEventListener('webkitfullscreenchange', fsSync);
   },
 
   reset(S) {
     popRing = [];
+    PB.list = [];
+    PB.sig = '';
+    PB.shown = -1;
+    PB.find = {};
+    probAcc = 1.5;
+    if (T.prob) setCls(T.prob, 'none', true);
     netCache = { t: -1, net: 0, fc: null };
     moneyAcc = 0;
     cache.clear();
@@ -164,6 +183,8 @@ const hud = (VC.hud = {
     if (!hud.visible) return;
     tAcc += rdt;
     if (tAcc >= 0.2) { tAcc = 0; safe(refreshTop, 'refreshTop'); }
+    probAcc += rdt;
+    if (probAcc >= 1.5) { probAcc = 0; safe(refreshProblems, 'problems'); }
     slowAcc += rdt;
     if (slowAcc >= 1) {
       slowAcc = 0;
@@ -275,6 +296,10 @@ const hud = (VC.hud = {
   closePalette() {},
   openOverlayPicker() {},
   startTutorial() {},
+  /** Example of a growth blocker: kind 'access'|'power'|'water'|'unpow'|'unwat'|'fire'|'aband' -> {x,z,w,d} | null. */
+  findProblem(kind, nth) {
+    return VC.state ? findExample(VC.state, kind, nth || 0) : null;
+  },
   /** Current dock / manager list: [{key, name, icon, hotkey}] */
   panelList() {
     const L = VC.panels && VC.panels.list;
@@ -339,18 +364,25 @@ function buildTop() {
   T.pw = utilPill('⚡', 'power');
   T.wt = utilPill('💧', 'water');
   T.utilSeg = h('div', { class: 'tb-util' }, T.pw.el, T.wt.el);
+  // problems ("why isn't it growing?")
+  T.probIcon = h('span', { class: 'tp-icon' });
+  T.probText = h('span', { class: 'tp-text' });
+  T.probSub = h('span', { class: 'tp-sub' });
+  T.prob = h('button', { class: 'tb-prob pe none', 'aria-label': 'City problems', 'data-tip': '1', onclick: () => { VC.bus.emit('sfx', { name: 'click' }); showProblem(); } }, T.probIcon, h('span', { class: 'tp-col' }, T.probText, T.probSub));
+  T.prob._tip = problemsTip;
   // system
   T.mute = h('button', { class: 'tb-sys-btn tb-mute', 'aria-label': 'Mute sound', 'data-tip': '1', onclick: toggleMute });
   T.mute._tip = () => (VC.settings && VC.settings.muted ? '<b>Sound is muted</b><br>Click to turn it back on' : '<b>Mute all sound</b><br>Volumes: ⚙️ Settings → Audio');
   refreshMute();
-  T.fs = h('button', { class: 'tb-sys-btn tb-fs', 'aria-label': 'Fullscreen', 'data-tip': '<b>Fullscreen</b> <kbd>F11</kbd>', html: FS_SVG, onclick: toggleFullscreen });
+  T.fs = h('button', { class: 'tb-sys-btn tb-fs', 'aria-label': 'Fullscreen', 'data-tip': '<b>Fullscreen</b> ' + (IS_MAC ? '<kbd>⌃⌘F</kbd>' : '<kbd>F11</kbd>'), html: FS_SVG, onclick: toggleFullscreen });
+  if (!fsSupported()) T.fs.style.display = 'none';
   T.menuBtn = h('button', { class: 'tb-sys-btn', 'aria-label': 'Game menu', 'data-tip': '<b>Game menu</b> <kbd>Esc</kbd>', html: MENU_SVG, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); VC.menu && VC.menu.pause && VC.menu.pause(); } });
 
   const sep = () => h('div', { class: 'tb-sep' });
   T.bar = h('div', { class: 'hud-top pe' },
     T.city, sep(), T.dateSeg, sp,
     h('div', { class: 'tb-flex' }),
-    T.moneySeg, sep(), T.popSeg, sep(), T.happySeg, sep(), T.rciSeg, sep(), T.utilSeg,
+    T.moneySeg, sep(), T.popSeg, sep(), T.happySeg, sep(), T.rciSeg, sep(), T.utilSeg, T.prob,
     h('div', { class: 'tb-flex' }),
     h('div', { class: 'tb-sys' }, T.mute, T.fs, T.menuBtn));
   hud.root.appendChild(h('div', { class: 'hud-topwrap' }, T.bar));
@@ -402,11 +434,22 @@ function refreshMute() {
   T.mute.setAttribute('aria-label', m ? 'Unmute sound' : 'Mute sound');
 }
 
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+function fsSupported() {
+  const el = document.documentElement;
+  return !!(el.requestFullscreen || el.webkitRequestFullscreen);
+}
+/** Fullscreen on / off: standard or webkit-prefixed API (Safari 16); a refused request is simply ignored. */
 function toggleFullscreen() {
   VC.bus.emit('sfx', { name: 'click' });
+  const d = document, el = d.documentElement;
   try {
-    if (document.fullscreenElement) document.exitFullscreen();
-    else document.documentElement.requestFullscreen();
+    const on = !!fsElement();
+    const fn = on ? d.exitFullscreen || d.webkitExitFullscreen : el.requestFullscreen || el.webkitRequestFullscreen;
+    if (!fn) return;
+    const p = fn.call(on ? d : el);
+    if (p && typeof p.catch === 'function') p.catch(() => { /* denied (e.g. not a user gesture): stay windowed */ });
   } catch (e) { /* not allowed */ }
 }
 
@@ -771,6 +814,162 @@ function layoutDock() {
 }
 
 /* ================================================================== */
+/* PROBLEMS CHIP — "why isn't it growing?"                             */
+/* ================================================================== */
+const PB = { list: [], sig: '', shown: -1, cycleAt: 0, find: {}, pop: null };
+/**
+ * Current blockers, worst first: [{k, sev, icon, text, why, find?, overlay?, group?, panel?}]. Counts come from
+ * VC.sim.issues() (one tile scan, run every 1.5 s while the HUD shows). Thresholds keep one stray tile quiet.
+ */
+function computeProblems(S) {
+  const out = [];
+  let is = null;
+  try { is = VC.sim && VC.sim.issues ? VC.sim.issues() : null; } catch (e) { is = null; }
+  if (!is) return out;
+  const st = S.stats || {}, n = VC.fmt.num, C = VC.C;
+  const plants = (st.powerSupply || 0) > 0 || hasProducer(S, 'power');
+  // lots the network cannot reach at all (not the inner lots that get power once the street side is built)
+  const zs = VC.actions && VC.actions.zoneSupply;
+  const noPow = zs ? zs(0).blocked : is.zonedNoPower, noWat = zs ? zs(1).blocked : is.zonedNoWater;
+  if (is.powerShortage) out.push({ k: 'pshort', sev: 'bad', icon: '⚡', text: 'Power shortage', why: `The city needs ${n(st.powerDemand || 0)} MW but makes ${n(st.powerSupply || 0)} MW — the far end of town blacks out. Build another power plant.`, overlay: 'power', group: 'power', panel: 'utilities' });
+  if (is.waterShortage) out.push({ k: 'wshort', sev: 'bad', icon: '💧', text: 'Water shortage', why: `Demand ${n(st.waterDemand || 0)} kL is more than the ${n(st.waterSupply || 0)} kL we pump. Add a pump or tower — and make sure it has power.`, overlay: 'water', group: 'water', panel: 'utilities' });
+  if (is.fires > 0) out.push({ k: 'fire', sev: 'bad', icon: '🔥', text: `${n(is.fires)} building${is.fires === 1 ? '' : 's'} on fire`, why: 'Fire stations nearby put fires out; without cover they spread.', find: 'fire', overlay: 'fire', group: 'safety' });
+  if (is.zonedNoAccess >= 3) out.push({ k: 'access', sev: 'warn', icon: '🚫', text: `${n(is.zonedNoAccess)} zoned tiles without road`, why: `Zones only grow within ${C.ROAD_ACCESS} tiles of a street or avenue (highways give no access). Build a street closer, or dezone the far tiles.`, find: 'access', group: 'roads' });
+  if (!plants && (noPow >= 1 || is.unpowered >= 1)) {
+    out.push({ k: 'power', sev: 'bad', icon: '⚡', text: 'No power plant', why: `${noPow ? n(noPow) + ' zoned lots are' : 'Your buildings are'} waiting for electricity. Build a power plant touching one of your roads.`, find: noPow ? 'power' : 'unpow', group: 'power' });
+  } else if (noPow >= 3) {
+    out.push({ k: 'power', sev: 'warn', icon: '⚡', text: `${n(noPow)} lots without power`, why: 'Power flows through roads, power lines and buildings — not through empty zones. Connect this street to a street or line that reaches your power plant.', find: 'power', overlay: 'power', group: 'power' });
+  }
+  if (noWat >= 3) out.push({ k: 'water', sev: 'warn', icon: '💧', text: `${n(noWat)} lots need water`, why: 'Medium and high density zones need running water. Water flows along roads from pumps and towers, which need power to run.', find: 'water', overlay: 'water', group: 'water' });
+  if (is.unpowered >= 1 && !is.powerShortage && plants) out.push({ k: 'unpow', sev: 'warn', icon: '🔌', text: `${n(is.unpowered)} building${is.unpowered === 1 ? '' : 's'} unpowered`, why: 'These buildings are cut off from the grid. Link them with a road or power line.', find: 'unpow', overlay: 'power', group: 'power' });
+  if (is.unwatered >= 5 && !is.waterShortage) out.push({ k: 'unwat', sev: 'info', icon: '🚱', text: `${n(is.unwatered)} buildings dry`, why: 'No running water here: extend the roads from a pump or tower, or build one nearby.', find: 'unwat', overlay: 'water', group: 'water' });
+  if (is.abandoned >= 3) out.push({ k: 'aband', sev: 'warn', icon: '🏚️', text: `${n(is.abandoned)} abandoned`, why: 'Unhappy occupants left. Check power, water, pollution, crime and taxes around them — or bulldoze and let new ones grow.', find: 'aband', overlay: 'happiness' });
+  if ((is.garbage || 0) >= 0.2 && (st.pop || 0) > 0) out.push({ k: 'garb', sev: 'warn', icon: '🗑️', text: 'Garbage piling up', why: 'No garbage pickup reaches these homes. A Landfill (♻️ 9) covers a wide area.', overlay: 'garbage', group: 'waste' });
+  if (is.jammedRoads >= 25) out.push({ k: 'jam', sev: 'info', icon: '🚗', text: `${n(is.jammedRoads)} jammed road tiles`, why: 'Traffic is backing up. Avenues, more connections and transit help.', overlay: 'traffic', group: 'roads' });
+  const rank = { bad: 0, warn: 1, info: 2 };
+  out.sort((a, b) => rank[a.sev] - rank[b.sev]);
+  return out;
+}
+function hasProducer(S, what) {
+  for (const b of S.buildings.values()) {
+    const d = VC.BLD[b.key];
+    if (d && d[what] > 0) return true;
+  }
+  return false;
+}
+function refreshProblems() {
+  const S = VC.state;
+  if (!S || !T.prob) return;
+  if (isDemo(S) || menuActive()) { setCls(T.prob, 'none', true); return; }
+  PB.list = computeProblems(S);
+  const sig = PB.list.map((p) => p.k + p.text).join('|');
+  if (!PB.list.length) {
+    if (PB.sig) { PB.sig = ''; PB.shown = -1; setCls(T.prob, 'none', true); layoutTop(); }
+    return;
+  }
+  const now = performance.now();
+  // cycle through the problems (one every ~4.5 s); a new list starts with the worst one
+  let idx = PB.shown;
+  if (sig !== PB.sig) {
+    const keep = PB.shown >= 0 && PB.list.findIndex((p) => p.k === PB.cur) >= 0 ? PB.list.findIndex((p) => p.k === PB.cur) : 0;
+    idx = keep;
+    PB.cycleAt = now + 4500;
+  } else if (now >= PB.cycleAt && PB.list.length > 1) {
+    idx = (idx + 1) % PB.list.length;
+    PB.cycleAt = now + 4500;
+  }
+  const wasHidden = T.prob.classList.contains('none');
+  PB.sig = sig;
+  PB.shown = idx;
+  const p = PB.list[idx];
+  PB.cur = p.k;
+  setText(T.probIcon, p.icon);
+  setText(T.probText, p.text);
+  setText(T.probSub, PB.list.length > 1 ? `Why no growth? · ${idx + 1}/${PB.list.length}` : 'Why no growth?');
+  for (const s of ['bad', 'warn', 'info']) setCls(T.prob, s, p.sev === s);
+  if (wasHidden) { setCls(T.prob, 'none', false); VC.ui.flash && VC.ui.flash(T.prob, 'pop'); layoutTop(); }
+}
+function problemsTip() {
+  if (!PB.list.length) return '';
+  let s = '<div class="tt-head"><span class="tt-icon">🔍</span>Why isn\'t it growing?</div><div class="tt-grid">';
+  for (const p of PB.list.slice(0, 6)) s += `<span>${p.icon} ${escapeHtml(p.text)}</span><b class="${p.sev === 'bad' ? 'bad' : p.sev === 'warn' ? 'warn' : ''}">${p.sev === 'bad' ? 'urgent' : p.sev === 'warn' ? 'fix' : 'tip'}</b>`;
+  return s + '</div><div class="tt-foot">Click to fly to an example and see the fix</div>';
+}
+/** Example of a problem: {x, z, w, d, i?} — the n-th match in scan order (wraps), or null. */
+function findExample(S, kind, nth) {
+  const F = VC.F;
+  if (kind === 'fire' || kind === 'unpow' || kind === 'unwat' || kind === 'aband') {
+    const hits = [];
+    for (const b of S.buildings.values()) {
+      if (b.key === 'rubble' || b.built < 1) continue;
+      const ok = kind === 'fire' ? b.fire > 0 : kind === 'aband' ? b.abandoned : b.abandoned ? false : kind === 'unpow' ? b.powered === false : b.watered === false;
+      if (ok) { hits.push(b); if (hits.length > nth) break; }
+    }
+    if (!hits.length) return null;
+    const b = hits[nth % hits.length];
+    return { x: b.x, z: b.z, w: b.w, d: b.d };
+  }
+  if ((kind === 'power' || kind === 'water') && VC.actions && VC.actions.zoneSupply) {
+    // only lots the network cannot reach (examples spread over the blocked area)
+    const ex = VC.actions.zoneSupply(kind === 'water' ? 1 : 0).examples;
+    if (!ex.length) return null;
+    const i = ex[nth % ex.length];
+    return { x: i % S.W, z: (i / S.W) | 0, w: 1, d: 1, i, wrapped: nth + 1 >= ex.length };
+  }
+  const zone = S.zone, bld = S.bld, fl = S.flags, N = S.N || S.W * S.H;
+  let first = -1, k = 0;
+  for (let i = 0; i < N; i++) {
+    const code = zone[i];
+    if (!code || bld[i]) continue;
+    const f = fl[i];
+    let hit = false;
+    if (kind === 'access') hit = !(f & F.ACCESS);
+    else if (kind === 'power') hit = (f & F.ACCESS) && !(f & F.POWER);
+    else if (kind === 'water') hit = (f & F.ACCESS) && (f & F.POWER) && (code & 3) >= 2 && !(f & F.WATER);
+    if (!hit) continue;
+    if (first < 0) first = i;
+    // examples are spread out: skip tiles next to the previous example
+    if (k++ === nth * 7) return { x: i % S.W, z: (i / S.W) | 0, w: 1, d: 1, i };
+  }
+  return first >= 0 ? { x: first % S.W, z: (first / S.W) | 0, w: 1, d: 1, i: first, wrapped: true } : null;
+}
+/** Chip click: fly to an example, mark it, explain it. */
+function showProblem() {
+  const S = VC.state;
+  if (!S || !PB.list.length) return;
+  const p = PB.list[Math.max(0, PB.shown)] || PB.list[0];
+  const nth = PB.find[p.k] || 0;
+  let ex = p.find ? findExample(S, p.find, nth) : null;
+  if (ex && ex.wrapped) PB.find[p.k] = 1;
+  else PB.find[p.k] = nth + 1;
+  if (ex && VC.camera && VC.camera.focus) {
+    VC.camera.focus(ex.x + ex.w / 2, ex.z + ex.d / 2, 30);
+    if (VC.tools && VC.tools.ping) VC.tools.ping(ex.x, ex.z, ex.w, ex.d);
+  }
+  let why = '';
+  if (ex && ex.i != null && VC.sim && VC.sim.growReason) {
+    try { why = VC.sim.growReason(ex.x, ex.z); } catch (e) { why = ''; }
+  }
+  const body = h('div', { class: 'tp-pop' });
+  body.appendChild(h('div', { class: 'tp-pop-head ' + p.sev }, h('span', { class: 'tp-pop-icon' }, p.icon), h('b', null, p.text)));
+  if (why) body.appendChild(h('div', { class: 'tp-pop-why' }, h('span', null, 'This lot: '), h('b', null, why)));
+  body.appendChild(h('div', { class: 'tp-pop-text' }, p.why));
+  const acts = h('div', { class: 'tp-pop-acts' });
+  const ov = p.overlay && VC.OVERLAYS.find((o) => o.key === p.overlay);
+  if (ov) acts.appendChild(VC.ui.button(ov.name, () => { VC.gfx.setOverlay(p.overlay); }, { icon: ov.icon, cls: 'small' }));
+  const g = p.group && VC.TOOL_GROUPS.find((x) => x.key === p.group);
+  if (g) acts.appendChild(VC.ui.button(g.name, () => { closeProbPop(); hud.openPalette(g.key); }, { icon: g.icon, cls: 'small primary' }));
+  if (p.panel) acts.appendChild(VC.ui.button('Details', () => { closeProbPop(); hud.openPanel(p.panel); }, { cls: 'small' }));
+  if (ex && p.find) acts.appendChild(VC.ui.button('Next', () => showProblem(), { icon: '📍', cls: 'small ghost', tip: 'Fly to another example' }));
+  body.appendChild(acts);
+  closeProbPop();
+  PB.pop = VC.ui.popover ? VC.ui.popover(T.prob, body, { id: 'problems', side: 'bottom', cls: 'tp-popover', onClose: () => { PB.pop = null; } }) : null;
+}
+function closeProbPop() {
+  if (PB.pop && PB.pop.close) { const p = PB.pop; PB.pop = null; p.close(); }
+}
+
+/* ================================================================== */
 /* READOUT (FPS + tile info)                                           */
 /* ================================================================== */
 function buildReadout() {
@@ -808,7 +1007,7 @@ function refreshTileInfo() {
     return;
   }
   const i = t.z * S.W + t.x;
-  const key = i + ':' + S.ver.terrain + ':' + S.ver.bld + ':' + S.ver.maps;
+  const key = i + ':' + S.ver.terrain + ':' + S.ver.bld + ':' + S.ver.maps + ':' + S.ver.flags;
   if (key === lastTile) return;
   lastTile = key;
   const parts = [`<span class="ro-xy">${t.x}, ${t.z}</span>`];
@@ -823,6 +1022,12 @@ function refreshTileInfo() {
   if (S.zone[i]) {
     const z = VC.ZONES[VC.ztype(S.zone[i])];
     if (z) parts.push(`<span style="color:${z.color}">${z.key}${VC.zden(S.zone[i])}</span>`);
+    if (!S.bld[i] && VC.sim && VC.sim.growReason) {
+      // empty lot: why nothing grows here (or that it is ready)
+      let why = '';
+      try { why = VC.sim.growReason(t.x, t.z); } catch (e) { why = ''; }
+      if (why) parts.push(`<span class="ro-why ${/^Ready/.test(why) ? 'good' : 'bad'}">${/^Ready/.test(why) ? '✔' : '⚠'} ${escapeHtml(why)}</span>`);
+    }
   }
   parts.push('⛰ ' + S.height[i]);
   const lv = S.maps && S.maps.landValue;
@@ -882,7 +1087,9 @@ const isTyping = (e) => {
 /** Capture phase: Esc/H leave hidden-UI / photo mode before anything else sees the key. */
 function onKeyCapture(e) {
   if (isTyping(e) || !hud.uiHidden) return;
-  if (e.code === 'Escape' || (e.code === 'KeyH' && !e.ctrlKey && !e.metaKey)) {
+  // H by position or by label (AZERTY / QWERTZ keep H in place, but other layouts may not)
+  const hKey = e.code === 'KeyH' || (e.key && e.key.length === 1 && e.key.toLowerCase() === 'h');
+  if (e.code === 'Escape' || (hKey && !e.ctrlKey && !e.metaKey)) {
     if (hud.photo) hud.photoMode(false);
     else hud.toggleUI(true);
     e.stopImmediatePropagation();

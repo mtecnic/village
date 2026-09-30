@@ -117,7 +117,7 @@
 .hud-top.c1 .tb-logo, .hud-top.c1 .tb-sys-btn.tb-fs { display: none; }
 .hud-top.c1 .tb-seg { padding: 0 6px; }
 .hud-top.c1 .tb-date, .hud-top.c1 .tb-money, .hud-top.c1 .tb-pop { min-width: 0; }
-.hud-top.c1 .tb-name { max-width: 116px; }
+.hud-top.c1 .tb-name { max-width: 136px; }
 .hud-top.c2 .tb-sep, .hud-top.c2 .tb-msbar, .hud-top.c2 .tb-hbar, .hud-top.c2 .up-bar, .hud-top.c2 .tb-date .tb-sub { display: none; }
 .hud-top.c2 { gap: 3px; }
 .hud-top.c2 .tb-main { font-size: 14px; }
@@ -159,6 +159,9 @@
 
 /* ================================================================== toolbar + palettes */
 .hud-toolwrap { position: absolute; left: 0; right: 0; bottom: 36px; display: flex; justify-content: center; pointer-events: none; z-index: 5; }
+/* an open palette sits above the windows layer (20) but below toasts (30) and modals: palettes opened over the
+ * Budget / Policies window (tutorial "Show me", hotkeys) stay clickable */
+.hud-toolwrap.pal-open { z-index: 22; }
 .hud.no-ticker .hud-toolwrap { bottom: 10px; }
 .tb-anchor { position: relative; scale: var(--ui-scale); transform-origin: 50% 100%; }
 .hud-toolbar { display: flex; align-items: center; gap: 2px; padding: 6px; border-radius: 19px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); box-shadow: var(--shadow), var(--hi); }
@@ -238,6 +241,7 @@
 /* active tool chip */
 .tool-chip { position: absolute; bottom: calc(100% + 12px); left: 50%; translate: -50% 0; display: flex; align-items: center; gap: 10px; padding: 7px 7px 7px 12px; border-radius: 15px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid rgba(90, 209, 255, 0.5); box-shadow: var(--shadow), 0 0 18px rgba(90, 209, 255, 0.16); white-space: nowrap; opacity: 0; pointer-events: none !important; transform: translateY(10px) scale(0.96); transition: opacity 0.2s, transform 0.28s var(--ease-out); }
 .tool-chip.show { opacity: 1; pointer-events: auto !important; transform: none; }
+.tool-chip.show.dragging { opacity: 0; pointer-events: none !important; transform: translateY(8px) scale(0.97); }
 .tool-chip.danger { border-color: rgba(255, 90, 106, 0.6); box-shadow: var(--shadow), 0 0 18px rgba(255, 90, 106, 0.2); }
 .tch-icon { font-size: 23px; line-height: 1; }
 .tch-text { display: flex; flex-direction: column; line-height: 1.3; }
@@ -254,6 +258,9 @@
 .ro-tile.show { opacity: 1; transform: none; }
 .ro-tile i { width: 1px; height: 11px; background: var(--line2); }
 .ro-xy { font-family: var(--mono); color: var(--text3); }
+.ro-why { padding: 1px 7px; border-radius: 7px; font-weight: 750; font-size: 11px; }
+.ro-why.bad { color: #ffd6a0; background: rgba(255, 200, 61, 0.14); box-shadow: inset 0 0 0 1px rgba(255, 200, 61, 0.35); }
+.ro-why.good { color: var(--good); background: rgba(61, 220, 132, 0.12); box-shadow: inset 0 0 0 1px rgba(61, 220, 132, 0.3); }
 .ro-fps.warn { color: var(--warn); }
 .ro-fps.bad { color: var(--bad); }
 
@@ -310,10 +317,11 @@
 .tk-sep { font-style: normal; color: var(--accent); opacity: 0.55; margin: 0 18px 0 16px; font-size: 8px; }
 
 /* ================================================================== left column: tutorial + notes */
-/* tutorial card and advisor / disaster cards float above the windows layer (z 20) so a panel opened by
- * the tutorial's own "Show me" (or any window) never hides them; panels.js placement avoids the tutorial card */
-.hud-left { position: absolute; left: 10px; top: 70px; width: 322px; display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 25; }
-.hud-right { position: absolute; right: 66px; top: 70px; width: 322px; scale: var(--ui-scale); transform-origin: 100% 0; pointer-events: none; transition: opacity 0.4s, translate 0.45s var(--ease-out); z-index: 26; }
+/* tutorial card and advisor / disaster cards sit just BELOW the windows layer (z 20): a window the player opens
+ * (or drags) over them keeps its title bar, tabs and close button usable; panels.js placement avoids the
+ * tutorial card, and advisor cards time out on their own */
+.hud-left { position: absolute; left: 10px; top: 70px; width: 322px; display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 18; }
+.hud-right { position: absolute; right: 66px; top: 70px; width: 322px; scale: var(--ui-scale); transform-origin: 100% 0; pointer-events: none; transition: opacity 0.4s, translate 0.45s var(--ease-out); z-index: 19; }
 .hl-notes { display: flex; flex-direction: column; gap: 8px; }
 .adv-card { position: relative; display: flex; gap: 11px; padding: 11px 12px 12px 11px; border-radius: 16px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); border-left: 3px solid var(--ac); box-shadow: var(--shadow), var(--hi); pointer-events: auto; animation: noteIn 0.5s var(--ease); overflow: hidden; }
 .adv-card.out { animation: noteOut 0.26s ease-in forwards; pointer-events: none; }
@@ -443,3 +451,61 @@
 .tips { display: grid; gap: 6px; }
 .tip-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 11px; border-radius: 11px; background: rgba(255, 255, 255, 0.035); border: 1px solid var(--line); font-size: 12.8px; color: var(--text2); line-height: 1.45; }
 .tip-bulb { flex: none; }
+
+/* ================================================================== round 3: onboarding & feedback */
+/* problems chip ("why isn't it growing?") — top bar, beside the utility pills */
+.tb-prob { position: relative; display: flex; align-items: center; gap: 7px; height: 36px; padding: 0 10px 0 7px; margin-left: 2px; border-radius: 11px; flex: none; max-width: 230px; cursor: pointer; color: var(--text); font: inherit; text-align: left; border: 1px solid rgba(255, 200, 61, 0.5); background: linear-gradient(180deg, rgba(255, 200, 61, 0.2), rgba(255, 200, 61, 0.07)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 14px rgba(255, 200, 61, 0.12); transition: background 0.15s, border-color 0.2s, transform 0.12s var(--ease), box-shadow 0.2s; }
+.tb-prob:hover { transform: translateY(-1px); background: linear-gradient(180deg, rgba(255, 200, 61, 0.3), rgba(255, 200, 61, 0.1)); }
+.tb-prob:active { transform: translateY(1px); }
+.tb-prob.none { display: none; }
+.tb-prob.bad { border-color: rgba(255, 90, 106, 0.65); background: linear-gradient(180deg, rgba(255, 90, 106, 0.26), rgba(255, 90, 106, 0.09)); animation: pulseBad 1.6s ease-in-out infinite; }
+.tb-prob.info { border-color: rgba(90, 209, 255, 0.45); background: linear-gradient(180deg, rgba(90, 209, 255, 0.16), rgba(90, 209, 255, 0.05)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08); }
+.tb-prob.pop { animation: probPop 0.5s var(--ease); }
+@keyframes probPop { from { transform: scale(0.6); opacity: 0; } }
+.tp-icon { font-size: 17px; line-height: 1; filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45)); }
+.tp-col { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+.tp-text { font-weight: 800; font-size: 12.5px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tp-sub { font-size: 10px; font-weight: 750; color: #ffd98a; letter-spacing: 0.02em; white-space: nowrap; }
+.tb-prob.bad .tp-sub { color: #ffb3bb; }
+.tb-prob.info .tp-sub { color: #a8e6ff; }
+.hud-top.c2 .tp-sub { display: none; }
+.hud-top.c3 .tb-prob { max-width: 150px; }
+.hud-top.c4 .tp-col { display: none; }
+.tp-popover { width: 300px; }
+.tp-pop { display: flex; flex-direction: column; gap: 8px; }
+.tp-pop-head { display: flex; align-items: center; gap: 9px; font-size: 14px; }
+.tp-pop-head b { color: #fff; }
+.tp-pop-icon { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: 10px; font-size: 18px; background: rgba(255, 200, 61, 0.18); box-shadow: inset 0 0 0 1px rgba(255, 200, 61, 0.4); }
+.tp-pop-head.bad .tp-pop-icon { background: rgba(255, 90, 106, 0.2); box-shadow: inset 0 0 0 1px rgba(255, 90, 106, 0.5); }
+.tp-pop-head.info .tp-pop-icon { background: rgba(90, 209, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(90, 209, 255, 0.4); }
+.tp-pop-why { font-size: 12px; padding: 5px 9px; border-radius: 9px; background: rgba(0, 0, 0, 0.28); border: 1px solid var(--line); color: var(--text2); }
+.tp-pop-why b { color: #ffd98a; }
+.tp-pop-text { font-size: 12.5px; line-height: 1.45; color: var(--text2); }
+.tp-pop-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* tool cursor label: the "it connects" line (tools.js; base style in game/tools.css) */
+#ui .tool-cursor .tc-good { color: #7dffa8; font-weight: 700; }
+#ui .tool-cursor .tc-good::before { content: '⚡ '; font-size: 0.9em; }
+
+/* zone palette demand arrows (hud_tools.js) */
+.tc-dem { position: absolute; top: 4px; right: 5px; min-width: 18px; padding: 0 4px; border-radius: 6px; font: 900 10px/15px var(--font); text-align: center; letter-spacing: -0.06em; }
+.tc-dem.up2, .pz-dem.up2 { color: #062a16; background: var(--good); box-shadow: 0 0 10px rgba(61, 220, 132, 0.55); }
+.tc-dem.up, .pz-dem.up { color: var(--good); background: rgba(61, 220, 132, 0.16); box-shadow: inset 0 0 0 1px rgba(61, 220, 132, 0.4); }
+.tc-dem.flat, .pz-dem.flat { color: var(--text3); background: rgba(255, 255, 255, 0.07); }
+.tc-dem.down, .pz-dem.down { color: #ff9aa4; background: rgba(255, 90, 106, 0.14); box-shadow: inset 0 0 0 1px rgba(255, 90, 106, 0.35); }
+.pz-dem { font-style: normal; font-size: 10px; font-weight: 900; padding: 1px 5px; border-radius: 6px; letter-spacing: -0.06em; margin-left: 1px; }
+.tcard.blocked .tc-dem { display: none; }
+/* a card the tutorial points at */
+.tcard.hl { border-color: rgba(255, 209, 102, 0.9); animation: tutPulse 1.5s ease-out infinite; }
+
+/* tutorial: live reason line, clickable checklist rows */
+.tut-why { margin-top: 8px; padding: 7px 9px; border-radius: 10px; font-size: 12px; line-height: 1.4; color: #ffe2a6; background: rgba(255, 200, 61, 0.1); border: 1px solid rgba(255, 200, 61, 0.35); display: grid; grid-template-columns: auto 1fr; gap: 5px 7px; align-items: start; animation: popIn 0.3s var(--ease-out); }
+.tut-why.good { color: #b5f5cf; background: rgba(61, 220, 132, 0.1); border-color: rgba(61, 220, 132, 0.35); }
+.tut-why .btn { grid-column: 2; justify-self: end; }
+.tut-why-text { min-width: 0; }
+.tut-why kbd { height: 16px; min-width: 16px; font-size: 9.5px; padding: 0 4px; }
+.tut-li.go { cursor: pointer; border-radius: 7px; margin: 0 -5px; padding: 2px 5px; transition: background 0.12s; }
+.tut-li.go:hover { background: rgba(255, 255, 255, 0.07); color: var(--text); }
+.tut-li .tut-key { margin-left: auto; }
+.tut-li.done .tut-key { opacity: 0.4; }
+.tut-li .tut-key kbd, .tut-li .tut-key .kbd { height: 16px; min-width: 16px; font-size: 9.5px; padding: 0 4px; }

@@ -17,9 +17,15 @@
  *   exactly once per rendered frame. Buildings also get a ghost via VC.bldgfx.setGhost({key, x, z, rot, valid})
  *   (x/z = footprint min corner, as VC.world.addBuilding; called only on change, null clears), a voxel service
  *   coverage ring (plus faint rings of existing buildings of the same service) and an entrance arrow.
- * CURSOR LABEL: div.tool-cursor in #ui (style: game/tools.css) with cost, size / count and a red reason
- *   ("Not enough money · $X short" included). A commit refused for money pulses the label: the HUD's 'noMoney'
- *   toast (emitted by VC.money.spend) is the only notification, tools never toast money failures themselves.
+ * CURSOR LABEL: div.tool-cursor in #ui (style: game/tools.css + .tc-good in ui/hud.css) with cost, size / count
+ *   and a red reason ("Not enough money · $X short" included). A commit refused for money pulses the label: the
+ *   HUD's 'noMoney' toast (emitted by VC.money.spend) is the only notification, tools never toast money failures
+ *   themselves. Producers (power / water) say whether they connect ("Connected to grid ✔" or how to link them,
+ *   from VC.actions.canPlace). Zoning previews the road reach: new tiles farther than C.ROAD_ACCESS from a
+ *   street / avenue are tinted red and hatched, and the label counts them. The label flips above the cursor
+ *   instead of covering the toolbar / active-tool chip. Select tool: resting on an empty zoned lot shows
+ *   VC.sim.growReason ("No power", "No road access…", "Ready — waiting for developers").
+ *   "Nothing to do here" results (QUIET: already built / zoned…) preview in neutral grey, not failure red.
  * FEEDBACK: other meaningful failures get ONE error sound + ONE (rate-limited) VC.ui.toast, shown directly
  *   (a bus 'toast' would add the audio module's notify sound on top of the error sound).
  * CONFIRMS: demolishing expensive / unique buildings asks first; the confirm re-checks, by id, that the very
@@ -71,6 +77,12 @@ const COL = {
   ghostBad: [1.1, 0.08, 0.05, 0.5],
   arrowOk: [1.0, 2.4, 3.0, 1],
   arrowBad: [2.4, 0.7, 0.6, 1],
+  // zone tiles beyond C.ROAD_ACCESS of a street: red-dim fill + a diagonal hatch stroke per tile
+  far: [1.25, 0.2, 0.12, 0.44],
+  farLine: [2.6, 0.55, 0.4, 0.9],
+  // "nothing to do here" (already built / zoned): neutral grey, never the red of a real failure
+  quiet: [0.8, 0.85, 0.95, 0.14],
+  quietLine: [1.3, 1.35, 1.5, 0.55],
 };
 const SVC_COL = {
   police: [0.4, 0.75, 2.2], fire: [2.2, 0.55, 0.3], health: [2.2, 0.7, 1.3], edu: [1.3, 0.8, 2.2],
@@ -124,6 +136,15 @@ function groupKeys(group) {
   for (const [k, t] of registry()) if (t.group === group) out.push(k);
   return out;
 }
+/** Policy active? (numeric levels; VC.actions.policyOn / VC.econ.isPolicyOn when present). */
+function policyOn(key) {
+  try {
+    if (VC.actions && VC.actions.policyOn) return VC.actions.policyOn(key);
+    if (VC.econ && VC.econ.isPolicyOn) return !!VC.econ.isPolicyOn(key);
+  } catch (e) { /* fall through */ }
+  const S = VC.state, v = S && S.policies ? S.policies[key] : 0;
+  return v === true || v > 0;
+}
 /** Building counts per catalog key (cached per building version; used for unique landmarks). */
 const countCache = { ver: -1, map: new Map() };
 function builtCount(key) {
@@ -153,7 +174,7 @@ function describe(t) {
   if (t.def) {
     o.def = t.def;
     if (t.def.unique) { o.unique = true; o.built = !!(S && builtCount(t.def.key) > 0); }
-    if (t.def.requiresPolicy && S && !(S.policies && S.policies[t.def.requiresPolicy])) o.needsPolicy = t.def.requiresPolicy;
+    if (t.def.requiresPolicy && S && !policyOn(t.def.requiresPolicy)) o.needsPolicy = t.def.requiresPolicy;
   }
   return o;
 }
@@ -397,6 +418,13 @@ const T = (VC.tools = {
   dragging() {
     return !!T.drag;
   },
+  /** Pulsing marker on a footprint for a few seconds (e.g. the HUD's problems chip showing an example lot). */
+  ping(x, z, w, d, sec) {
+    const S = VC.state;
+    if (!S || !Number.isFinite(x) || !Number.isFinite(z)) return;
+    PING.x = x | 0; PING.z = z | 0; PING.w = Math.max(1, w | 0 || 1); PING.d = Math.max(1, d | 0 || 1);
+    PING.until = performance.now() + (sec || 3.5) * 1000;
+  },
 
   /* ---------------- pointer (called by VC.input) ---------------- */
   /** Cursor position in canvas CSS px; inside = the pointer is over the canvas (not over UI). */
@@ -541,6 +569,7 @@ const T = (VC.tools = {
  * the gizmo buffers right after the transparent layers, so previews are emitted exactly once per rendered
  * frame no matter how often update() runs.
  */
+const PING = { x: 0, z: 0, w: 1, d: 1, until: 0, c: [2.6, 1.9, 0.5, 1], f: [1.6, 1.1, 0.2, 0.3] };
 const LAYER = {
   name: 'tools',
   order: 990,
@@ -549,8 +578,24 @@ const LAYER = {
     if (!S || S.demo || (VC.menu && VC.menu.active) || !VC.gfx.gizmo) return;
     replay();
     if (T.kind === 'select') drawSelect();
+    if (PING.until) drawPing(S);
   },
 };
+/** The ping marker: a gold slab + a column that pulses, fading out at the end. */
+function drawPing(S) {
+  const now = performance.now();
+  const left = PING.until - now;
+  if (left <= 0 || PING.x >= S.W || PING.z >= S.H) { PING.until = 0; return; }
+  const G = VC.gfx.gizmo;
+  const pulse = 0.5 + 0.5 * Math.sin(now * 0.009);
+  const fade = Math.min(1, left / 600);
+  const y = topY(M.clamp(PING.x, 0, S.W - 1), M.clamp(PING.z, 0, S.H - 1));
+  const g = 0.12 + pulse * 0.18;
+  PING.f[3] = (0.22 + 0.25 * pulse) * fade;
+  PING.c[3] = fade;
+  G.box(PING.x - g, y + 0.02, PING.z - g, PING.x + PING.w + g, y + 0.1, PING.z + PING.d + g, PING.f, false);
+  G.box(PING.x - g, y, PING.z - g, PING.x + PING.w + g, y + 0.6 + pulse * 0.5, PING.z + PING.d + g, PING.c, true);
+}
 
 /* ------------------------------------------------------------------ */
 /* Picking                                                              */
@@ -818,6 +863,14 @@ function buildPlan() {
     const code = k === 'zone' && zt ? zt.code : 0;
     const res = A.canZone(sx, sz, ex, ez, code);
     res.kind = k;
+    res.far = 0;
+    if (code && res.rect && res.status) {
+      // tiles too far from a street never grow: count them for the label, tint them in the preview
+      const r = res.rect;
+      roadReach(r);
+      for (let z = r.z0; z <= r.z1; z++)
+        for (let x = r.x0; x <= r.x1; x++) if (res.status[(z - r.z0) * r.w + (x - r.x0)] === 1 && !inReach(x, z)) res.far++;
+    }
     T.plan = res;
     drawZone(res, code);
   } else if (k === 'bulldoze') {
@@ -862,6 +915,7 @@ function drawPath(res, tiles, k) {
   const n = tiles.length;
   if (!n) return;
   const allOk = res.ok;
+  const quiet = !allOk && QUIET.has(res.reason); // e.g. 'Already built' right after a drag: neutral, not red
   const ys = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const t = tiles[i], cur = topY(t.x, t.z);
@@ -870,13 +924,13 @@ function drawPath(res, tiles, k) {
       ys[i] = bridge ? VC.actions.DECK_LVL * STEP : Math.max(cur, res.levels[i] * STEP);
     } else ys[i] = cur;
   }
-  const line = allOk ? (k === 'pline' ? COL.plineLine : COL.pathLine) : COL.badLine;
+  const line = allOk ? (k === 'pline' ? COL.plineLine : COL.pathLine) : quiet ? COL.quietLine : COL.badLine;
   for (let i = 0; i < n; i++) {
     const t = tiles[i], st = res.status[i], y = ys[i];
     let c;
     if (st === 3) c = COL.pathBad;
-    else if (st === 1) c = COL.skip;
-    else if (!allOk) c = COL.pathBad;
+    else if (st === 1) c = quiet ? COL.quiet : COL.skip;
+    else if (!allOk) c = quiet ? COL.quiet : COL.pathBad;
     else if (st === 2) c = COL.upgrade;
     else c = k === 'pline' ? COL.pline : COL.path;
     dlBox(t.x + 0.04, y + 0.02, t.z + 0.04, t.x + 0.96, y + 0.12, t.z + 0.96, c, false);
@@ -889,21 +943,54 @@ function drawPath(res, tiles, k) {
     if (!link(-1, 0)) dlLine(t.x + 0.04, ly, t.z + 0.04, t.x + 0.04, ly, t.z + 0.96, lc);
     if (!link(1, 0)) dlLine(t.x + 0.96, ly, t.z + 0.04, t.x + 0.96, ly, t.z + 0.96, lc);
     // centre line toward the next tile (direction of the drag)
-    if (q) dlLine(t.x + 0.5, ly, t.z + 0.5, q.x + 0.5, ys[i + 1] + 0.125, q.z + 0.5, allOk ? COL.center : COL.badLine);
+    if (q) dlLine(t.x + 0.5, ly, t.z + 0.5, q.x + 0.5, ys[i + 1] + 0.125, q.z + 0.5, allOk ? COL.center : quiet ? COL.quietLine : COL.badLine);
     if (k === 'pline') {
       // pylons + wire preview
       const py = y + 0.62;
-      dlBox(t.x + 0.45, y, t.z + 0.45, t.x + 0.55, py, t.z + 0.55, st === 3 || !allOk ? COL.pathBad : COL.pylon, false);
-      if (p) dlLine(p.x + 0.5, ys[i - 1] + 0.62, p.z + 0.5, t.x + 0.5, py, t.z + 0.5, allOk ? COL.wire : COL.badLine);
+      dlBox(t.x + 0.45, y, t.z + 0.45, t.x + 0.55, py, t.z + 0.55, st === 3 || (!allOk && !quiet) ? COL.pathBad : COL.pylon, false);
+      if (p) dlLine(p.x + 0.5, ys[i - 1] + 0.62, p.z + 0.5, t.x + 0.5, py, t.z + 0.5, allOk ? COL.wire : quiet ? COL.quietLine : COL.badLine);
     }
   }
   // start / end posts
   const ends = n > 1 ? [0, n - 1] : [0];
   for (const i of ends) {
     const t = tiles[i], y = ys[i];
-    dlBox(t.x + 0.4, y, t.z + 0.4, t.x + 0.6, y + 0.5, t.z + 0.6, allOk ? COL.post : COL.pathBad, false);
+    dlBox(t.x + 0.4, y, t.z + 0.4, t.x + 0.6, y + 0.5, t.z + 0.6, allOk || quiet ? COL.post : COL.pathBad, false);
   }
 }
+
+/*
+ * Road reach of a zone rectangle (preview only): distance in 4-neighbour steps from the nearest street / avenue
+ * tile, not crossing open water — the sim's access rule (sim_net computeAccess). Searched in the rectangle grown
+ * by C.ROAD_ACCESS (a road farther out cannot reach inside), into reused scratch arrays.
+ */
+const RCH = { d: new Uint8Array(0), q: new Int32Array(0), x0: 0, z0: 0, gw: 0 };
+function roadReach(r) {
+  const S = VC.state, R = C.ROAD_ACCESS;
+  const x0 = Math.max(0, r.x0 - R), z0 = Math.max(0, r.z0 - R), x1 = Math.min(S.W - 1, r.x1 + R), z1 = Math.min(S.H - 1, r.z1 + R);
+  const gw = x1 - x0 + 1, gd = z1 - z0 + 1, n = gw * gd;
+  if (RCH.d.length < n) { RCH.d = new Uint8Array(Math.ceil(n * 1.25)); RCH.q = new Int32Array(Math.ceil(n * 1.25)); }
+  const dist = RCH.d, q = RCH.q, SW = S.W, road = S.road, hgt = S.height, SEA = C.SEA;
+  dist.fill(255, 0, n);
+  let qt = 0, qh = 0;
+  for (let z = z0; z <= z1; z++)
+    for (let x = x0; x <= x1; x++) {
+      const t = road[z * SW + x];
+      if (t && VC.ROADS[t] && VC.ROADS[t].access) { const k = (z - z0) * gw + (x - x0); dist[k] = 0; q[qt++] = k; }
+    }
+  while (qh < qt) {
+    const k = q[qh++], nd = dist[k] + 1;
+    if (nd > R) continue;
+    const lx = k % gw, lz = (k - lx) / gw, gx = x0 + lx, gz = z0 + lz;
+    if (lx > 0 && dist[k - 1] > nd && hgt[gz * SW + gx - 1] >= SEA) { dist[k - 1] = nd; q[qt++] = k - 1; }
+    if (lx < gw - 1 && dist[k + 1] > nd && hgt[gz * SW + gx + 1] >= SEA) { dist[k + 1] = nd; q[qt++] = k + 1; }
+    if (lz > 0 && dist[k - gw] > nd && hgt[(gz - 1) * SW + gx] >= SEA) { dist[k - gw] = nd; q[qt++] = k - gw; }
+    if (lz < gd - 1 && dist[k + gw] > nd && hgt[(gz + 1) * SW + gx] >= SEA) { dist[k + gw] = nd; q[qt++] = k + gw; }
+  }
+  RCH.x0 = x0; RCH.z0 = z0; RCH.gw = gw;
+}
+/** Is tile (x,z) of the last roadReach() rectangle within reach of a street? */
+const inReach = (x, z) => RCH.d[(z - RCH.z0) * RCH.gw + (x - RCH.x0)] <= C.ROAD_ACCESS;
 
 function drawZone(res, code) {
   const r = res.rect;
@@ -911,12 +998,25 @@ function drawZone(res, code) {
   const st = res.status;
   if (code) {
     const zt = VC.ztype(code);
+    const quiet = !res.ok && QUIET.has(res.reason);
     const cNew = res.ok ? COL.zone[zt] : COL.bad, cOld = COL.zoneDim[zt];
+    const far = res.far > 0;
     dlRectRuns(r, (x, z) => {
       const s = st[(z - r.z0) * r.w + (x - r.x0)];
-      return s === 1 ? cNew : s === 2 ? cOld : null;
+      return s === 1 ? (far && !inReach(x, z) ? COL.far : cNew) : s === 2 ? cOld : null;
     });
-    dlRectOutline(r, res.ok ? COL.zoneLine[zt] : COL.bullLine);
+    if (far) {
+      // one hatch stroke per out-of-reach tile (capped for giant drags)
+      let n = 0;
+      for (let z = r.z0; z <= r.z1 && n < 900; z++)
+        for (let x = r.x0; x <= r.x1 && n < 900; x++) {
+          if (st[(z - r.z0) * r.w + (x - r.x0)] !== 1 || inReach(x, z)) continue;
+          const y = topY(x, z) + 0.09;
+          dlLine(x + 0.12, y, z + 0.88, x + 0.88, y, z + 0.12, COL.farLine);
+          n++;
+        }
+    }
+    dlRectOutline(r, res.ok ? COL.zoneLine[zt] : quiet ? COL.quietLine : COL.bullLine);
   } else {
     dlRectRuns(r, (x, z) => (st[(z - r.z0) * r.w + (x - r.x0)] === 3 ? COL.dezone : null));
     for (const b of res.remove) dlBuilding(b, COL.bullB);
@@ -1096,7 +1196,7 @@ function labelContent(p) {
   const S = VC.state;
   const parts = [];
   let reason = p.ok ? '' : p.reason || '';
-  let warn = '';
+  let warn = '', good = '';
   let cost = p.cost || 0;
   let showCost = true;
   switch (p.kind) {
@@ -1115,6 +1215,7 @@ function labelContent(p) {
       if (p.rect) parts.push(p.rect.w + '×' + p.rect.d);
       parts.push(plural(p.count, 'tile'));
       if (reason === 'Already zoned') { showCost = false; reason = ''; parts.length = 0; parts.push('Already zoned'); }
+      else if (p.far > 0) warn = (p.far === p.count && p.count > 1 ? 'All ' : '') + plural(p.far, 'tile') + ' out of road reach — ' + (p.far === 1 ? "it won't" : "they won't") + ' grow (max ' + C.ROAD_ACCESS + ' from a street)';
       break;
     case 'dezone':
       parts.push(plural(p.count, 'tile'));
@@ -1138,7 +1239,8 @@ function labelContent(p) {
       parts.push(g.def.name);
       parts.push(g.w + '×' + g.d);
       if (p.ok && p.flattenCost > 0) parts.push('⛰ ' + money(p.flattenCost));
-      if (p.ok && p.warn) warn = p.warn;
+      if ((p.ok || p.money) && p.warn) warn = p.warn; // short of money: still say whether it would connect
+      if ((p.ok || p.money) && p.good) good = p.good;
       break;
     }
     case 'trees':
@@ -1161,8 +1263,41 @@ function labelContent(p) {
   if (parts.length) html += '<span class="tc-info">' + esc(parts.join(' · ')) + '</span>';
   html += '</div>';
   if (reason) html += '<div class="tc-reason">' + esc(reason) + '</div>';
-  else if (warn) html += '<div class="tc-warn">' + esc(warn) + '</div>';
+  if (warn && (!reason || p.money)) html += '<div class="tc-warn">' + esc(warn) + '</div>';
+  if (good && (!reason || p.money)) html += '<div class="tc-good">' + esc(good) + '</div>';
   return { html, cls };
+}
+/*
+ * Select tool: hovering an EMPTY zoned lot explains why nothing grows there (VC.sim.growReason) in the cursor
+ * label, once the pointer rested on the tile for a moment. Recomputed only when the tile, the network flags,
+ * the buildings or the demand sign change.
+ */
+const HINT = { i: -1, fv: -1, bv: -1, dem: -1, tile: -1, since: 0, html: '', cls: '' };
+const ZONE_ICON = { 1: '🏠', 2: '🏬', 3: '🏭' };
+function selectHint() {
+  const S = VC.state, h = T.hover;
+  if (!h || T.drag || !W.inb(h.x, h.z)) { HINT.tile = -1; return null; }
+  const i = h.z * S.W + h.x;
+  const code = S.zone[i];
+  if (!code || S.bld[i] || T.hoverId) { HINT.tile = -1; return null; }
+  const now = performance.now();
+  if (HINT.tile !== i) { HINT.tile = i; HINT.since = now; }
+  if (now - HINT.since < 260) return null;
+  const zt = code >> 2, den = code & 3, z = VC.ZONES[zt] || { key: '?' };
+  const dem = (S.demand && S.demand[z.key]) > 0.02 ? 1 : 0;
+  // recompute only when the tile, the network flags, the buildings or the demand sign changed (no per-frame garbage)
+  if (HINT.i !== i || HINT.fv !== S.ver.flags || HINT.bv !== S.ver.bld || HINT.dem !== dem) {
+    HINT.i = i; HINT.fv = S.ver.flags; HINT.bv = S.ver.bld; HINT.dem = dem;
+    let why = '';
+    try { why = VC.sim && VC.sim.growReason ? VC.sim.growReason(h.x, h.z) : ''; } catch (e) { why = ''; }
+    const ready = /^Ready/.test(why);
+    const nm = z.name ? (VC.DENSITY[den] || '') + ' ' + z.name.toLowerCase() : 'Zone';
+    let html = '<div class="tc-main"><span class="tc-info">' + (ZONE_ICON[zt] || '') + ' ' + esc(nm) + ' · empty lot</span></div>';
+    if (why) html += '<div class="' + (ready ? 'tc-good' : 'tc-warn') + '">' + esc(why) + '</div>';
+    HINT.html = html;
+    HINT.cls = why && !ready ? 'warn' : '';
+  }
+  return HINT;
 }
 function safeGrowName(b) {
   try { return VC.sim.buildingName(b) || 'Building'; } catch (e) { return 'Building'; }
@@ -1177,38 +1312,68 @@ function flashLabel() {
   clearTimeout(flashTimer);
   flashTimer = setTimeout(() => label.classList.remove('flash'), 700);
 }
+/* HUD rects the label must not cover (active-tool chip, toolbar); refreshed a few times a second */
+const AVOID = { t: 0, rects: [] };
+function avoidRects() {
+  const now = performance.now();
+  if (now - AVOID.t < 300) return AVOID.rects;
+  AVOID.t = now;
+  AVOID.rects.length = 0;
+  for (const sel of ['.tool-chip.show', '.hud-toolbar']) {
+    const el = document.querySelector('#ui ' + sel);
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) AVOID.rects.push(r);
+  }
+  return AVOID.rects;
+}
+const overlaps = (x, y, w, h, r) => x < r.right && x + w > r.left && y < r.bottom && y + h > r.top;
+/** Sets the label content (html + state class); re-measures only when it changed. */
+function setLabel(html, cls) {
+  if (html !== labelHtml) {
+    labelHtml = html;
+    label.innerHTML = html;
+    labelW = 0; // re-measure (only when the content changed: avoids a forced layout every frame)
+  }
+  if (cls !== labelCls) {
+    if (labelCls) label.classList.remove(labelCls);
+    if (cls) label.classList.add(cls);
+    labelCls = cls;
+  }
+}
 function updateLabel() {
   if (!label) return;
   const p = T.plan;
   const hidden = VC.hud && (VC.hud.uiHidden || VC.hud.photo);
-  if (T.kind === 'select' || !p || !p.kind || (!T.inside && !T.drag) || hidden || (p.kind === 'bulldoze' && !p.count)) {
-    showLabel(false);
-    return;
-  }
-  if (p !== label._plan) {
-    label._plan = p;
-    const c = labelContent(p);
-    if (c.html !== labelHtml) {
-      labelHtml = c.html;
-      label.innerHTML = c.html;
+  if (T.kind === 'select') {
+    const hint = hidden || !T.inside ? null : selectHint();
+    label._plan = null;
+    if (!hint) { showLabel(false); return; }
+    setLabel(hint.html, hint.cls);
+  } else {
+    if (!p || !p.kind || (!T.inside && !T.drag) || hidden || (p.kind === 'bulldoze' && !p.count)) {
+      showLabel(false);
+      return;
     }
-    if (c.cls !== labelCls) {
-      if (labelCls) label.classList.remove(labelCls);
-      if (c.cls) label.classList.add(c.cls);
-      labelCls = c.cls;
+    if (p !== label._plan) {
+      label._plan = p;
+      const c = labelContent(p);
+      setLabel(c.html, c.cls);
     }
-    labelW = 0; // re-measure (only when the content changed: avoids a forced layout every frame)
   }
   if (!labelW) {
     labelW = label.offsetWidth || 120;
     labelH = label.offsetHeight || 30;
   }
-  // follow the cursor (canvas px == client px: the canvas is fixed at 0,0), keep inside the viewport
+  // follow the cursor (canvas px == client px: the canvas is fixed at 0,0), keep inside the viewport and off
+  // the toolbar / active-tool chip (flip above the cursor when below would cover them)
   const vw = window.innerWidth, vh = window.innerHeight;
   let x = Math.round(T.px + 18), y = Math.round(T.py + 20);
   const lw = labelW, lh = labelH;
   if (x + lw > vw - 6) x = Math.round(T.px - lw - 12);
   if (y + lh > vh - 6) y = Math.round(T.py - lh - 14);
+  const av = avoidRects();
+  for (let k = 0; k < av.length; k++) if (overlaps(x, y, lw, lh, av[k])) { y = Math.round(Math.min(T.py, av[k].top) - lh - 10); break; }
   x = M.clamp(x, 4, Math.max(4, vw - lw - 4));
   y = M.clamp(y, 4, Math.max(4, vh - lh - 4));
   if (x !== labelX || y !== labelY) {

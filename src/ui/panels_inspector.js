@@ -8,7 +8,7 @@
  */
 const P = VC.panels, U = P.util, h = VC.h, M = VC.M;
 const TERR_NAMES = ['Grass', 'Sand', 'Dirt', 'Rock', 'Snow', 'Meadow'];
-const TERR_ICONS = ['🌿', '🏖️', '🟫', '🪨', '❄️', '🌼'];
+const TERR_ICONS = ['🌿', '🏖️', '🟫', '⛰️', '❄️', '🌼'];
 const ZKEY = { 1: 'R', 2: 'C', 3: 'I' };
 const LOCAL = [
   { key: 'landValue', label: 'Land value', icon: '💎', ramp: U.rampValue },

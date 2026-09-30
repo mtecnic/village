@@ -31,9 +31,13 @@
  *   input({value, placeholder, maxLength, onInput, onEnter, cls, type}) -> <input class="input">
  *   kbd(label), badge(text, cls), section(title, ...children), row(...children), note(text)
  * FEEDBACK
- *   toast(html, {type: 'info'|'good'|'warn'|'bad', icon, duration, cls, onClick})
+ *   toast(html, {type: 'info'|'good'|'warn'|'bad', icon, duration, cls, onClick, sfx})
+ *       html is sanitised (b/i/em/small/br/kbd/span… only, no attributes but class/style) as a safety net;
+ *       emitters must still escape user text with VC.ui.esc. sfx: optional sound name to play with it
+ *       (UI code toasts directly; only bus 'toast' also makes audio play a generic sound).
+ *       Toasts live in a lane that avoids window title bars and the milestone banner (see layoutToasts).
  *   modal(title, content, [{label, cls, onClick}], {cls}) -> close fn          (Esc closes the top modal)
- *   confirm(text, onYes, {title, yes, no, danger})
+ *   confirm(text, onYes, {title, yes, no, danger})      text is sanitised HTML (escape user strings!)
  *   prompt(title, value, onOk(value), {text, placeholder, maxLength, ok})
  *   popover(anchorEl, content, {id, title, side:'top'|'bottom'|'left'|'right', cls, onClose}) -> {el, close()}
  *       one popover per id; closes on outside pointerdown or Esc.  VC.ui.closePopovers()
@@ -41,7 +45,17 @@
  *   also set el._tip = () => html; it is re-evaluated while the tooltip is visible.
  *   Rich tooltip classes (base.css): .tt-head .tt-icon .tt-desc .tt-grid (label/value pairs) .tt-foot .tt-lock
  * HELPERS: VC.ui.scale() current UI scale, VC.ui.signed(n) '+1,234', VC.ui.signedMoney(n) '+$1,234',
- *   VC.ui.flash(el, cls) (restart a CSS animation class), VC.ui.svg(tag, attrs, ...kids).
+ *   VC.ui.flash(el, cls) (restart a CSS animation class), VC.ui.svg(tag, attrs, ...kids),
+ *   VC.ui.esc(s) HTML-escapes any user / imported text (city, building, save names…) before it goes into
+ *   innerHTML, data-tip, toast or confirm text; VC.ui.sanitize(html) -> DocumentFragment;
+ *   VC.ui.isTextEntry(el) true for fields that take typing (hotkeys must stay off), false for sliders,
+ *   checkboxes and buttons; VC.ui.layoutToasts(); VC.ui.toastAvoid (array of fn() -> rect|null).
+ * Z-ORDER (all inside #ui, bounded): HUD chrome 0-5 < title menu 10 < windows layer 20 (its own stacking
+ *   context; window z-indices are local and renormalised) < tutorial / advisor cards 25-26 < toasts 30 <
+ *   milestone banner 35 < pause menu 40 (windows opened from it: 45) < popovers 50 < modals 60 <
+ *   photo hint 70 < fade 80 < tooltip 100.
+ * FOCUS: sliders, checkboxes, selects and buttons are blurred after a pointer interaction so game
+ *   hotkeys keep working (text inputs keep focus).
  * UI scale: blocks use the CSS `scale: var(--ui-scale)` property (never `zoom`) so all layout math is in
  *   screen px. Position scaled floating elements with left/top or the `translate` property, not `transform`.
  * Bus: listens to 'toast' {text, type, icon, duration} (suppressed while the title-screen demo city runs).
@@ -53,31 +67,87 @@ const lastPos = new Map();
 const modals = [];
 const popovers = new Map();
 const anims = new Set();
-let zTop = 100;
+let zTop = 0; // window z-indices are local to the .ui-windows layer (see renormZ)
+const Z_MAX = 400; // renormalise window z-indices past this
 
 function sfx(name) {
   VC.bus.emit('sfx', { name: name || 'click' });
 }
 
+/* ---------------- escaping / sanitising ---------------- */
+const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+/** HTML-escapes any value (null/undefined -> ''). Use for every user / imported string put into HTML. */
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ESC_MAP[c]);
+}
+const SAFE_TAGS = new Set(['B', 'I', 'EM', 'STRONG', 'SMALL', 'BR', 'KBD', 'SPAN', 'DIV', 'U', 'S', 'SUB', 'SUP', 'P', 'UL', 'OL', 'LI', 'CODE', 'MARK', 'HR']);
+/**
+ * Parses html into an inert template and keeps only simple formatting tags with class/style attributes.
+ * Anything else (img, script, a, svg, event handlers…) is shown as literal text. Returns a DocumentFragment.
+ */
+function sanitize(html) {
+  const t = document.createElement('template');
+  t.innerHTML = String(html == null ? '' : html);
+  const walk = (node) => {
+    for (const c of Array.from(node.childNodes)) {
+      if (c.nodeType === 1) {
+        if (!SAFE_TAGS.has(c.tagName)) {
+          c.replaceWith(document.createTextNode(c.outerHTML));
+          continue;
+        }
+        for (const a of Array.from(c.attributes)) {
+          const n = a.name.toLowerCase();
+          if ((n !== 'class' && n !== 'style') || /url\s*\(|expression\s*\(|javascript:/i.test(a.value)) c.removeAttribute(a.name);
+        }
+        walk(c);
+      } else if (c.nodeType !== 3) c.remove();
+    }
+  };
+  walk(t.content);
+  return t.content;
+}
+const NON_TEXT_INPUT = /^(range|checkbox|radio|button|submit|reset|color|file|image)$/i;
+/** True when el takes typed text (text fields, textareas, contenteditable). Sliders/checkboxes do not. */
+function isTextEntry(el) {
+  if (!el || !el.tagName) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
+  if (el.tagName === 'INPUT') return !NON_TEXT_INPUT.test(el.type || 'text');
+  return false;
+}
+/** Controls that must not keep keyboard focus after a pointer interaction (would swallow hotkeys). */
+function isStickyControl(el) {
+  if (!el || !el.tagName) return false;
+  if (el.tagName === 'BUTTON' || el.tagName === 'SELECT') return true;
+  return el.tagName === 'INPUT' && NON_TEXT_INPUT.test(el.type || 'text');
+}
+
 const ui = (VC.ui = {
   root: null,
+  /** Extra rects toasts must not cover: functions returning a DOMRect-like {left,top,right,bottom} or null. */
+  toastAvoid: [],
   init() {
     ui.root = document.getElementById('ui');
     ui.layer = h('div', { class: 'ui-windows' });
-    ui.toasts = h('div', { class: 'ui-toasts' });
+    ui.toasts = h('div', { class: 'ui-toasts lane-br' });
     ui.tip = h('div', { class: 'ui-tooltip' });
     ui.root.append(ui.layer, ui.toasts, ui.tip);
     VC.bus.on('toast', (t) => {
       if (!t || !t.text) return;
       if (VC.state && VC.state.demo && t.type !== 'error') return; // no game chatter over the title screen
-      ui.toast(t.text, t);
+      ui.toast(t.text, Object.assign({}, t, { sfx: null })); // audio already reacts to bus 'toast'
     });
     initTooltips();
     window.addEventListener('keydown', onKeyCapture, true);
+    initFocusRelease();
     applyScale();
     VC.bus.on('settings', applyScale);
-    window.addEventListener('resize', applyScale);
+    window.addEventListener('resize', onResize);
+    VC.bus.on('windowOpened', () => { layoutToasts(); requestAnimationFrame(layoutToasts); }); // again once content is in
+    VC.bus.on('windowClosed', () => layoutToasts());
   },
+  esc,
+  sanitize,
+  isTextEntry,
   /** Effective UI scale: the user's setting x an automatic boost for very tall viewports (4K at DPR 1). */
   scale() {
     const s = VC.M.clamp(+((VC.settings && VC.settings.uiScale) || 1) || 1, 0.5, 2);
@@ -96,7 +166,7 @@ const ui = (VC.ui = {
     }
     const titleEl = h('div', { class: 'win-title' });
     const minBtn = o.minimizable === false ? null : h('button', { class: 'win-btn win-min', title: 'Minimize', onclick: () => w.minimize() }, h('i'));
-    const closeBtn = o.closable === false ? null : h('button', { class: 'win-btn win-close', title: 'Close (Esc)', onclick: () => { sfx(); w.close(); } }, '×');
+    const closeBtn = o.closable === false ? null : h('button', { class: 'win-btn win-close', title: 'Close (Esc)', onclick: () => w.close() }, '×'); // audio voices 'windowClosed'
     const head = h('div', { class: 'win-head' }, titleEl, minBtn, closeBtn);
     const body = h('div', { class: 'win-body' });
     const el = h('div', { class: 'win ' + (o.cls || ''), 'data-win': id }, head, body);
@@ -124,14 +194,20 @@ const ui = (VC.ui = {
         VC.bus.emit('windowClosed', id);
       },
       show() {
+        const was = el.style.display === 'none';
         el.style.display = '';
+        if (was) clampWin(w);
         w.focus();
       },
       hide() {
         el.style.display = 'none';
       },
+      /** Brings the window to the front (no-op when it already is; z stays bounded, see renormZ). */
       focus() {
-        el.style.zIndex = ++zTop;
+        if (w._z === zTop && zTop > 0) return;
+        if (zTop >= Z_MAX) renormZ();
+        w._z = ++zTop;
+        el.style.zIndex = w._z;
       },
       toggle() {
         wins.has(id) ? w.close() : w.show();
@@ -157,6 +233,7 @@ const ui = (VC.ui = {
       el.style.left = Math.round(x) + 'px';
       el.style.top = Math.round(Math.max(64, y)) + 'px';
       clampWin(w);
+      noteAnchor(w);
     };
     place();
     // content is usually added right after creation (and may change later): re-centre while the user
@@ -192,12 +269,32 @@ const ui = (VC.ui = {
   closeAll() {
     for (const w of [...wins.values()]) w.close();
   },
-  /** Closes the top-most window. Returns true if one was closed. */
+  /** Closes the top-most visible window. Returns true if one was closed. */
   closeTop() {
-    let top = null;
-    for (const w of wins.values()) if (w.el.style.display !== 'none' && (!top || +w.el.style.zIndex > +top.el.style.zIndex)) top = w;
+    const top = ui.topWindow();
     if (top && top.opts.closable !== false) { top.close(); return true; }
     return false;
+  },
+  /** Top-most visible window (or null). */
+  topWindow() {
+    let top = null;
+    for (const w of wins.values()) if (w.el.style.display !== 'none' && (!top || (w._z || 0) > (top._z || 0))) top = w;
+    return top;
+  },
+  /** Visible (not hidden) window ids. */
+  visibleWindows: () => [...wins.values()].filter((w) => w.el.style.display !== 'none').map((w) => w.id),
+  /**
+   * Moves a window to screen px (x, y), clamped on screen. Used by the panels module for its own placement
+   * so right-anchored windows keep following the right edge on resize.
+   */
+  placeWindow(id, x, y) {
+    const w = wins.get(id);
+    if (!w) return;
+    w.el.style.left = Math.round(x) + 'px';
+    w.el.style.top = Math.round(y) + 'px';
+    clampWin(w);
+    noteAnchor(w);
+    layoutToasts();
   },
 
   /* ---------------- widgets ---------------- */
@@ -213,9 +310,12 @@ const ui = (VC.ui = {
       const p = ((+input.value - o.min) / (o.max - o.min)) * 100;
       input.style.setProperty('--fill', p + '%');
       if (o.color) {
-        const c = typeof o.color === 'function' ? o.color(+input.value) : o.color;
-        input.style.setProperty('--accent', c);
-        val.style.color = typeof o.color === 'function' ? c : '';
+        // private custom property: writing --accent itself could create a self-reference cycle
+        // (color 'var(--accent)' -> `--accent: var(--accent)`), which invalidates the whole track
+        const c = (typeof o.color === 'function' ? o.color(+input.value) : o.color) || '';
+        if (c) input.style.setProperty('--sl-accent', c);
+        else input.style.removeProperty('--sl-accent');
+        val.style.color = typeof o.color === 'function' && c ? c : '';
       }
     };
     input.addEventListener('input', () => { val.textContent = fmt(+input.value); setFill(); o.onInput && o.onInput(+input.value); });
@@ -398,6 +498,7 @@ const ui = (VC.ui = {
     el.select(cur);
     return el;
   },
+  /** Text field. onEscape(): called on Esc (e.g. close the dialog); without it Esc just leaves the field. */
   input(o = {}) {
     const el = h('input', { class: 'input ' + (o.cls || ''), type: o.type || 'text', placeholder: o.placeholder || '', maxlength: o.maxLength || 60, spellcheck: 'false', autocomplete: 'off' });
     el.value = o.value != null ? o.value : '';
@@ -405,7 +506,11 @@ const ui = (VC.ui = {
     el.addEventListener('keydown', (e) => {
       e.stopPropagation(); // typing never triggers game hotkeys
       if (e.key === 'Enter' && o.onEnter) o.onEnter(el.value);
-      if (e.key === 'Escape') el.blur();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        el.blur();
+        if (o.onEscape) o.onEscape();
+      }
     });
     return el;
   },
@@ -429,13 +534,23 @@ const ui = (VC.ui = {
   toast(text, o = {}) {
     const type = o.type || 'info';
     const icon = o.icon || { info: 'ℹ️', good: '✅', warn: '⚠️', bad: '⛔', error: '⛔' }[type] || '';
-    const el = h('div', { class: 'toast toast-' + type + ' ' + (o.cls || '') }, h('span', { class: 'toast-icon' }, icon), h('span', { class: 'toast-text', html: text }));
+    const txt = h('span', { class: 'toast-text' });
+    txt.appendChild(sanitize(text));
+    const el = h('div', { class: 'toast toast-' + type + ' ' + (o.cls || '') }, h('span', { class: 'toast-icon' }, icon), txt);
     ui.toasts.appendChild(el);
-    while (ui.toasts.children.length > 5) ui.toasts.firstChild.remove();
+    // at most 4 on screen: drop the oldest (ignoring ones already fading out)
+    const live = Array.from(ui.toasts.children).filter((c) => !c.classList.contains('out'));
+    for (let i = 0; i < live.length - 4; i++) live[i].remove();
     const dur = o.duration || 3800;
-    const out = () => { if (el.classList.contains('out')) return; el.classList.add('out'); setTimeout(() => el.remove(), 380); };
+    const out = () => {
+      if (el.classList.contains('out')) return;
+      el.classList.add('out');
+      setTimeout(() => { el.remove(); layoutToasts(); }, 380);
+    };
     setTimeout(out, dur);
     el.addEventListener('click', () => { if (o.onClick) o.onClick(); out(); });
+    if (o.sfx) sfx(o.sfx);
+    layoutToasts();
     return el;
   },
   modal(title, content, buttons = [{ label: 'OK' }], o = {}) {
@@ -460,7 +575,9 @@ const ui = (VC.ui = {
     return close;
   },
   confirm(text, onYes, o = {}) {
-    return ui.modal(o.title || 'Are you sure?', h('div', { html: text }), [{ label: o.no || 'Cancel' }, { label: o.yes || 'Yes', cls: o.danger ? 'danger' : 'primary', onClick: onYes }]);
+    const body = h('div');
+    body.appendChild(sanitize(text));
+    return ui.modal(o.title || 'Are you sure?', body, [{ label: o.no || 'Cancel' }, { label: o.yes || 'Yes', cls: o.danger ? 'danger' : 'primary', onClick: onYes }]);
   },
   prompt(title, value, onOk, o = {}) {
     let done = false;
@@ -526,6 +643,8 @@ const ui = (VC.ui = {
   },
   /** Number of open modals (used by menus / hotkeys to stay out of the way). */
   modalCount: () => modals.length,
+  /** Re-picks the toast lane (call when something toasts must avoid appears or moves). */
+  layoutToasts: () => layoutToasts(),
 });
 
 /* ---------------- tweening (counters) ---------------- */
@@ -583,23 +702,50 @@ function makeDraggable(w, handle) {
     drag = false;
     el.classList.remove('dragging');
     clampWin(w);
+    noteAnchor(w);
     lastPos.set(w.id, { x: el.offsetLeft, y: el.offsetTop });
+    layoutToasts();
   };
   handle.addEventListener('pointerup', end);
   handle.addEventListener('pointercancel', end);
 }
-/** Keeps a window reachable: title bar on screen, whole window on screen when it fits. */
+/** Reassigns window z-indices 1..n in their current stacking order (keeps them small and bounded). */
+function renormZ() {
+  const list = [...wins.values()].sort((a, b) => (a._z || 0) - (b._z || 0));
+  zTop = 0;
+  for (const w of list) {
+    w._z = ++zTop;
+    w.el.style.zIndex = w._z;
+  }
+}
+/**
+ * Keeps a window on screen: entirely when it fits (it always should: .win max-width/height follow the
+ * viewport), otherwise at least its title bar with the close button.
+ */
 function clampWin(w) {
   const el = w.el;
   if (el.style.display === 'none') return;
   const r = el.getBoundingClientRect();
-  const vw = window.innerWidth, vh = window.innerHeight;
-  const x = VC.M.clamp(el.offsetLeft, Math.min(10, -r.width + 90), Math.max(10, vw - Math.min(r.width, 90) - 10));
+  const vw = window.innerWidth, vh = window.innerHeight, m = 8;
+  const x = r.width <= vw - 2 * m ? VC.M.clamp(el.offsetLeft, m, vw - r.width - m) : Math.min(m, Math.max(vw - r.width - m, el.offsetLeft));
   let yMax = vh - 44;
-  if (r.height <= vh - 16) yMax = Math.min(yMax, vh - r.height - 8);
+  if (r.height <= vh - 2 * m) yMax = Math.min(yMax, vh - r.height - m);
   const y = VC.M.clamp(el.offsetTop, 0, Math.max(0, yMax));
   if (Math.round(x) !== el.offsetLeft) el.style.left = Math.round(x) + 'px';
   if (Math.round(y) !== el.offsetTop) el.style.top = Math.round(y) + 'px';
+}
+/** Windows sitting near the right edge stay anchored to it when the viewport or UI scale changes. */
+function noteAnchor(w) {
+  const el = w.el;
+  if (el.style.display === 'none') return;
+  const vw = window.innerWidth;
+  const width = el.offsetWidth * ui.scale();
+  const dr = vw - (el.offsetLeft + width);
+  w.dockRight = dr >= 0 && dr < 100 && el.offsetLeft + width / 2 > vw / 2 ? dr : null;
+}
+function onResize() {
+  applyScale();
+  requestAnimationFrame(layoutToasts);
 }
 /** Places a fixed element next to an anchor (visual rects), clamped to the viewport. */
 function placeNear(el, anchor, side) {
@@ -621,8 +767,90 @@ function placeNear(el, anchor, side) {
   el.dataset.side = side;
 }
 function applyScale() {
-  document.documentElement.style.setProperty('--ui-scale', ui.scale());
-  wins.forEach((w) => clampWin(w));
+  const s = ui.scale();
+  document.documentElement.style.setProperty('--ui-scale', s);
+  const vw = window.innerWidth;
+  wins.forEach((w) => {
+    if (w.dockRight != null && w.el.style.display !== 'none') w.el.style.left = Math.round(vw - w.el.offsetWidth * s - w.dockRight) + 'px';
+    clampWin(w);
+  });
+}
+
+/* ---------------- toast lane ---------------- */
+/**
+ * Toasts never cover window title bars (close / minimise buttons) or the milestone banner (ui.toastAvoid).
+ * Lanes in order of preference: bottom-right above the tile readout (clear of the top-anchored windows and
+ * cards), top-centre under the top bar, bottom-left above the minimap. The first lane (in that order) whose
+ * toasts touch no title bar / avoid rect wins; otherwise the least-overlapping one. Window bodies do not
+ * count (toasts are short-lived and sit above them), so the lane does not hop around for small overlaps.
+ */
+const LANES = ['lane-br', 'lane-tc', 'lane-bl'];
+let laneBusy = false;
+function layoutToasts() {
+  const box = ui.toasts;
+  if (!box || laneBusy) return;
+  const items = Array.from(box.children).filter((c) => !c.classList.contains('out'));
+  if (!items.length) return;
+  laneBusy = true;
+  try {
+    const avoid = [];
+    for (const w of wins.values()) {
+      if (w.el.style.display === 'none' || w.el.classList.contains('closing')) continue;
+      avoid.push(w.head.getBoundingClientRect());
+    }
+    for (const fn of ui.toastAvoid) {
+      let r = null;
+      try { r = fn(); } catch (e) { r = null; }
+      if (r) avoid.push(r);
+    }
+    const cur = LANES.find((l) => box.classList.contains(l)) || LANES[0];
+    const score = () => {
+      let s = 0;
+      for (const t of items) {
+        const b = t.getBoundingClientRect();
+        for (const a of avoid) {
+          const ix = Math.min(b.right, a.right) - Math.max(b.left, a.left);
+          const iy = Math.min(b.bottom, a.bottom) - Math.max(b.top, a.top);
+          if (ix > 6 && iy > 6) s += ix * iy; // a few px of shadow / rounded corner do not count
+        }
+      }
+      return s;
+    };
+    let best = cur, bestScore = Infinity;
+    for (const lane of LANES) {
+      if (!box.classList.contains(lane)) { box.classList.remove(...LANES); box.classList.add(lane); }
+      const sc = score();
+      if (sc < bestScore) { best = lane; bestScore = sc; }
+      if (sc === 0) break; // first free lane in preference order
+    }
+    if (!box.classList.contains(best)) { box.classList.remove(...LANES); box.classList.add(best); }
+  } finally {
+    laneBusy = false;
+  }
+}
+
+/* ---------------- focus release ---------------- */
+/**
+ * After a pointer interaction with a slider, checkbox, select or button, drop its keyboard focus so game
+ * hotkeys (Space, Esc, M, 1-0…) keep working. Keyboard users who tab to a control keep focus; text inputs
+ * are never blurred.
+ */
+function initFocusRelease() {
+  const release = () => {
+    const a = document.activeElement;
+    if (a && a !== document.body && isStickyControl(a) && ui.root.contains(a)) a.blur();
+  };
+  document.addEventListener('pointerup', (e) => {
+    const a = document.activeElement;
+    // only the control that was just used (a native <select> keeps focus while its dropdown is open)
+    if (!a || a.tagName === 'SELECT' || !isStickyControl(a)) return;
+    if (a.type === 'range' || (e.target && a.contains(e.target))) setTimeout(release, 0);
+  }, true);
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    // selects: the dropdown is closed once 'change' fires; checkboxes / radios toggle on click
+    if (t && (t.tagName === 'SELECT' || (t.tagName === 'INPUT' && /^(checkbox|radio)$/i.test(t.type)))) setTimeout(release, 0);
+  }, true);
 }
 
 /* ---------------- tooltips ---------------- */
@@ -695,7 +923,8 @@ function drawChart(cv, series, o, legend) {
   if (!isFinite(lo)) { lo = 0; hi = 1; }
   if (hi - lo < 1e-9) { hi = lo + 1; }
   const span = hi - lo;
-  lo -= span * 0.05 * (o.min == null ? 1 : 0);
+  // headroom below the data, but never below zero for non-negative data (no "-360 people" labels)
+  if (o.min == null) lo = lo >= 0 ? Math.max(0, lo - span * 0.05) : lo - span * 0.05;
   hi += span * 0.08 * (o.max == null ? 1 : 0);
   const X = (i) => pad.l + (i / Math.max(1, n - 1)) * (W - pad.l - pad.r);
   const Y = (v) => H - pad.b - ((v - lo) / (hi - lo)) * (H - pad.t - pad.b);

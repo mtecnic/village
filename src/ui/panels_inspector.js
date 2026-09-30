@@ -133,15 +133,25 @@ function buildBuilding(p, b) {
   const ov = ovKey && VC.OVERLAYS.find((o) => o.key === ovKey) ? U.overlayBtn(ovKey, 'Overlay') : null;
   const bull = VC.ui.button('Bulldoze', () => {
     const name = U.safe(() => VC.sim.buildingName(b), 'this building');
-    VC.ui.confirm(`Demolish <b>${name}</b>?${def && def.cost ? `<br>Demolition costs about <b>${U.money(def.cost * (VC.C.DEMOLISH_COST || 0.1) * U.safe(() => VC.money.costMul(), 1))}</b>.` : ''}`, () => {
-      const r = U.api('actions', 'bulldoze', [b.x, b.z, b.x + b.w - 1, b.z + b.d - 1], null);
-      if (!r || r.ok === false) VC.bus.emit('toast', { text: 'Could not bulldoze' + (r && r.reason ? ': ' + r.reason : '.'), type: 'bad', icon: '🚜' });
+    // the sim keeps running under the dialog: remember exactly which building was shown and re-check it
+    const id = b.id, bx = b.x, bz = b.z, bw = b.w, bd = b.d;
+    VC.ui.confirm(`Demolish <b>${U.esc(name)}</b>?${def && def.cost ? `<br>Demolition costs about <b>${U.money(def.cost * (VC.C.DEMOLISH_COST || 0.1) * U.safe(() => VC.money.costMul(), 1))}</b>.` : ''}`, () => {
+      const S = VC.state;
+      const cur = S && S.buildings.get(id);
+      if (cur !== b || b.x !== bx || b.z !== bz || b.w !== bw || b.d !== bd) {
+        VC.ui.toast(`<b>${U.esc(name)}</b> is already gone — nothing was demolished.`, { type: 'info', icon: '🚜' });
+        return;
+      }
+      // footprint only: roads, trees and power lines around it are left alone
+      const r = U.api('actions', 'bulldoze', [bx, bz, bx + bw - 1, bz + bd - 1, { roads: false, trees: false, plines: false, zones: false }], null);
+      // money failures are reported once by the HUD (bus 'noMoney'); only explain other refusals
+      if (!r || (r.ok === false && !/money/i.test(r.reason || '') && !(r.plan && r.plan.money))) VC.ui.toast('Could not bulldoze' + (r && r.reason ? ': ' + U.esc(r.reason) : '.'), { type: 'bad', icon: '🚜', sfx: 'error' });
     }, { title: '🚜 Bulldoze', yes: 'Bulldoze' });
   }, { icon: '🚜', cls: 'small danger' });
   p.body.appendChild(h('div', { class: 'pn-insp-actions' }, VC.ui.button('Focus', () => U.focus(b), { icon: '📍', cls: 'small' }), ov, h('span', { class: 'pn-grow' }), bull));
 
   const ci = Math.min(S.H - 1, b.z + (b.d >> 1)) * S.W + Math.min(S.W - 1, b.x + (b.w >> 1));
-  const factorEl = (f) => U.diverge(f.label, { tip: f.label });
+  const factorEl = (f) => U.diverge(f.label, { tip: U.esc(f.label) });
   const lineEl = (l) => U.line(l.label, { icon: l.icon });
   const probEl = () => h('div', { class: 'pn-insp-prob' });
 

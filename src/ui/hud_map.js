@@ -4,14 +4,16 @@
  *            trees, roads, power lines, zones, buildings in zone colours, civic buildings white) or the
  *            active overlay (S.maps / network flags) using the same ramps as shaderlib overlayRamp.
  *            Incremental: 'dirty' / 'bldChange' rects are recoloured; overlay maps refresh ≤ 1/s.
- *            The camera view is drawn as a trapezoid (screen corners projected to the ground plane).
- *            Click / drag to move the camera, wheel to zoom. Collapsible (VC.settings.minimapOpen).
+ *            The camera view is drawn as a trapezoid (screen corners projected to the ground plane) from
+ *            matrices recomputed for the current camera state (never last frame's), so it is right after
+ *            jumps (new city, load, focus). Click / drag to move the camera, wheel to zoom (honours
+ *            VC.settings.invertZoom like the main view). Collapsible (VC.settings.minimapOpen).
  *   PICKER   VC.hud.openOverlayPicker(anchorEl, side) — popover grid of VC.OVERLAYS.
  *   LEGEND   floating card for the active overlay (gradient ramp or network swatches), ✕ to clear.
  * Also exports VC.hud.OVERLAY_DESC {key: text} and VC.hud.overlayGradient(rampKind) -> CSS gradient.
  */
 const h = VC.h, M = VC.M;
-const MM = { size: 184, base: null, bctx: null, img: null, px: null, W: 0, H: 0, dirty: null, full: true, lastBase: 0, redraw: true, drawn: false, open: true, drag: false, bcol: new Map() };
+const MM = { size: 184, base: null, bctx: null, img: null, px: null, W: 0, H: 0, dirty: null, full: true, lastBase: 0, redraw: true, drawn: false, open: true, drag: false, bcol: new Map(), settle: 0 };
 
 const OVERLAY_DESC = {
   none: 'The plain city view.',
@@ -112,7 +114,15 @@ function build(root) {
   const end = () => (MM.drag = false);
   MM.canvas.addEventListener('pointerup', end);
   MM.canvas.addEventListener('pointercancel', end);
-  MM.canvas.addEventListener('wheel', (e) => { e.preventDefault(); VC.camera.zoom(Math.pow(1.0015, e.deltaY)); }, { passive: false });
+  MM.canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (!VC.state || !VC.camera) return;
+    // same feel as the 3D view: lines / pages -> px, and the player's Invert zoom setting
+    let d = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+    d = VC.M.clamp(d, -240, 240);
+    if (VC.settings && VC.settings.invertZoom) d = -d;
+    VC.camera.zoom(Math.pow(1.0015, d));
+  }, { passive: false });
   refreshLegend();
 }
 function toggleOpen() {
@@ -133,6 +143,11 @@ function alloc(S) {
   MM.dirty = null;
 }
 function markRect(x0, z0, x1, z1) {
+  // a corrupt rect (NaN from a bad building) must not reach putImageData: repaint everything instead
+  if (!isFinite(x0) || !isFinite(z0) || !isFinite(x1) || !isFinite(z1)) { MM.full = true; return; }
+  const ax = Math.floor(Math.min(x0, x1)), bx = Math.ceil(Math.max(x0, x1));
+  const az = Math.floor(Math.min(z0, z1)), bz = Math.ceil(Math.max(z0, z1));
+  x0 = ax; x1 = bx; z0 = az; z1 = bz;
   const d = MM.dirty;
   if (!d) MM.dirty = { x0, z0, x1, z1 };
   else { d.x0 = Math.min(d.x0, x0); d.z0 = Math.min(d.z0, z0); d.x1 = Math.max(d.x1, x1); d.z1 = Math.max(d.z1, z1); }
@@ -228,8 +243,9 @@ function updateBase(force) {
   }
   if (MM.dirty && now - MM.lastBase >= 120) {
     const d = MM.dirty;
-    const x0 = M.clamp(d.x0, 0, S.W - 1), z0 = M.clamp(d.z0, 0, S.H - 1), x1 = M.clamp(d.x1, 0, S.W - 1), z1 = M.clamp(d.z1, 0, S.H - 1);
+    const x0 = M.clamp(d.x0 | 0, 0, S.W - 1), z0 = M.clamp(d.z0 | 0, 0, S.H - 1), x1 = M.clamp(d.x1 | 0, 0, S.W - 1), z1 = M.clamp(d.z1 | 0, 0, S.H - 1);
     MM.dirty = null;
+    if (x1 < x0 || z1 < z0) return false;
     paint(x0, z0, x1, z1);
     MM.bctx.putImageData(MM.img, 0, 0, x0, z0, x1 - x0 + 1, z1 - z0 + 1);
     MM.lastBase = now;
@@ -269,6 +285,9 @@ function groundPoint(px, py, Y, maxT) {
 function draw() {
   const S = VC.state, cam = VC.camera, cv = MM.canvas, ctx = MM.ctx;
   if (!S || !cam || !VC.gfx.canvas) return;
+  // HUD parts update before the renderer rebuilds the camera matrices: without this the frustum is drawn
+  // with last frame's matrices and, once the camera stops, stays wrong until the next move
+  if (cam.computeMatrices) { try { cam.computeMatrices(); } catch (e) { /* camera not ready */ } }
   const dpr = Math.min(2, window.devicePixelRatio || 1) * VC.ui.scale();
   const size = MM.size;
   const bw = Math.round(size * dpr);
@@ -281,12 +300,12 @@ function draw() {
   // frustum
   const gc = VC.gfx.canvas;
   const w = gc.clientWidth, hh = gc.clientHeight;
-  const Y = cam.ty || VC.C.SEA_Y;
+  const Y = isFinite(cam.ty) && cam.ty ? cam.ty : VC.C.SEA_Y;
   const maxT = cam.dist * 5 + 40;
   for (let k = 0; k < 4; k++) {
     const p = groundPoint(k === 1 || k === 2 ? w : 0, k >= 2 ? hh : 0, Y, maxT);
-    quad[k * 2] = p[0] * sx;
-    quad[k * 2 + 1] = p[1] * sz;
+    quad[k * 2] = isFinite(p[0]) ? p[0] * sx : 0;
+    quad[k * 2 + 1] = isFinite(p[1]) ? p[1] * sz : 0;
   }
   ctx.beginPath();
   ctx.moveTo(quad[0], quad[1]);
@@ -311,7 +330,7 @@ function draw() {
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.008);
     for (let i = 0; i < act.length; i++) {
       const d = act[i];
-      if (!d || d.x == null || d.z == null) continue;
+      if (!d || !isFinite(d.x) || !isFinite(d.z)) continue;
       const px = d.x * sx, pz = d.z * sz;
       ctx.beginPath();
       ctx.arc(px, pz, (5 + pulse * 6) * dpr, 0, Math.PI * 2);
@@ -377,6 +396,8 @@ VC.hud.register({
     bus.on('dirty', (d) => { if (d && MM.px) markRect(d.x0, d.z0, d.x1, d.z1); });
     bus.on('bldChange', (b) => { if (b && MM.px) markRect(b.x, b.z, b.x + b.w - 1, b.z + b.d - 1); });
     bus.on('bldRemove', (b) => { if (b && MM.px) markRect(b.x, b.z, b.x + b.w - 1, b.z + b.d - 1); });
+    // camera jumps (new city / load / Continue) happen without motion the next frame: force a redraw
+    for (const ev of ['newGame', 'started']) bus.on(ev, () => { MM.redraw = true; MM.settle = 3; });
     const refull = () => { if (VC.gfx.overlay && VC.gfx.overlay !== 'none') MM.full = true; };
     bus.on('mapsUpdated', refull);
     bus.on('flagsUpdated', refull);
@@ -394,7 +415,11 @@ VC.hud.register({
     if (MM.W !== S.W || MM.H !== S.H || !MM.px) alloc(S);
     const changed = updateBase(false);
     const dis = VC.disasters && VC.disasters.active && VC.disasters.active.length > 0; // beacons animate
-    if (camChanged() || changed || MM.redraw || !MM.drawn || dis) {
+    // redraw while the camera moves and once more after it settles (the eased camera ends in tiny steps)
+    const moved = camChanged();
+    if (moved) MM.settle = 2;
+    if (moved || changed || MM.redraw || !MM.drawn || dis || MM.settle > 0) {
+      if (!moved && MM.settle > 0) MM.settle--;
       MM.redraw = false;
       draw();
     }

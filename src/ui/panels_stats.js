@@ -19,7 +19,7 @@ const CHARTS = [
   { key: 'money', title: 'Treasury', icon: '🏦', series: [{ keys: ['money'], color: '#b388ff' }], fmt: U.moneyAxis, cur: (S) => [U.money(S.money), S.money < 0 ? 'bad' : ''] },
   { key: 'happy', title: 'Happiness & approval', icon: '😊', min: 0, max: 1, fmt: pctFmt, series: [{ keys: ['happiness'], color: '#ffd166', label: 'Happiness' }, { keys: ['approval'], color: '#5ad1ff', label: 'Approval', fill: false }], cur: (S) => { const v = U.n01(S.stats.happiness); return [U.pct(v), v < 0.4 ? 'bad' : v < 0.55 ? 'warn' : 'good']; } },
   { key: 'fin', title: 'Income vs expenses', icon: '💵', fmt: U.moneyAxis, series: [{ keys: ['income'], color: '#3ddc84', label: 'Income', fill: false }, { keys: ['expenses'], color: '#ff5a6a', label: 'Expenses', fill: false, abs: true }], cur: (S) => { const st = S.stats; let n = U.num(st.net, U.num(st.income) - Math.abs(U.num(st.expenses))); if (!st.income && !st.expenses && U.histLen('income')) n = U.num(+U.hist('income', 1)[0]) - Math.abs(U.num(+U.hist('expenses', 1)[0])); return [U.smoney(n) + '/mo', n < 0 ? 'bad' : n > 0 ? 'good' : '']; } },
-  { key: 'rci', title: 'RCI demand', icon: '🏗️', min: -1, max: 1, sub: 'Growth pressure, −100 … +100', fmt: (v) => Math.round(v * 100), series: [{ keys: ['demandR'], color: U.ZHEX.R, label: 'Residential', fill: false }, { keys: ['demandC'], color: U.ZHEX.C, label: 'Commercial', fill: false }, { keys: ['demandI'], color: U.ZHEX.I, label: 'Industrial', fill: false }], cur: (S) => { const d = S.demand || {}; const f = (v) => (v > 0 ? '+' : '') + Math.round(U.num(v) * 100); return ['R' + f(d.R) + ' C' + f(d.C) + ' I' + f(d.I), '']; } },
+  { key: 'rci', title: 'RCI demand', icon: '🏗️', min: -1, max: 1, sub: 'Growth pressure, −100 … +100', fmt: (v) => U.sint(v * 100), series: [{ keys: ['demandR'], color: U.ZHEX.R, label: 'Residential', fill: false }, { keys: ['demandC'], color: U.ZHEX.C, label: 'Commercial', fill: false }, { keys: ['demandI'], color: U.ZHEX.I, label: 'Industrial', fill: false }], cur: (S) => { const d = S.demand || {}; const f = (v) => U.sint(U.num(v) * 100); return ['R' + f(d.R) + ' C' + f(d.C) + ' I' + f(d.I), '']; } },
   { key: 'labor', title: 'Residents vs jobs', icon: '💼', fmt: (v) => VC.fmt.short(v), series: [{ keys: ['pop'], color: '#39d98a', label: 'Residents', fill: false }, { keys: ['jobs'], color: '#4cc9f0', label: 'Jobs', fill: false }], cur: (S) => [U.int(S.stats.jobs) + ' jobs', ''] },
   { key: 'unemp', title: 'Unemployment', icon: '📉', auto: true, lower: true, series: [{ keys: ['unemployment'], color: '#ff9f43' }], cur: (S) => { const v = U.n01(S.stats.unemployment); return [U.pct(v, 1), v > 0.12 ? 'bad' : v > 0.07 ? 'warn' : 'good']; } },
   { key: 'env', title: 'Crime, pollution & traffic', icon: '🚨', auto: true, lower: true, series: [{ keys: ['crime'], color: '#ff5a6a', label: 'Crime', fill: false }, { keys: ['pollution'], color: '#c9a27a', label: 'Pollution', fill: false }, { keys: ['traffic'], color: '#f4a261', label: 'Traffic', fill: false }], cur: (S) => { const v = U.n01(S.stats.crime); return ['🦹 ' + U.pct(v), v > 0.4 ? 'bad' : v > 0.2 ? 'warn' : 'good']; } },
@@ -35,7 +35,7 @@ function chartCard(def, width) {
   const yFormat = (v) => (def.auto ? (autoPct ? pctFmt(v) : VC.fmt.short(v)) : def.fmt(v));
   const chart = U.chartHover(VC.ui.chart({ width, height: 118, series: [], yFormat, min: def.min, max: def.max }));
   // tooltip values: full precision in the chart's own unit
-  const tipFmt = (v) => (def.auto ? (autoPct ? U.pct(v, 1) : U.int(v)) : def.key === 'rci' ? (v > 0 ? '+' : '') + Math.round(v * 100) : def.min === 0 && def.max === 1 ? U.pct(v, 1) : def.fmt === U.moneyAxis ? U.money(v) : U.int(v));
+  const tipFmt = (v) => (def.auto ? (autoPct ? U.pct(v, 1) : U.int(v)) : def.key === 'rci' ? U.sint(v * 100) : def.min === 0 && def.max === 1 ? U.pct(v, 1) : def.fmt === U.moneyAxis ? U.smoney(v) : U.int(v));
   const el = h('div', { class: 'pn-cc' }, h('div', { class: 'pn-cc-head' }, h('span', { class: 'pn-cc-title' }, h('span', { class: 'pn-ic' }, def.icon), def.title), cur), delta, chart);
   let lastSig = '', lastR = -1;
   el.upd = (S, force) => {
@@ -73,8 +73,14 @@ function chartCard(def, width) {
         const dv = (b - a) * 100;
         txt = (dv >= 0 ? '▲ ' : '▼ ') + Math.abs(dv).toFixed(1) + ' pts';
         good = def.lower ? dv <= 0 : dv >= 0;
+      } else if (Math.abs(a) < 1e-9) {
+        // from zero a percentage is meaningless (the old code printed "▲ 0.0%"): show the absolute change
+        const dv = b - a;
+        const fmtAbs = def.fmt === U.moneyAxis ? U.smoney : (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + (def.auto && auto01 ? U.pct(Math.abs(v), 1) : U.int(Math.abs(v)));
+        txt = Math.abs(dv) < 1e-9 ? '▬ no change' : (dv > 0 ? '▲ ' : '▼ ') + fmtAbs(dv) + ' from zero';
+        good = def.lower ? dv <= 0 : dv >= 0;
       } else {
-        const dv = a !== 0 ? (b - a) / Math.abs(a) : 0;
+        const dv = (b - a) / Math.abs(a);
         txt = (dv >= 0 ? '▲ ' : '▼ ') + Math.abs(dv * 100).toFixed(1) + '%';
         good = def.lower ? dv <= 0 : dv >= 0;
       }
@@ -310,10 +316,10 @@ function popDemand(c) {
       U.css(o.fill, 'bottom', (v >= 0 ? 50 : 50 + v * 50).toFixed(1) + '%');
       U.css(o.fill, 'height', (Math.abs(v) * 50).toFixed(1) + '%');
       U.css(o.fill, 'background', v >= 0 ? U.ZHEX[z] : '#ff5a6a');
-      U.txt(o.val, (v > 0 ? '+' : '') + Math.round(v * 100));
+      U.txt(o.val, U.sint(v * 100));
       U.tone(o.val, v > 0.1 ? 'good' : v < -0.1 ? 'bad' : '');
       const fl = (f[z] || []).filter((x) => x && x.label);
-      U.keyed(o.list, fl, (x) => x.label, (x) => U.diverge(x.label, { tip: x.label }), (el, x) => el.set(U.num(x.value) / mx, (x.value > 0 ? '+' : x.value < 0 ? '−' : '') + Math.abs(Math.round(U.num(x.value) * 100))));
+      U.keyed(o.list, fl, (x) => x.label, (x) => U.diverge(x.label, { tip: U.esc(x.label) }), (el, x) => el.set(U.num(x.value) / mx, U.sint(U.num(x.value) * 100)));
       U.show(o.none, !fl.length);
     }
   };

@@ -1,8 +1,10 @@
 /*
  * VOXELPOLIS — HUD core (VC.hud).
  *   TOP BAR     city name + milestone progress, date / weather / clock, speed controls, funds (animated,
- *               monthly net), population (+trend), approval face, RCI demand meter, power/water pills,
- *               fullscreen + pause-menu buttons. Rich live tooltips on every segment.
+ *               monthly net), population (+trend), approval face (neutral '—' until the first residents),
+ *               RCI demand meter, power/water load pills, mute / fullscreen / pause-menu buttons. Rich live
+ *               tooltips on every segment. Compacts (c1..c4) while overflowing; re-measured every 5 s so a
+ *               transient overflow does not keep it compact.
  *   DOCK        right-side manager buttons (VC.panels.list, or a built-in fallback list) + overlays,
  *               photo mode, settings, help. Active-window highlight, unread-advisor badge, auto-compacts.
  *   READOUT     bottom-right FPS (VC.settings.showFps) + hovered tile info.
@@ -24,6 +26,7 @@ const SPEED_SVG = [
   '<svg viewBox="0 0 16 16"><path d="M.4 4.3v7.4c0 .4.4.6.7.3l4.2-3.7c.2-.2.2-.5 0-.6L1.1 4c-.3-.3-.7-.1-.7.3zM5.6 4.3v7.4c0 .4.4.6.7.3l4.2-3.7c.2-.2.2-.5 0-.6L6.3 4c-.3-.3-.7-.1-.7.3zM10.8 4.3v7.4c0 .4.4.6.7.3l4.2-3.7c.2-.2.2-.5 0-.6L11.5 4c-.3-.3-.7-.1-.7.3z"/></svg>',
 ];
 const SPEED_TIPS = ['<b>Pause</b> <kbd>Space</kbd>', '<b>Normal speed</b> — 1 day / second', '<b>Fast</b> — 3 days / second', '<b>Ultra</b> — 8 days / second'];
+const SND_SVG = ['<svg viewBox="0 0 16 16"><path d="M2.5 6h2.2L8 3.2v9.6L4.7 10H2.5z" fill="currentColor"/><path d="M10.4 5.6a3.4 3.4 0 0 1 0 4.8M12.3 3.8a6 6 0 0 1 0 8.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>', '<svg viewBox="0 0 16 16"><path d="M2.5 6h2.2L8 3.2v9.6L4.7 10H2.5z" fill="currentColor"/><path d="M10.5 6l4 4M14.5 6l-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'];
 const FS_SVG = '<svg viewBox="0 0 16 16"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const MENU_SVG = '<svg viewBox="0 0 16 16"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
 
@@ -50,7 +53,7 @@ const WEATHER_NAMES = { clear: 'Clear skies', cloudy: 'Cloudy', overcast: 'Overc
 const T = {}; // top bar element refs
 const D = { btns: new Map(), sig: '' }; // dock
 const cache = new Map(); // el -> last text (avoid redundant DOM writes)
-let tAcc = 0, slowAcc = 0, infoAcc = 0, fpsAcc = 0;
+let tAcc = 0, slowAcc = 0, infoAcc = 0, fpsAcc = 0, layoutAcc = 0;
 let popRing = [];
 let netCache = { t: -1, net: 0, fc: null };
 let moneyAcc = 0, moneyT = 0;
@@ -103,11 +106,14 @@ const hud = (VC.hud = {
     bus.on('started', onStart);
     bus.on('speed', refreshSpeed);
     bus.on('windowOpened', refreshDockActive);
+    // a window opened while the interface is hidden (H / photo mode, e.g. by a hotkey) brings the UI back
+    // instead of sitting there invisibly
+    bus.on('windowOpened', () => { if (hud.uiHidden) revealUI(); });
     bus.on('windowClosed', refreshDockActive);
     // low quality: drop backdrop blur (the most expensive UI effect over a live canvas)
     const applyLite = () => VC.ui.root.classList.toggle('lite', !!VC.settings && VC.settings.quality === 'low');
     applyLite();
-    bus.on('settings', () => { applyLite(); layoutDock(); refreshReadoutVis(); });
+    bus.on('settings', () => { applyLite(); layoutDock(); refreshReadoutVis(); refreshMute(); });
     bus.on('day', () => {
       const S = VC.state;
       if (!S) return;
@@ -162,7 +168,9 @@ const hud = (VC.hud = {
     if (slowAcc >= 1) {
       slowAcc = 0;
       safe(refreshDockBadges, 'badges');
-      if (T.bar.scrollWidth > T.bar.clientWidth + 1) layoutTop(); // numbers grew: compact further
+      layoutAcc += 1;
+      // numbers grew: compact further now; every 5 s re-measure from scratch so compaction is not sticky
+      if (T.bar.scrollWidth > T.bar.clientWidth + 1 || layoutAcc >= 5) { layoutAcc = 0; layoutTop(); }
     }
     fpsAcc += rdt;
     if (fpsAcc >= 0.5) { fpsAcc = 0; refreshFps(); }
@@ -198,6 +206,8 @@ const hud = (VC.hud = {
     for (const p of hud.parts) if (p.onHide) safe(() => p.onHide(), p.name + '.onHide');
   },
   isVisible: () => hud.visible && !hud.uiHidden,
+  /** Leaves hidden-UI / photo mode (no-op when the UI is showing). */
+  revealUI: () => revealUI(),
   /** Hides / shows ALL interface (windows included). visible: true/false, or omit to toggle. */
   toggleUI(visible) {
     const ui = VC.ui;
@@ -240,7 +250,7 @@ const hud = (VC.hud = {
     else if (P && P.open && P.list && P.list.length) P.open(key);
     else {
       const e = PANEL_FALLBACK.find((x) => x.key === key);
-      VC.ui.toast(`${e ? e.icon + ' <b>' + e.name + '</b>' : key} is not available yet.`, { type: 'info' });
+      VC.ui.toast(`${e ? e.icon + ' <b>' + escapeHtml(e.name) + '</b>' : escapeHtml(key)} is not available yet.`, { type: 'info' });
     }
   },
   openPanel(key) {
@@ -330,7 +340,10 @@ function buildTop() {
   T.wt = utilPill('💧', 'water');
   T.utilSeg = h('div', { class: 'tb-util' }, T.pw.el, T.wt.el);
   // system
-  T.fs = h('button', { class: 'tb-sys-btn', 'aria-label': 'Fullscreen', 'data-tip': '<b>Fullscreen</b> <kbd>F11</kbd>', html: FS_SVG, onclick: toggleFullscreen });
+  T.mute = h('button', { class: 'tb-sys-btn tb-mute', 'aria-label': 'Mute sound', 'data-tip': '1', onclick: toggleMute });
+  T.mute._tip = () => (VC.settings && VC.settings.muted ? '<b>Sound is muted</b><br>Click to turn it back on' : '<b>Mute all sound</b><br>Volumes: ⚙️ Settings → Audio');
+  refreshMute();
+  T.fs = h('button', { class: 'tb-sys-btn tb-fs', 'aria-label': 'Fullscreen', 'data-tip': '<b>Fullscreen</b> <kbd>F11</kbd>', html: FS_SVG, onclick: toggleFullscreen });
   T.menuBtn = h('button', { class: 'tb-sys-btn', 'aria-label': 'Game menu', 'data-tip': '<b>Game menu</b> <kbd>Esc</kbd>', html: MENU_SVG, onclick: () => { VC.bus.emit('sfx', { name: 'click' }); VC.menu && VC.menu.pause && VC.menu.pause(); } });
 
   const sep = () => h('div', { class: 'tb-sep' });
@@ -339,7 +352,7 @@ function buildTop() {
     h('div', { class: 'tb-flex' }),
     T.moneySeg, sep(), T.popSeg, sep(), T.happySeg, sep(), T.rciSeg, sep(), T.utilSeg,
     h('div', { class: 'tb-flex' }),
-    h('div', { class: 'tb-sys' }, T.fs, T.menuBtn));
+    h('div', { class: 'tb-sys' }, T.mute, T.fs, T.menuBtn));
   hud.root.appendChild(h('div', { class: 'hud-topwrap' }, T.bar));
 }
 function utilPill(icon, kind) {
@@ -350,22 +363,44 @@ function utilPill(icon, kind) {
   return { el, val, fill };
 }
 
+const NAME_MAX = 32; // same limit as the New City dialog
 function renameCity() {
   const S = VC.state;
   if (!S) return;
   VC.ui.prompt('✏️ Rename your city', S.name, (v) => {
-    S.name = v.slice(0, 40);
+    // plain text only: markup characters are dropped (the name also appears in other modules' messages)
+    const name = String(v).replace(/[<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, NAME_MAX);
+    if (!name) return;
+    S.name = name;
     cache.delete(T.name);
     refreshTop(true);
     layoutTop();
     VC.bus.emit('cityRenamed', S.name);
-    VC.bus.emit('toast', { text: `Welcome to <b>${escapeHtml(S.name)}</b>!`, type: 'good', icon: '🏙️' });
-  }, { placeholder: 'City name', maxLength: 40, ok: 'Rename' });
+    VC.ui.toast(`Welcome to <b>${escapeHtml(S.name)}</b>!`, { type: 'good', icon: '🏙️', sfx: 'success' });
+  }, { placeholder: 'City name', maxLength: NAME_MAX, ok: 'Rename' });
 }
+/** HTML-escape (shared implementation: VC.ui.esc). Kept as VC.hud.escapeHtml for existing callers. */
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  return VC.ui && VC.ui.esc ? VC.ui.esc(s) : String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
 VC.hud.escapeHtml = escapeHtml;
+
+function toggleMute() {
+  VC.bus.emit('sfx', { name: 'click' });
+  if (!VC.settings) return;
+  VC.settings.muted = !VC.settings.muted;
+  VC.saveSettings();
+  refreshMute();
+}
+function refreshMute() {
+  if (!T.mute) return;
+  const m = !!(VC.settings && VC.settings.muted);
+  if (T.mute._m === m) return;
+  T.mute._m = m;
+  T.mute.innerHTML = SND_SVG[m ? 1 : 0];
+  setCls(T.mute, 'on', m);
+  T.mute.setAttribute('aria-label', m ? 'Unmute sound' : 'Mute sound');
+}
 
 function toggleFullscreen() {
   VC.bus.emit('sfx', { name: 'click' });
@@ -478,12 +513,18 @@ function refreshTop(force) {
   setText(T.popSub, Math.abs(tr) < 0.5 ? '▬ steady' : (tr > 0 ? '▲ ' : '▼ ') + VC.ui.signed(tr) + '/mo');
   setCls(T.popSub, 'good', tr >= 0.5);
   setCls(T.popSub, 'bad', tr <= -0.5);
-  // approval
-  const ap = approvalOf(S);
-  setText(T.face, faceOf(ap));
-  setText(T.happy, Math.round(ap * 100) + '%');
-  T.happyFill.style.width = (ap * 100).toFixed(0) + '%';
-  T.happyFill.style.background = ap >= 0.65 ? 'var(--good)' : ap >= 0.45 ? 'var(--warn)' : 'var(--bad)';
+  // approval (nobody to ask yet in an empty city: neutral face, no number)
+  if (!(st.pop > 0)) {
+    setText(T.face, '😐');
+    setText(T.happy, '—');
+    T.happyFill.style.width = '0%';
+  } else {
+    const ap = approvalOf(S);
+    setText(T.face, faceOf(ap));
+    setText(T.happy, Math.round(ap * 100) + '%');
+    T.happyFill.style.width = (ap * 100).toFixed(0) + '%';
+    T.happyFill.style.background = ap >= 0.65 ? 'var(--good)' : ap >= 0.45 ? 'var(--warn)' : 'var(--bad)';
+  }
   // RCI
   const dm = S.demand || {};
   for (const k of ['R', 'C', 'I']) {
@@ -498,16 +539,20 @@ function refreshTop(force) {
   utilUpdate(T.pw, st.powerSupply || 0, st.powerDemand || 0);
   utilUpdate(T.wt, st.waterSupply || 0, st.waterDemand || 0);
 }
+/** Load pill: demand as a share of supply (100% = fully used; red above). */
 function utilUpdate(p, sup, dem) {
-  let state = 'ok', txt;
+  let state = 'ok', txt, w = 0;
   if (sup <= 0 && dem <= 0) { state = 'idle'; txt = '—'; }
+  else if (sup <= 0) { state = 'bad'; txt = 'NONE'; w = 100; }
   else {
-    const r = sup > 0 ? dem / sup : 9.99;
-    txt = r > 9.9 ? '0%' : Math.round(r * 100) + '%';
-    if (dem > sup) { state = 'bad'; if (sup <= 0) txt = 'NONE'; }
+    const r = dem / sup;
+    txt = r >= 9.995 ? '>999%' : Math.round(r * 100) + '%';
+    if (dem > sup) state = 'bad';
     else if (r > 0.88) state = 'warn';
-    p.fill.style.width = Math.min(100, r * 100).toFixed(0) + '%';
+    w = Math.min(100, r * 100);
   }
+  const ws = w.toFixed(0) + '%';
+  if (p.fill._w !== ws) { p.fill._w = ws; p.fill.style.width = ws; }
   setText(p.val, txt);
   for (const s of ['ok', 'warn', 'bad', 'idle']) setCls(p.el, s, s === state);
 }
@@ -600,6 +645,7 @@ function happyTip() {
   const S = VC.state;
   if (!S) return '';
   const st = S.stats || {};
+  if (!(st.pop > 0)) return '<div class="tt-head"><span class="tt-icon">😐</span>Mayor approval</div><div class="tt-desc">No citizens yet — zone some homes and they will tell you what they think.</div>';
   const ap = approvalOf(S);
   let s = `<div class="tt-head"><span class="tt-icon">${faceOf(ap)}</span>Mayor approval ${Math.round(ap * 100)}%</div><div class="tt-grid">`;
   s += pctRow('Happiness', st.happiness) + pctRow('Health', st.health) + pctRow('Education', st.education) + pctRow('Crime', st.crime, true) + pctRow('Pollution', st.pollution, true) + pctRow('Traffic', st.traffic, true);
@@ -633,6 +679,7 @@ function utilTip(kind) {
   const n = info ? (kind === 'power' ? info.plants : info.sources) : null;
   let s = `<div class="tt-head"><span class="tt-icon">${kind === 'power' ? '⚡' : '💧'}</span>${kind === 'power' ? 'Electricity' : 'Water'}</div><div class="tt-grid">`;
   s += `<span>Production</span><b>${VC.fmt.num(sup)} ${unit}</b><span>Consumption</span><b>${VC.fmt.num(dem)} ${unit}</b>`;
+  if (sup > 0) s += `<span>Load</span><b class="${dem > sup ? 'bad' : dem > sup * 0.88 ? 'warn' : 'good'}">${Math.round((dem / sup) * 100)}% of capacity</b>`;
   s += `<span>Balance</span><b class="${sup >= dem ? 'good' : 'bad'}">${VC.ui.signed(sup - dem)} ${unit}</b>`;
   if (n) s += `<span>${kind === 'power' ? 'Power plants' : 'Water sources'}</span><b>${n.length}</b>`;
   s += '</div>';
@@ -784,6 +831,12 @@ function refreshTileInfo() {
   setCls(T.tile, 'show', true);
 }
 
+function revealUI() {
+  if (!hud.uiHidden) return;
+  if (hud.photo) hud.photoMode(false);
+  else hud.toggleUI(true);
+}
+
 /* ================================================================== */
 /* PHOTO MODE HINT                                                     */
 /* ================================================================== */
@@ -821,9 +874,10 @@ function savePicture() {
 /* ================================================================== */
 /* KEYBOARD                                                            */
 /* ================================================================== */
+/** Typing in a text field (sliders, checkboxes and buttons do not block hotkeys). */
 const isTyping = (e) => {
   const t = e.target;
-  return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+  return !!t && ((VC.ui.isTextEntry && VC.ui.isTextEntry(t)) || t.tagName === 'SELECT');
 };
 /** Capture phase: Esc/H leave hidden-UI / photo mode before anything else sees the key. */
 function onKeyCapture(e) {

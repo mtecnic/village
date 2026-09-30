@@ -1,5 +1,6 @@
 /*
- * VOXELPOLIS — Disasters panel ('disasters'): random-disaster toggle (S.disastersEnabled), a grid of
+ * VOXELPOLIS — Disasters panel ('disasters'): random-disaster toggle for THIS city (S.disastersEnabled, the
+ * single switch; Settings → Gameplay only holds the default for new cities), a grid of
  * VC.disasters.TYPES to unleash (with confirmation) at the camera centre or at a location picked on
  * the map (next bus 'select' is consumed via VC.panels.onSelectHook), and the active disasters list.
  */
@@ -32,13 +33,14 @@ function disarm() {
 const activeList = () => (VC.disasters && Array.isArray(VC.disasters.active) ? VC.disasters.active : []).filter((d) => d && d.type);
 function unleash(type, x, z) {
   const t = typeInfo(type);
-  VC.ui.confirm(`Unleash <b>${t.icon} ${t.name}</b> near tile <b>${Math.round(x)}, ${Math.round(z)}</b>?<br><span style="color:var(--warn)">Buildings may be destroyed. This cannot be undone.</span>`, () => {
+  if (!isFinite(x) || !isFinite(z)) return;
+  VC.ui.confirm(`Unleash <b>${U.esc(t.icon)} ${U.esc(t.name)}</b> near tile <b>${Math.round(x)}, ${Math.round(z)}</b>?<br><span style="color:var(--warn)">Buildings may be destroyed. This cannot be undone.</span>`, () => {
     let ok = false;
     if (VC.disasters && typeof VC.disasters.trigger === 'function') ok = U.safe(() => VC.disasters.trigger(type, x, z), false);
     if (ok === false) {
       const act = activeList();
       const why = act.length >= 4 ? 'Too many disasters are already underway.' : act.some((d) => d.type === type) ? `A ${t.name.toLowerCase()} is already underway.` : 'Nothing happened — try another spot.';
-      VC.bus.emit('toast', { text: `${t.name}: ${why}`, type: 'warn', icon: t.icon });
+      VC.ui.toast(`${U.esc(t.name)}: ${why}`, { type: 'warn', icon: t.icon, sfx: 'error' });
     } else if (VC.camera && VC.camera.focus) VC.camera.focus(x, z);
     P.refresh('disasters');
   }, { title: '⚠️ Trigger disaster', yes: t.icon + ' Unleash it' });
@@ -67,12 +69,14 @@ P.defs.disasters = {
   build(p) {
     const S = VC.state;
     p.body.appendChild(h('div', { class: 'pn-banner t-bad' }, '⚠️ Disasters destroy buildings and cost money. Save your city first if you want to be able to undo the damage.'));
-    const tg = VC.ui.toggle({ label: 'Random disasters', desc: 'Nature strikes now and then. Turn off for a peaceful city.', value: S.disastersEnabled !== false, onChange: (v) => {
+    const tg = VC.ui.toggle({ label: 'Random disasters in this city', desc: 'Nature strikes now and then. Turn off for a peaceful city. (Settings → Gameplay only sets the default for new cities.)', value: S.disastersEnabled !== false, onChange: (v) => {
       if (VC.disasters && typeof VC.disasters.setEnabled === 'function') VC.disasters.setEnabled(v);
       else VC.state.disastersEnabled = v;
-      VC.bus.emit('toast', { text: v ? 'Random disasters <b>enabled</b>. Stay alert!' : 'Random disasters <b>disabled</b>.', type: v ? 'warn' : 'info', icon: '🌪️' });
+      VC.ui.toast(v ? 'Random disasters <b>enabled</b>. Stay alert!' : 'Random disasters <b>disabled</b>.', { type: v ? 'warn' : 'info', icon: '🌪️' });
     } });
-    const glob = h('div', { class: 'pn-banner t-info' }, 'ℹ️ Disasters are switched off in Settings, so random events will not occur.');
+    // shown only if something besides this switch still blocks random disasters (should not happen once
+    // VC.disasters.randomEnabled() follows S.disastersEnabled alone)
+    const glob = h('div', { class: 'pn-banner t-info' }, 'ℹ️ Random disasters are currently blocked by the “Random disasters” default in Settings → Gameplay.');
     const next = h('div', { class: 'pn-dis-next' });
     p.body.append(h('div', { class: 'pn-card pn-dis-toggle' }, tg, next), glob);
     const seg = U.seg([{ value: 'camera', label: '🎯 Camera centre' }, { value: 'pick', label: '📍 Pick on map' }], targetMode, (v) => {
@@ -94,14 +98,14 @@ P.defs.disasters = {
       const desc = t.desc || FLAVOR[t.key] || '';
       const cnt = h('span', { class: 'pn-dis-count' });
       counts[t.key] = cnt;
-      const b = h('button', { class: 'pn-dis', 'data-tip': `<b>${t.icon} ${t.name}</b><br>${desc}`, onclick: () => {
+      const b = h('button', { class: 'pn-dis', 'data-tip': `<b>${U.esc(t.icon)} ${U.esc(t.name)}</b><br>${U.esc(desc)}`, onclick: () => {
         VC.bus.emit('sfx', { name: 'click' });
         if (targetMode === 'pick') {
           armed = armed === t.key ? null : t.key;
           if (armed) {
             P.onSelectHook = pickHook;
             if (VC.tools && VC.tools.current !== 'select' && VC.tools.select) VC.tools.select('select');
-            VC.bus.emit('toast', { text: `📍 Click on the map to choose where the <b>${t.name}</b> strikes.`, type: 'warn', icon: t.icon });
+            VC.ui.toast(`📍 Click on the map to choose where the <b>${U.esc(t.name)}</b> strikes.`, { type: 'warn', icon: t.icon });
           } else disarm();
           P.refresh('disasters');
         } else {
@@ -123,7 +127,7 @@ P.defs.disasters = {
     const focusD = (d) => {
       if (!d) return;
       if (VC.disasters && typeof VC.disasters.focus === 'function' && VC.disasters.focus(d)) return;
-      if (VC.camera && VC.camera.focus) VC.camera.focus(d.x, d.z, 38);
+      if (VC.camera && VC.camera.focus && isFinite(d.x) && isFinite(d.z)) VC.camera.focus(d.x, d.z, 38);
     };
     const actRow = () => {
       const nm = h('span', { class: 'pn-em-name' });
@@ -143,7 +147,8 @@ P.defs.disasters = {
     return () => {
       const S = VC.state;
       tg.setValue(S.disastersEnabled !== false);
-      U.show(glob, VC.settings && VC.settings.disasters === false);
+      const blocked = S.disastersEnabled !== false && VC.disasters && typeof VC.disasters.randomEnabled === 'function' && !VC.disasters.randomEnabled();
+      U.show(glob, !!blocked && VC.settings && VC.settings.disasters === false);
       const ni = U.api('disasters', 'nextIn', [], null);
       U.txt(next, typeof ni === 'number' ? (ni <= 0 ? '⏳ A random disaster could strike any day now…' : `⏳ Next random disaster possible in ~${Math.round(ni)} days`) : '');
       U.show(next, typeof ni === 'number');

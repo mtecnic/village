@@ -46,15 +46,19 @@ function cost(p) {
 const unlocked = (p) => U.safe(() => VC.world.isUnlocked(p.key), true);
 const isOn = (p) => !!(VC.state.policies && VC.state.policies[p.key]);
 
+/**
+ * One notification per change: the toast below (direct, silent) + the audio module's 'policyChanged' sound.
+ * Refusals are explained by VC.econ itself (locked) or by the HUD's single 'noMoney' toast.
+ */
 function setPolicy(p, on, card) {
   if (!VC.econ || !VC.econ.setPolicy) {
-    VC.bus.emit('toast', { text: 'Policies are unavailable right now.', type: 'bad', icon: '📜' });
+    VC.ui.toast('Policies are unavailable right now.', { type: 'bad', icon: '📜', sfx: 'error' });
     card.sw.setValue(isOn(p));
     return;
   }
   if (on && !unlocked(p)) {
     card.sw.setValue(false);
-    VC.bus.emit('toast', { text: `<b>${p.name}</b> unlocks at ${U.int(p.unlock)} residents.`, type: 'warn', icon: '🔒' });
+    VC.ui.toast(`<b>${U.esc(p.name)}</b> unlocks at ${U.int(p.unlock)} residents.`, { type: 'warn', icon: '🔒', sfx: 'error' });
     return;
   }
   const ok = U.safe(() => VC.econ.setPolicy(p.key, on), false);
@@ -62,8 +66,7 @@ function setPolicy(p, on, card) {
     // VC.econ explains refusals itself (locked / can't afford) — just snap the switch back
     card.sw.setValue(isOn(p));
   } else {
-    VC.bus.emit('toast', { text: on ? `<b>${p.name}</b> enacted.` : `<b>${p.name}</b> repealed.`, type: on ? 'good' : 'info', icon: p.icon });
-    VC.bus.emit('sfx', { name: on ? 'policy' : 'click' });
+    VC.ui.toast(on ? `<b>${U.esc(p.name)}</b> enacted.` : `<b>${U.esc(p.name)}</b> repealed.`, { type: on ? 'good' : 'info', icon: p.icon });
   }
   P.refresh();
 }

@@ -8,7 +8,7 @@
  *   VC.panels.list                 [{key, name, icon, hotkey}] — the 10 manager windows (HUD buttons, hotkeys)
  *   VC.panels.open(key, {tab})     opens/focuses a panel. Extra keys: 'loans' (budget → Loans tab),
  *                                  'inspector' (re-opens the last inspected target)
- *   VC.panels.toggle(key)          closes if open, else opens
+ *   VC.panels.toggle(key)          closes if open (restores + focuses it when minimised or behind), else opens
  *   VC.panels.close(key), isOpen(key), refresh(key?) (immediate live update; no key = all, throttled)
  *   VC.panels.inspect(building | {x, z} | null)   opens the inspector (null closes it); sets/clears
  *                                  VC.tools.selectedId; VC.panels.inspected() -> current target
@@ -19,9 +19,14 @@
  * Window ids are the panel keys themselves ('budget', 'inspector', …) so bus 'windowOpened' /
  * 'windowClosed' payloads can be compared to VC.panels.list keys directly.
  * Bus in: select, bldRemove, policyChanged, budgetChanged, loanChanged, overlay, advisor, milestone,
- * achievement, disaster, month, money (refresh), windowClosed. Bus out: sfx {name:'open'|'click'|'policy'}, toast.
+ * achievement, disaster, month, money (refresh), windowClosed. Bus out: sfx {name:'click'} (window open/close sounds come
+ * from the audio module's windowOpened / windowClosed hooks). Feedback toasts go
+ * straight to VC.ui.toast (never bus 'toast'); money failures are left to the HUD's single 'noMoney' toast.
  * Hotkeys belong to input.js; a guarded fallback here only fires if nobody else handled the key.
- * Positions are kept in screen px and work with either UI scaling model (CSS zoom or `scale`).
+ * Positions are kept in screen px and work with either UI scaling model (CSS zoom or `scale`). A panel
+ * reopens where the player last dragged it (session memory) unless that spot is now covered by another
+ * open panel; otherwise placement() picks a free standard spot, keeping clear of the top bar, the dock
+ * and the tutorial card.
  *
  * PANEL DEFINITIONS (registered at load time by ui/panels_*.js, which load after this file):
  *   VC.panels.defs[key] = { title, icon, width, place: 'left'|'center'|'right', build(p) -> updater }
@@ -122,8 +127,15 @@ U.spct = (f, d = 0) => {
   return (+s === 0 ? '±' : v > 0 ? '+' : '−') + s + '%';
 };
 U.int = (n) => VC.fmt.num(U.num(n));
-/** Chart axis money format: -$1.2k rather than $-1.2k. */
-U.moneyAxis = (v) => (v < 0 ? '-$' : '$') + VC.fmt.short(Math.abs(v));
+/** Chart axis money format: −$1.2k rather than $-1.2k (real minus sign, like U.smoney). */
+U.moneyAxis = (v) => (v < -0.5 ? '−$' : '$') + VC.fmt.short(Math.abs(v));
+/** Signed integer with a real minus sign: +12 / −7 / 0. */
+U.sint = (n) => {
+  const r = Math.round(U.num(n));
+  return (r > 0 ? '+' : r < 0 ? '−' : '') + Math.abs(r);
+};
+/** HTML-escape user / imported text (city, building, save names) before it goes into HTML. */
+U.esc = (s) => VC.ui.esc(s);
 U.short = (n) => VC.fmt.short(U.num(n));
 /** Loan/interest rate given as fraction (0.05) or percent (5). */
 U.rate = (r) => {
@@ -652,24 +664,37 @@ function readPos(el) {
  * spots and "beside an open window", taking the first that does not overlap an open panel;
  * otherwise cascades from the preferred spot. Keeps clear of the HUD top bar and right-hand dock.
  */
+/** Screen rects windows should not cover: open panels (except `key`) and the tutorial card. */
+function occupied(key) {
+  const rects = [];
+  for (const p of openP.values()) {
+    if (p.key === key || !VC.ui.isOpen(p.key) || p.win.el.style.display === 'none' || p.win.el.classList.contains('closing')) continue;
+    const r = p.win.el.getBoundingClientRect();
+    rects.push({ x: r.left, y: r.top, w: r.width, h: r.height });
+  }
+  const tut = VC.hud && VC.hud.root && VC.hud.root.querySelector('.tut-card:not(.out)');
+  if (tut) {
+    const r = tut.getBoundingClientRect();
+    if (r.width > 0) rects.push({ x: r.left, y: r.top, w: r.width, h: r.height, soft: true });
+  }
+  return rects;
+}
 function placement(key, def) {
   const s = uiScale();
   const vw = window.innerWidth, vh = window.innerHeight;
   const w = Math.min((def.width || 480) * s, vw - 8); // visual width
   const top = Math.round(66 * s + 12);
   const hgt = Math.max(200, vh - top - 110);
-  const rects = [];
-  for (const p of openP.values()) {
-    if (p.key === key || !VC.ui.isOpen(p.key) || p.win.el.style.display === 'none') continue;
-    const r = p.win.el.getBoundingClientRect();
-    rects.push({ x: r.left, y: r.top, w: r.width, h: r.height });
-  }
+  const rects = occupied(key);
   const L = 14, Cx = (vw - w) / 2, R = vw - w - 14 - 58 * s; // right: leave room for the dock
   const xs = def.place === 'right' ? [R, L, Cx] : def.place === 'center' ? [Cx, L, R] : [L, Cx, R];
   for (const r of rects) xs.push(r.x + r.w + 10, r.x - w - 10);
-  const free = (x) => !rects.some((r) => x < r.x + r.w && x + w > r.x && top < r.y + r.h && top + hgt > r.y);
-  for (const x of xs) if (x >= 4 && x + w <= vw - 4 && free(x)) return { x, y: top };
-  // no free spot: cascade from the preferred position
+  const hits = (x, list) => list.some((r) => x < r.x + r.w && x + w > r.x && top < r.y + r.h && top + hgt > r.y);
+  for (const x of xs) if (x >= 4 && x + w <= vw - 4 && !hits(x, rects)) return { x, y: top };
+  // no spot clear of everything: at least keep off the tutorial card, then off other panels
+  const hard = rects.filter((r) => !r.soft);
+  if (hard.length < rects.length) for (const x of xs) if (x >= 4 && x + w <= vw - 4 && !hits(x, rects.filter((r) => r.soft))) return { x, y: top };
+  // cascade from the preferred position
   let x = xs[0], y = top;
   for (let n = 0; n < 6; n++) {
     if (!rects.some((r) => Math.abs(r.x - x) < 12 && Math.abs(r.y - y) < 12)) break;
@@ -678,13 +703,24 @@ function placement(key, def) {
   }
   return { x: Math.max(4, Math.min(x, vw - w - 4)), y: Math.max(4, Math.min(y, vh - 120)) };
 }
-/** Creates the window for a panel at its remembered or default position (screen px). */
+/**
+ * Creates the window for a panel at its remembered (dragged-to) position when that spot is free, else at
+ * the default placement (screen px).
+ */
 function makeWin(key, def, title, icon) {
-  const pos = posMem[key] || placement(key, def);
+  const wv = Math.min((def.width || 480) * uiScale(), window.innerWidth - 8);
+  let pos = posMem[key];
+  if (pos) {
+    const top = pos.y, hgt = Math.max(200, window.innerHeight - top - 110);
+    const clash = occupied(key).some((r) => pos.x < r.x + r.w && pos.x + wv > r.x && top < r.y + r.h && top + hgt > r.y);
+    if (clash) pos = null;
+  }
+  pos = pos || placement(key, def);
   const win = VC.ui.window(key, { title, icon, width: def.width || 480, x: 0, y: 0, cls: 'pn-win pn-' + key });
   // keep the whole window on screen (a remembered spot may come from another UI scale / window size)
-  const wv = Math.min((def.width || 480) * uiScale(), window.innerWidth - 8);
-  applyPos(win.el, M.clamp(pos.x, 4, Math.max(4, window.innerWidth - wv - 4)), M.clamp(pos.y, 4, Math.max(4, window.innerHeight - 80)));
+  const x = M.clamp(pos.x, 4, Math.max(4, window.innerWidth - wv - 4)), y = M.clamp(pos.y, 4, Math.max(4, window.innerHeight - 80));
+  if (zoomOf(win.el) === 1 && VC.ui.placeWindow) VC.ui.placeWindow(key, x, y); // also anchors right-docked panels
+  else applyPos(win.el, x, y);
   return win;
 }
 
@@ -727,7 +763,8 @@ function build(p) {
 function onClosed(key) {
   const p = openP.get(key);
   if (p) {
-    posMem[key] = readPos(p.win.el);
+    // remember only where the player put it: untouched windows keep using placement() (overlap avoidance)
+    if (p.win.moved) posMem[key] = readPos(p.win.el);
     if (p.def.onClose) U.safe(() => p.def.onClose(p));
     openP.delete(key);
   }
@@ -810,6 +847,7 @@ const P = (VC.panels = {
     if (!def || !VC.ui || !VC.ui.window) return null;
     let p = openP.get(key);
     if (p && VC.ui.isOpen(key)) {
+      if (p.win.isMinimized()) p.win.minimize(false);
       p.win.show();
       if (o.tab && p.tabs) p.tabs.select(o.tab);
       return p.win;
@@ -820,14 +858,20 @@ const P = (VC.panels = {
     p = { key, def, win, body: win.body, opts: o };
     openP.set(key, p);
     build(p);
-    VC.bus.emit('sfx', { name: 'open' });
-    return win;
+    return win; // the audio module voices bus 'windowOpened' ('open'): no extra sfx here
   },
 
   toggle(key) {
     if (key === 'loans') key = 'budget';
     lastCall = { key, t: performance.now() };
     if (P.isOpen(key)) {
+      const w = VC.ui.getWindow(key);
+      // a minimised or hidden window comes back instead of being destroyed by its hotkey
+      if (w && (w.isMinimized() || w.el.style.display === 'none')) {
+        w.minimize(false);
+        w.show();
+        return w;
+      }
       P.close(key);
       return null;
     }
@@ -871,7 +915,7 @@ const P = (VC.panels = {
 function onHotkey(e) {
   if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
   const tg = e.target;
-  if (tg && (tg.tagName === 'INPUT' || tg.tagName === 'TEXTAREA' || tg.tagName === 'SELECT' || tg.isContentEditable)) return;
+  if (tg && (VC.ui.isTextEntry(tg) || tg.tagName === 'SELECT')) return; // sliders / checkboxes do not block keys
   const it = LIST.find((l) => l.hotkey === e.code);
   if (!it) return;
   // same guards as the HUD: not over modals, the title menu or its demo city

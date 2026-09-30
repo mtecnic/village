@@ -302,7 +302,7 @@ function tabTaxes(c) {
 function tabDepartments(c) {
   const setAll = (f) => {
     for (const d of VC.DEPARTMENTS) U.api('econ', 'setFunding', [d.key, f]);
-    VC.bus.emit('toast', { text: `All departments funded at <b>${Math.round(f * 100)}%</b>`, type: 'info', icon: '🏛️' });
+    VC.ui.toast(`All departments funded at <b>${Math.round(f * 100)}%</b>`, { type: 'info', icon: '🏛️' });
     P.refresh();
   };
   const total = h('span', { class: 'pn-dept-total' });
@@ -398,11 +398,11 @@ function tabLoans(c) {
       if (o.available === false) return;
       VC.ui.confirm(`Borrow <b>${U.money(o.amount)}</b> at <b>${U.rate(o.rate)}</b> for ${o.months} months?<br>You will pay <b>${U.money(o.monthly)}</b> every month (${U.money(o.total || o.monthly * o.months)} in total).`, () => {
         const ok = U.api('econ', 'takeLoan', [o.amount, o.months], false);
-        // a real econ explains refusals itself (toast); only speak up when nobody else will
+        // a real econ explains refusals itself (toast) and plays the cash sound; only speak up when nobody else will
         if (ok === false) {
-          if (!('available' in o)) VC.bus.emit('toast', { text: 'The bank declined the loan.', type: 'bad', icon: '🏦' });
+          if (!('available' in o)) VC.ui.toast('The bank declined the loan.', { type: 'bad', icon: '🏦', sfx: 'error' });
         } else {
-          VC.bus.emit('toast', { text: `Loan of <b>${U.money(o.amount)}</b> received.`, type: 'good', icon: '🏦' });
+          VC.ui.toast(`Loan of <b>${U.money(o.amount)}</b> received.`, { type: 'good', icon: '🏦' });
         }
         P.refresh();
       }, { title: '🏦 Take a loan', yes: 'Borrow' });
@@ -427,11 +427,20 @@ function tabLoans(c) {
     const meta = h('div', { class: 'pn-loan-meta' });
     const bar = U.meter('Repaid', { small: true, color: '#3ddc84' });
     const btn = VC.ui.button('Repay', () => {
-      const i = el._i, l = el._l;
+      const l = el._l;
       VC.ui.confirm(`Pay off the remaining <b>${U.money(l.remaining)}</b> of this loan now?`, () => {
+        // loans can be paid off or added while the dialog is open: find THIS loan's index now
+        const loans = (VC.state && VC.state.loans) || [];
+        const i = loans.indexOf(l);
+        if (i < 0) {
+          VC.ui.toast('That loan is already paid off.', { type: 'info', icon: '🏦' });
+          P.refresh();
+          return;
+        }
         const ok = U.api('econ', 'repayLoan', [i], false);
-        if (ok === false) VC.bus.emit('toast', { text: 'Not enough money to repay this loan.', type: 'bad', icon: '🏦' });
-        else VC.bus.emit('toast', { text: 'Loan repaid. The bank thanks you!', type: 'good', icon: '🏦' });
+        // not enough money: VC.money.spend already raised 'noMoney' (one HUD toast); nothing to add here
+        if (ok !== false) VC.ui.toast('Loan repaid. The bank thanks you!', { type: 'good', icon: '🏦' });
+        else if (VC.money && VC.money.canAfford && VC.money.canAfford(Math.ceil(U.num(l.remaining)))) VC.ui.toast('The bank could not process this repayment.', { type: 'bad', icon: '🏦', sfx: 'error' });
         P.refresh();
       }, { title: '🏦 Repay loan', yes: 'Repay' });
     }, { icon: '💸', cls: 'small good' });

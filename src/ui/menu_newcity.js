@@ -142,7 +142,8 @@ function newCity() {
   const o = NC.o;
 
   // name
-  const nameIn = ui.input({ value: o.name, placeholder: 'City name', maxLength: 32, onInput: (v) => (o.name = v), onEnter: found });
+  // Esc in a text field closes the dialog straight away (not just the field's focus)
+  const nameIn = ui.input({ value: o.name, placeholder: 'City name', maxLength: 32, onInput: (v) => (o.name = v), onEnter: found, onEscape: () => closeDialog() });
   const dice = (fn, tip) => h('button', { class: 'nc-dice', 'data-tip': tip, onclick: (e) => { VC.bus.emit('sfx', { name: 'click' }); VC.ui.flash(e.currentTarget, 'roll'); fn(); } }, '🎲');
   const nameRow = h('div', { class: 'nc-inrow' }, nameIn, dice(() => { o.name = randomCityName(); nameIn.value = o.name; }, 'Random name'));
 
@@ -174,7 +175,7 @@ function newCity() {
   // preview + seed + size
   NC.big = h('canvas', { class: 'nc-big', width: 220, height: 220 });
   NC.bigLabel = h('div', { class: 'nc-big-label' });
-  NC.seedInput = ui.input({ value: String(o.seed), placeholder: 'Seed (number or word)', maxLength: 24, onEnter: (v) => { o.seed = parseSeed(v); refreshPreviews(); } });
+  NC.seedInput = ui.input({ value: String(o.seed), placeholder: 'Seed (number or word)', maxLength: 24, onEnter: (v) => { o.seed = parseSeed(v); refreshPreviews(); }, onEscape: () => closeDialog() });
   let seedT = 0;
   NC.seedInput.addEventListener('input', () => { clearTimeout(seedT); seedT = setTimeout(() => { o.seed = parseSeed(NC.seedInput.value); refreshPreviews(); }, 350); });
   const seedRow = h('div', { class: 'nc-inrow' }, NC.seedInput, dice(() => { o.seed = newSeed(); NC.seedInput.value = String(o.seed); refreshPreviews(); }, 'New random map'));
@@ -182,7 +183,7 @@ function newCity() {
   const sizes = ui.segmented({ options: Object.keys(VC.MAP_SIZES).map((k) => { const v = VC.MAP_SIZES[k]; return { value: v, label: (SIZE_INFO[v] || { label: k }).label, tip: `${v} × ${v} tiles` }; }), value: o.size, cls: 'nc-sizes', onChange: (v) => { o.size = v; sizeNote.textContent = (SIZE_INFO[v] || {}).note || ''; refreshPreviews(); } });
 
   const toggles = h('div', { class: 'nc-toggles' },
-    ui.toggle({ label: 'Natural disasters', desc: 'Fires, tornadoes, meteors… and worse', value: o.disasters, onChange: (v) => (o.disasters = v) }),
+    ui.toggle({ label: 'Natural disasters', desc: 'Random fires, tornadoes, meteors… Change it later in the 🌪️ Disasters panel', value: o.disasters, onChange: (v) => (o.disasters = v) }),
     ui.toggle({ label: 'Tutorial', desc: 'Friendly step-by-step hints', value: o.tutorial, onChange: (v) => (o.tutorial = v) }));
 
   const lbl = (t) => h('div', { class: 'nc-label' }, t);
@@ -208,7 +209,8 @@ function newCity() {
 function found() {
   const o = NC.o;
   if (!o) return;
-  const name = (o.name || '').trim() || randomCityName();
+  // plain text only (markup characters dropped): the name appears in many messages
+  const name = (o.name || '').replace(/[<>]/g, '').replace(/\s+/g, ' ').trim() || randomCityName();
   if (VC.settings.tutorial !== o.tutorial) { VC.settings.tutorial = o.tutorial; VC.saveSettings(); }
   const opts = { name: name.slice(0, 32), seed: o.seed >>> 0, size: o.size, mapType: o.mapType, difficulty: o.difficulty, disasters: o.disasters };
   VC.bus.emit('sfx', { name: 'click' });

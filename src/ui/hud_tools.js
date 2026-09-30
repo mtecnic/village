@@ -119,7 +119,7 @@ function levelWord(v) {
 const SERVICE_ICON = { police: '🚓', fire: '🚒', health: '🏥', edu: '🎓', park: '🌳', transit: '🚌', garbage: '♻️' };
 const SERVICE_NAME = { police: 'Police', fire: 'Fire', health: 'Health', edu: 'Education', park: 'Leisure', transit: 'Transit', garbage: 'Garbage' };
 function toolTipHtml(t) {
-  const esc = VC.hud.escapeHtml, fmt = VC.fmt, mul = costMul();
+  const esc = VC.ui.esc, fmt = VC.fmt, mul = costMul();
   const d = t.def;
   const row = (l, v, cls) => `<span>${l}</span><b${cls ? ` class="${cls}"` : ''}>${v}</b>`;
   let s = `<div class="tt-head"><span class="tt-icon">${t.icon}</span>${esc(t.name)}</div>`;
@@ -151,7 +151,7 @@ function toolTipHtml(t) {
   s += '</div>';
   if (d && d.needsWater) s += '<div class="tt-foot">🌊 Must be placed next to water.</div>';
   if (d && d.unique) s += `<div class="tt-foot">⭐ Unique — one per city.${t.built ? ' <b>Already built.</b>' : ''}</div>`;
-  if (t.needsPolicy) { const p = VC.POLICY[t.needsPolicy]; s += `<div class="tt-lock">📜 Requires the “${p ? p.name : t.needsPolicy}” policy</div>`; }
+  if (t.needsPolicy) { const p = VC.POLICY[t.needsPolicy]; s += `<div class="tt-lock">📜 Requires the “${esc(p ? p.name : t.needsPolicy)}” policy</div>`; }
   if (t.locked) s += `<div class="tt-lock">🔒 Unlocks at ${fmt.num(t.unlock || 0)} population</div>`;
   return s;
 }
@@ -274,7 +274,8 @@ function pickTool(t, card) {
   if (t.locked || t.needsPolicy || t.built) {
     VC.ui.flash(card, 'shake');
     VC.bus.emit('sfx', { name: 'error' });
-    const msg = t.locked ? `🔒 <b>${t.name}</b> unlocks at <b>${VC.fmt.num(t.unlock || 0)}</b> population.` : t.needsPolicy ? `📜 <b>${t.name}</b> requires the “${(VC.POLICY[t.needsPolicy] || {}).name || t.needsPolicy}” policy.` : `⭐ <b>${t.name}</b> is unique and already built.`;
+    const esc = VC.ui.esc, nm = esc(t.name);
+    const msg = t.locked ? `🔒 <b>${nm}</b> unlocks at <b>${VC.fmt.num(t.unlock || 0)}</b> population.` : t.needsPolicy ? `📜 <b>${nm}</b> requires the “${esc((VC.POLICY[t.needsPolicy] || {}).name || t.needsPolicy)}” policy.` : `⭐ <b>${nm}</b> is unique and already built.`;
     VC.ui.toast(msg, { type: 'warn', icon: '🔒' });
     return;
   }
@@ -283,7 +284,6 @@ function pickTool(t, card) {
   closePalette();
 }
 function renderPalette(g, list) {
-  const esc = VC.hud.escapeHtml;
   const head = h('div', { class: 'pal-head' }, h('span', { class: 'pal-icon' }, g.icon), h('span', { class: 'pal-title' }, g.name), h('span', { class: 'pal-count' }, list.length + (list.length === 1 ? ' tool' : ' tools')), h('button', { class: 'win-btn pal-close', title: 'Close (Esc)', onclick: closePalette }, '×'));
   let body;
   const zones = list.filter((t) => t.kind === 'zone' && t.zt);
@@ -309,7 +309,7 @@ function renderPalette(g, list) {
     body = h('div', { class: 'pal-grid', style: { maxWidth: cols * 108 + (cols - 1) * 7 + 'px' } }, list.map((t) => toolCard(t)));
   }
   const pal = h('div', { class: 'hud-palette pe palette-' + g.key }, head, body, h('i', { class: 'pal-notch' }));
-  pal.setAttribute('aria-label', esc(g.name));
+  pal.setAttribute('aria-label', g.name); // attribute text: no HTML escaping
   return pal;
 }
 /** Centres the palette over its group button, clamped to the viewport (toolbar-local coordinates). */
@@ -407,6 +407,7 @@ VC.hud.register({
     VC.bus.on('tool', refreshToolHighlight);
     VC.bus.on('toolGroup', (e) => {
       if (!e || !e.key || !VC.hud.visible || (VC.menu && VC.menu.active)) return;
+      if (VC.hud.uiHidden && VC.hud.revealUI) VC.hud.revealUI(); // never open a palette invisibly
       if (TB.palGroup === e.key) closePalette();
       else openPalette(e.key);
     });

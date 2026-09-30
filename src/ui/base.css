@@ -53,7 +53,9 @@ button:focus-visible, .input:focus-visible, select:focus-visible { outline: 2px 
 .num { font-family: var(--num); font-variant-numeric: tabular-nums; }
 
 /* ---------------- windows ---------------- */
-.ui-windows { position: absolute; inset: 0; }
+/* the windows layer is its own stacking context: window z-indices (1..n, renormalised) stay local, so
+ * nothing a window does can climb over toasts, the banner, the pause menu or modals (see ui.js Z-ORDER) */
+.ui-windows { position: absolute; inset: 0; z-index: 20; }
 .win { position: absolute; min-width: 280px; max-width: calc((100vw - 20px) / var(--ui-scale)); max-height: calc((100vh - 76px) / var(--ui-scale)); display: flex; flex-direction: column; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); border-radius: var(--radius); box-shadow: var(--shadow), var(--hi); scale: var(--ui-scale); transform-origin: 0 0; animation: winIn 0.2s var(--ease-out); }
 .win.closing { animation: winOut 0.16s ease-in forwards; pointer-events: none; }
 .win.dragging { opacity: 0.93; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), var(--hi); }
@@ -109,12 +111,12 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .sl-ticks { position: absolute; left: 8px; right: 8px; top: 50%; height: 0; pointer-events: none; }
 .sl-ticks i { position: absolute; top: 6px; width: 2px; height: 5px; margin-left: -1px; border-radius: 2px; background: rgba(255, 255, 255, 0.22); }
 .slider input[type='range'] { --fill: 50%; -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 18px; margin: 0; background: transparent; outline: none; cursor: pointer; }
-.slider input[type='range']::-webkit-slider-runnable-track { height: 6px; border-radius: 6px; background: linear-gradient(90deg, var(--accent) var(--fill), rgba(255, 255, 255, 0.12) var(--fill)); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4); }
-.slider input[type='range']::-moz-range-track { height: 6px; border-radius: 6px; background: linear-gradient(90deg, var(--accent) var(--fill), rgba(255, 255, 255, 0.12) var(--fill)); }
-.slider input[type='range']::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: -6px; border-radius: 50%; background: radial-gradient(circle at 40% 35%, #fff, #dfe9f7); box-shadow: 0 0 0 3px var(--accent), 0 2px 10px rgba(0, 0, 0, 0.55); transition: transform 0.12s var(--ease); }
-.slider input[type='range']::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #fff; border: none; box-shadow: 0 0 0 3px var(--accent), 0 2px 8px rgba(0, 0, 0, 0.5); }
+.slider input[type='range']::-webkit-slider-runnable-track { height: 6px; border-radius: 6px; background: linear-gradient(90deg, var(--sl-accent, var(--accent)) var(--fill), rgba(255, 255, 255, 0.12) var(--fill)); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4); }
+.slider input[type='range']::-moz-range-track { height: 6px; border-radius: 6px; background: linear-gradient(90deg, var(--sl-accent, var(--accent)) var(--fill), rgba(255, 255, 255, 0.12) var(--fill)); }
+.slider input[type='range']::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: -6px; border-radius: 50%; background: radial-gradient(circle at 40% 35%, #fff, #dfe9f7); box-shadow: 0 0 0 3px var(--sl-accent, var(--accent)), 0 2px 10px rgba(0, 0, 0, 0.55); transition: transform 0.12s var(--ease); }
+.slider input[type='range']::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #fff; border: none; box-shadow: 0 0 0 3px var(--sl-accent, var(--accent)), 0 2px 8px rgba(0, 0, 0, 0.5); }
 .slider input[type='range']:hover::-webkit-slider-thumb { transform: scale(1.15); }
-.slider input[type='range']:active::-webkit-slider-thumb { transform: scale(1.25); box-shadow: 0 0 0 3px var(--accent), 0 0 0 8px rgba(90, 209, 255, 0.18), 0 2px 10px rgba(0, 0, 0, 0.55); }
+.slider input[type='range']:active::-webkit-slider-thumb { transform: scale(1.25); box-shadow: 0 0 0 3px var(--sl-accent, var(--accent)), 0 0 0 8px rgba(90, 209, 255, 0.18), 0 2px 10px rgba(0, 0, 0, 0.55); }
 
 /* ---------------- toggle ---------------- */
 .toggle { display: flex; align-items: center; gap: 11px; padding: 6px 0; cursor: pointer; }
@@ -197,15 +199,22 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .card-badge { position: absolute; top: 8px; right: 8px; font-size: 10px; font-weight: 800; padding: 2px 6px; border-radius: 10px; background: rgba(0, 0, 0, 0.35); color: var(--text2); }
 
 /* ---------------- popover ---------------- */
-.popover { position: fixed; left: 0; top: 0; z-index: 4500; padding: 10px; border-radius: var(--radius); background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); box-shadow: var(--shadow), var(--hi); scale: var(--ui-scale); transform-origin: 0 0; animation: popIn 0.16s var(--ease-out); }
+.popover { position: fixed; left: 0; top: 0; z-index: 50; padding: 10px; border-radius: var(--radius); background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); box-shadow: var(--shadow), var(--hi); scale: var(--ui-scale); transform-origin: 0 0; animation: popIn 0.16s var(--ease-out); }
 .popover.out { animation: popOut 0.14s ease-in forwards; pointer-events: none; }
 .pop-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text3); font-weight: 800; margin: 2px 4px 8px; }
 @keyframes popIn { from { opacity: 0; transform: translateY(6px) scale(0.97); } }
 @keyframes popOut { to { opacity: 0; transform: translateY(6px) scale(0.97); } }
 
 /* ---------------- toasts ---------------- */
-.ui-toasts { position: absolute; top: 72px; left: 50%; translate: -50% 0; display: flex; flex-direction: column; gap: 8px; align-items: center; z-index: 4000; scale: var(--ui-scale); transform-origin: 50% 0; }
-.toast { display: flex; gap: 10px; align-items: center; max-width: 380px; padding: 10px 14px; border-radius: 12px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); box-shadow: var(--shadow), var(--hi); animation: toastIn 0.32s var(--ease); cursor: pointer; font-size: 13px; line-height: 1.4; }
+/* Toasts sit above windows but below the milestone banner, pause menu and modals. ui.js layoutToasts()
+ * picks the lane that covers no window title bar: bottom-right above the tile readout (default; newest
+ * toast nearest the corner), top-centre under the top bar, or bottom-left above the minimap. */
+.ui-toasts { position: absolute; display: flex; gap: 8px; z-index: 30; scale: var(--ui-scale); max-width: calc((100vw - 32px) / var(--ui-scale)); }
+.ui-toasts.lane-br { right: 70px; bottom: 150px; flex-direction: column; align-items: flex-end; transform-origin: 100% 100%; }
+.ui-toasts.lane-tc { top: 72px; left: 50%; translate: -50% 0; flex-direction: column; align-items: center; transform-origin: 50% 0; }
+.ui-toasts.lane-bl { left: 10px; bottom: 300px; flex-direction: column; align-items: flex-start; transform-origin: 0 100%; }
+.hud.no-ticker ~ .ui-toasts.lane-br { bottom: 124px; }
+.toast { display: flex; gap: 10px; align-items: center; max-width: 360px; padding: 10px 14px; border-radius: 12px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); box-shadow: var(--shadow), var(--hi); animation: toastIn 0.32s var(--ease); cursor: pointer; font-size: 13px; line-height: 1.4; }
 .toast.out { animation: toastOut 0.35s ease-in forwards; }
 .toast-good { border-left: 3px solid var(--good); }
 .toast-warn { border-left: 3px solid var(--warn); }
@@ -217,7 +226,7 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 @keyframes toastOut { to { opacity: 0; transform: translateY(-12px) scale(0.97); } }
 
 /* ---------------- tooltip ---------------- */
-.ui-tooltip { position: fixed; left: 0; top: 0; z-index: 9999; max-width: 330px; padding: 9px 11px; border-radius: 11px; background: rgba(9, 12, 21, 0.96); border: 1px solid var(--line2); box-shadow: var(--shadow); font-size: 12.5px; line-height: 1.45; color: var(--text); opacity: 0; transition: opacity 0.12s; pointer-events: none !important; scale: var(--ui-scale); transform-origin: 0 0; }
+.ui-tooltip { position: fixed; left: 0; top: 0; z-index: 100; max-width: 330px; padding: 9px 11px; border-radius: 11px; background: rgba(9, 12, 21, 0.96); border: 1px solid var(--line2); box-shadow: var(--shadow); font-size: 12.5px; line-height: 1.45; color: var(--text); opacity: 0; transition: opacity 0.12s; pointer-events: none !important; scale: var(--ui-scale); transform-origin: 0 0; }
 .ui-tooltip.show { opacity: 1; }
 .ui-tooltip b { color: #fff; }
 .ui-tooltip .kbd, .ui-tooltip kbd { height: 18px; min-width: 18px; font-size: 10px; margin-left: 4px; }
@@ -235,7 +244,7 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .tt-sec { margin-top: 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text3); font-weight: 800; }
 
 /* ---------------- modal ---------------- */
-.modal-back { position: absolute; inset: 0; background: radial-gradient(ellipse at center, rgba(4, 6, 12, 0.45), rgba(4, 6, 12, 0.72)); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); display: flex; align-items: center; justify-content: center; z-index: 5000; animation: fadeIn 0.15s; }
+.modal-back { position: absolute; inset: 0; background: radial-gradient(ellipse at center, rgba(4, 6, 12, 0.45), rgba(4, 6, 12, 0.72)); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); display: flex; align-items: center; justify-content: center; z-index: 60; animation: fadeIn 0.15s; }
 .modal-back.out { animation: fadeOut 0.2s forwards; }
 .modal { min-width: 340px; max-width: 540px; background: var(--glass-solid); border: 1px solid var(--line2); border-radius: 18px; box-shadow: var(--shadow), var(--hi); padding: 20px 22px; animation: modalIn 0.24s var(--ease); scale: var(--ui-scale); }
 .modal-title { font-size: 18px; font-weight: 800; margin-bottom: 10px; letter-spacing: 0.01em; }

@@ -112,15 +112,16 @@
 .tb-sys-btn svg { width: 16px; height: 16px; }
 .tb-sys-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.11); transform: translateY(-1px); }
 .tb-sys-btn.on { color: var(--accent); }
+.tb-sys-btn.tb-mute.on { color: var(--bad); border-color: rgba(255, 90, 106, 0.4); background: rgba(255, 90, 106, 0.12); }
 /* compaction levels (hud.js layoutTop adds c1..c4 while the bar overflows) */
-.hud-top.c1 .tb-logo, .hud-top.c1 .tb-sys-btn:first-child, .hud-top.c1 .tb-rename { display: none; }
+.hud-top.c1 .tb-logo, .hud-top.c1 .tb-sys-btn.tb-fs { display: none; }
 .hud-top.c1 .tb-seg { padding: 0 6px; }
 .hud-top.c1 .tb-date, .hud-top.c1 .tb-money, .hud-top.c1 .tb-pop { min-width: 0; }
 .hud-top.c1 .tb-name { max-width: 116px; }
 .hud-top.c2 .tb-sep, .hud-top.c2 .tb-msbar, .hud-top.c2 .tb-hbar, .hud-top.c2 .up-bar, .hud-top.c2 .tb-date .tb-sub { display: none; }
 .hud-top.c2 { gap: 3px; }
 .hud-top.c2 .tb-main { font-size: 14px; }
-.hud-top.c3 .tb-net, .hud-top.c3 .tb-pop .tb-sub, .hud-top.c3 .tb-ms, .hud-top.c3 .rci-lbl { display: none; }
+.hud-top.c3 .tb-net, .hud-top.c3 .tb-pop .tb-sub, .hud-top.c3 .tb-ms, .hud-top.c3 .rci-lbl, .hud-top.c3 .tb-rename, .hud-top.c3 .tb-sys-btn.tb-mute { display: none; }
 .hud-top.c3 .tb-name { max-width: 90px; }
 .hud-top.c3 .tb-pill { padding: 0 6px; }
 .hud-top.c4 .tb-city, .hud-top.c4 .tb-wx { display: none; }
@@ -309,8 +310,10 @@
 .tk-sep { font-style: normal; color: var(--accent); opacity: 0.55; margin: 0 18px 0 16px; font-size: 8px; }
 
 /* ================================================================== left column: tutorial + notes */
-.hud-left { position: absolute; left: 10px; top: 70px; width: 322px; display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; }
-.hud-right { position: absolute; right: 66px; top: 70px; width: 322px; scale: var(--ui-scale); transform-origin: 100% 0; pointer-events: none; transition: opacity 0.4s; }
+/* tutorial card and advisor / disaster cards float above the windows layer (z 20) so a panel opened by
+ * the tutorial's own "Show me" (or any window) never hides them; panels.js placement avoids the tutorial card */
+.hud-left { position: absolute; left: 10px; top: 70px; width: 322px; display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 25; }
+.hud-right { position: absolute; right: 66px; top: 70px; width: 322px; scale: var(--ui-scale); transform-origin: 100% 0; pointer-events: none; transition: opacity 0.4s, translate 0.45s var(--ease-out); z-index: 26; }
 .hl-notes { display: flex; flex-direction: column; gap: 8px; }
 .adv-card { position: relative; display: flex; gap: 11px; padding: 11px 12px 12px 11px; border-radius: 16px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); border-left: 3px solid var(--ac); box-shadow: var(--shadow), var(--hi); pointer-events: auto; animation: noteIn 0.5s var(--ease); overflow: hidden; }
 .adv-card.out { animation: noteOut 0.26s ease-in forwards; pointer-events: none; }
@@ -368,7 +371,7 @@
 .tut-actions { display: flex; gap: 5px; }
 
 /* ================================================================== milestone + confetti + achievements */
-.ms-banner { position: absolute; left: 50%; top: 86px; translate: -50% 0; width: min(560px, calc((100vw - 40px) / var(--ui-scale))); padding: 26px 28px 22px; border-radius: 24px; text-align: center; background: radial-gradient(ellipse at 50% 0%, rgba(255, 209, 102, 0.3), transparent 60%), linear-gradient(180deg, rgba(44, 36, 20, 0.94), rgba(18, 16, 12, 0.95)); border: 1px solid rgba(255, 209, 102, 0.6); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 70px rgba(255, 209, 102, 0.25), var(--hi); overflow: hidden; animation: msIn 0.75s var(--ease); cursor: pointer; z-index: 70; scale: var(--ui-scale); transform-origin: 50% 0; }
+.ms-banner { position: absolute; left: 50%; top: 86px; translate: -50% 0; width: min(560px, calc((100vw - 40px) / var(--ui-scale))); padding: 26px 28px 22px; border-radius: 24px; text-align: center; background: radial-gradient(ellipse at 50% 0%, rgba(255, 209, 102, 0.3), transparent 60%), linear-gradient(180deg, rgba(44, 36, 20, 0.94), rgba(18, 16, 12, 0.95)); border: 1px solid rgba(255, 209, 102, 0.6); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 70px rgba(255, 209, 102, 0.25), var(--hi); overflow: hidden; animation: msIn 0.75s var(--ease); cursor: pointer; z-index: 35; scale: var(--ui-scale); transform-origin: 50% 0; }
 .ms-banner.out { animation: msOut 0.4s ease-in forwards; pointer-events: none; }
 @keyframes msIn { 0% { opacity: 0; transform: translateY(-50px) scale(0.75); } 60% { opacity: 1; } }
 @keyframes msOut { to { opacity: 0; transform: translateY(-30px) scale(0.94); } }
@@ -381,6 +384,9 @@
 .ms-kicker { position: relative; margin-top: 10px; font-size: 11px; font-weight: 900; letter-spacing: 0.32em; text-transform: uppercase; color: var(--gold); }
 .ms-title { position: relative; margin-top: 6px; font-size: 25px; font-weight: 900; color: #fff; line-height: 1.25; text-shadow: 0 3px 12px rgba(0, 0, 0, 0.55); }
 .ms-title em { font-style: normal; background: linear-gradient(180deg, #fff6d6, var(--gold) 55%, #f59e2c); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.ms-path { position: relative; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; margin-top: 8px; font-size: 12.5px; font-weight: 800; color: #ffe6a8; }
+.ms-path span { padding: 3px 9px; border-radius: 12px; background: rgba(255, 209, 102, 0.14); border: 1px solid rgba(255, 209, 102, 0.3); }
+.ms-path i { font-style: normal; color: var(--gold); opacity: 0.8; }
 .ms-reward { position: relative; display: inline-flex; align-items: center; gap: 8px; margin-top: 13px; padding: 7px 17px; border-radius: 30px; background: rgba(61, 220, 132, 0.16); border: 1px solid rgba(61, 220, 132, 0.5); color: var(--good); font-weight: 900; font-size: 15px; animation: popIn 0.45s var(--ease) 0.5s backwards; }
 .ms-unl-title { position: relative; margin: 17px 0 8px; font-size: 11px; font-weight: 850; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text2); }
 .ms-unlocks { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
@@ -389,25 +395,27 @@
 .ms-chip.more { color: var(--text3); }
 @keyframes chipIn { from { opacity: 0; transform: translateY(10px) scale(0.85); } }
 .ms-ok { position: relative; margin-top: 19px; }
-.confetti { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 69; }
+.confetti { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 34; }
 .confetti i { position: absolute; top: -24px; border-radius: 2px; animation: confettiFall 3.4s cubic-bezier(0.25, 0.5, 0.45, 1) backwards; opacity: 0.95; }
 @keyframes confettiFall { 0% { transform: translate(0, 0) rotate(0deg); } 100% { transform: translate(var(--dx), 110vh) rotate(var(--rot)); } }
 .toast.toast-achv { border: 1px solid rgba(255, 209, 102, 0.6); border-left: 3px solid var(--gold); background: linear-gradient(180deg, rgba(64, 50, 20, 0.94), rgba(26, 22, 10, 0.95)); box-shadow: var(--shadow), 0 0 28px rgba(255, 209, 102, 0.28); }
 .toast.toast-achv .toast-icon { font-size: 26px; animation: medalPop 0.7s var(--ease); }
 
 /* ================================================================== photo mode */
-.photo-hint { position: absolute; left: 50%; bottom: 22px; translate: -50% 0; display: none; align-items: center; gap: 10px; padding: 8px 9px 8px 15px; border-radius: 15px; background: rgba(9, 12, 21, 0.82); border: 1px solid var(--line2); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); box-shadow: var(--shadow); font-size: 12.5px; color: var(--text2); transition: opacity 0.6s; z-index: 6000; scale: var(--ui-scale); transform-origin: 50% 100%; }
+.photo-hint { position: absolute; left: 50%; bottom: 22px; translate: -50% 0; display: none; align-items: center; gap: 10px; padding: 8px 9px 8px 15px; border-radius: 15px; background: rgba(9, 12, 21, 0.82); border: 1px solid var(--line2); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); box-shadow: var(--shadow); font-size: 12.5px; color: var(--text2); transition: opacity 0.6s; z-index: 70; scale: var(--ui-scale); transform-origin: 50% 100%; }
 .photo-hint.show { display: flex; animation: popIn 0.3s var(--ease-out); }
 .photo-hint.idle { opacity: 0; }
 .photo-hint.idle:hover { opacity: 1; }
 .photo-hint .kbd { height: 18px; min-width: 18px; font-size: 10px; }
 .photo-hint.flashing { opacity: 0.2; }
-.shutter { position: absolute; inset: 0; background: #fff; animation: shutter 0.65s ease-out forwards; pointer-events: none; z-index: 7000; }
+.shutter { position: absolute; inset: 0; background: #fff; animation: shutter 0.65s ease-out forwards; pointer-events: none; z-index: 71; }
 @keyframes shutter { from { opacity: 0.85; } to { opacity: 0; } }
 
 /* ================================================================== settings / help windows */
 .win-settings .win-body { padding-top: 14px; }
 .set-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+.set-vols { transition: opacity 0.2s, filter 0.2s; }
+.set-vols.muted { opacity: 0.45; filter: saturate(0.3); }
 .set-qnote { margin-top: 7px; }
 .set-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--text3); }
 .win-help .win-body { max-height: min(600px, calc((100vh - 150px) / var(--ui-scale))); }
@@ -416,6 +424,7 @@
 .hk-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px; }
 .hk-keys { display: inline-flex; align-items: center; gap: 3px; flex-wrap: wrap; }
 .hk-or { font-size: 10px; color: var(--text3); margin: 0 2px; }
+.hk-mouse { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 10px; font-size: 11px; font-weight: 700; color: #dfe8f7; background: rgba(90, 209, 255, 0.1); border: 1px dashed rgba(90, 209, 255, 0.35); white-space: nowrap; }
 .hk-act { color: var(--text2); text-align: right; }
 .guide { display: flex; flex-direction: column; gap: 8px; }
 .guide-step { display: flex; gap: 13px; padding: 11px 12px; border-radius: 13px; background: rgba(255, 255, 255, 0.035); border: 1px solid var(--line); animation: tabIn 0.35s var(--ease-out) backwards; }

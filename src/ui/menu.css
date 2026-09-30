@@ -1,7 +1,9 @@
 /* VOXELPOLIS — title screen, new-city dialog, load list, credits, pause menu, fade transition. */
 
 /* ================================================================== title screen */
-.vp-menu { position: absolute; inset: 0; z-index: 50; opacity: 0; visibility: hidden; transition: opacity 0.7s ease, visibility 0s linear 0.7s; overflow: hidden; }
+/* z-order (see ui.js): title screen 10 sits under the windows layer (20) so Settings / How to Play open
+ * on top of it; pause menu 40 covers windows, toasts and the banner; fade 80 covers everything. */
+.vp-menu { position: absolute; inset: 0; z-index: 10; opacity: 0; visibility: hidden; transition: opacity 0.7s ease, visibility 0s linear 0.7s; overflow: hidden; }
 #ui .vp-menu { pointer-events: none; }
 #ui .vp-menu.show { pointer-events: auto; opacity: 1; visibility: visible; transition: opacity 0.7s ease; }
 .vp-menu.now { transition: none !important; }
@@ -77,7 +79,7 @@
 .cr-fun p { margin: 5px 0; }
 
 /* ================================================================== fade transition */
-.vp-fade { position: absolute; inset: 0; z-index: 8000; display: grid; place-items: center; background: radial-gradient(ellipse at center, #151c31, #05070d 70%); opacity: 0; transition: opacity 0.4s ease; }
+.vp-fade { position: absolute; inset: 0; z-index: 80; display: grid; place-items: center; background: radial-gradient(ellipse at center, #151c31, #05070d 70%); opacity: 0; transition: opacity 0.4s ease; }
 #ui .vp-fade { pointer-events: auto; }
 .vp-fade.in { opacity: 1; }
 .vp-fade.out { opacity: 0; transition: opacity 0.8s ease; pointer-events: none; }
@@ -94,9 +96,13 @@
 .vf-text { font-weight: 850; letter-spacing: 0.16em; text-transform: uppercase; font-size: 13px; color: var(--text2); animation: livePulse 1.6s ease-in-out infinite; }
 
 /* ================================================================== pause menu */
-.vp-pause { position: absolute; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, rgba(5, 8, 16, 0.35), rgba(5, 8, 16, 0.78)); backdrop-filter: blur(6px) saturate(0.8); -webkit-backdrop-filter: blur(6px) saturate(0.8); opacity: 0; visibility: hidden; transition: opacity 0.25s, visibility 0s linear 0.25s; }
+.vp-pause { position: absolute; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, rgba(5, 8, 16, 0.35), rgba(5, 8, 16, 0.78)); backdrop-filter: blur(6px) saturate(0.8); -webkit-backdrop-filter: blur(6px) saturate(0.8); opacity: 0; visibility: hidden; transition: opacity 0.25s, visibility 0s linear 0.25s; }
 .vp-pause.show { opacity: 1; visibility: visible; transition: opacity 0.25s; }
 #ui .vp-pause:not(.show) { pointer-events: none; }
+/* windows opened from the pause card (Save, Settings, How to Play) come above the overlay; the card dims.
+ * Windows that were open before pausing are hidden by menu.js while the pause menu is up. */
+#ui.pz-open .ui-windows { z-index: 45; }
+.vp-pause.has-win .vpp-card { opacity: 0.3; filter: blur(1.5px); pointer-events: none; transition: opacity 0.2s, filter 0.2s; }
 .vpp-card { width: 344px; padding: 22px 20px 18px; border-radius: 24px; background: var(--glass); border: 1px solid var(--line2); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55), var(--hi); text-align: center; scale: var(--ui-scale); }
 .vp-pause.show .vpp-card { animation: modalIn 0.32s var(--ease); }
 .vpp-head { display: flex; flex-direction: column; align-items: center; gap: 12px; font-size: 21px; font-weight: 850; letter-spacing: 0.02em; }

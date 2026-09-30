@@ -1,9 +1,12 @@
 /*
  * VOXELPOLIS — Settings and Help windows.
  *   VC.hud.openSettings(tab?)  window 'settings': Graphics (quality preset, dynamic resolution, bloom,
- *       tilt-shift, shadows, weather, day/night mode, FPS), Audio (music / sfx volume), Gameplay (disasters,
- *       autosave, edge scrolling, invert zoom, grid, tutorial hints + restart), Interface (UI scale, news
- *       ticker, reset). Every change is persisted with VC.saveSettings() (emits 'settings').
+ *       tilt-shift, shadows, ambient occlusion (ssao), god rays (godRays), weather visuals, day/night mode,
+ *       FPS), Audio (mute all, master / music / sound effects / ambience volume: muted, masterVol, musicVol,
+ *       sfxVol, ambienceVol), Gameplay (random disasters: this city = S.disastersEnabled via
+ *       VC.disasters.setEnabled, new cities = VC.settings.disasters; autosave, edge scrolling, invert zoom,
+ *       grid, tutorial hints + restart), Interface (UI scale, news ticker, reset). Every settings change is
+ *       persisted with VC.saveSettings() (emits 'settings'); sliders apply live while dragging.
  *   VC.hud.openHelp(tab?)      window 'help': Controls (VC.input.KEYMAP or built-in list), How to Play
  *       (illustrated guide), Overlays (every overlay + "try it"), Tips.
  * Both toggle when called while open with no tab argument.
@@ -53,7 +56,9 @@ function renderGraphics(c) {
       ui.toggle({ label: 'Bloom', desc: 'Glowing lights and highlights', value: st.bloom, onChange: (v) => set('bloom', v) }),
       ui.toggle({ label: 'Tilt-shift', desc: 'Miniature-world depth of field', value: st.tiltShift, onChange: (v) => set('tiltShift', v) }),
       ui.toggle({ label: 'Shadows', desc: 'Sun and moon shadows', value: st.shadows, onChange: (v) => set('shadows', v) }),
-      ui.toggle({ label: 'Weather effects', desc: 'Rain, snow, fog and lightning', value: st.weather, onChange: (v) => set('weather', v) }))));
+      ui.toggle({ label: 'Ambient occlusion', desc: 'Soft contact shadows in corners (High & Ultra)', value: st.ssao !== false, onChange: (v) => set('ssao', v) }),
+      ui.toggle({ label: 'God rays', desc: 'Shafts of sunlight through the haze (High & Ultra)', value: st.godRays !== false, onChange: (v) => set('godRays', v) }),
+      ui.toggle({ label: 'Weather effects', desc: 'Draws rain, snow, fog and lightning', value: st.weather, onChange: (v) => set('weather', v) }))));
   c.appendChild(ui.section('Time of day',
     ui.segmented({ options: [{ value: 'cycle', icon: '🔄', label: 'Cycle' }, { value: 'day', icon: '☀️', label: 'Day' }, { value: 'sunset', icon: '🌇', label: 'Sunset' }, { value: 'night', icon: '🌙', label: 'Night' }], value: st.dayNight || 'cycle', onChange: (v) => set('dayNight', v) }),
     ui.toggle({ label: 'Show FPS counter', desc: 'Frame rate and render resolution, bottom-right', value: !!st.showFps, onChange: (v) => set('showFps', v) })));
@@ -61,19 +66,44 @@ function renderGraphics(c) {
 
 function renderAudio(c) {
   const ui = VC.ui, st = S();
-  const pct = (v) => (v === 0 ? 'Muted' : Math.round(v) + '%');
-  const col = (v) => (v === 0 ? '#707b92' : '');
-  c.appendChild(ui.section('Volume',
-    ui.slider({ label: 'Music', icon: '🎵', min: 0, max: 100, step: 1, value: Math.round((st.musicVol != null ? st.musicVol : 0.5) * 100), format: pct, color: (v) => col(v) || 'var(--accent2)', onInput: (v) => { VC.settings.musicVol = v / 100; }, onChange: (v) => set('musicVol', v / 100) }),
-    ui.slider({ label: 'Sound effects', icon: '🔔', min: 0, max: 100, step: 1, value: Math.round((st.sfxVol != null ? st.sfxVol : 0.7) * 100), format: pct, color: (v) => col(v) || 'var(--accent)', onInput: (v) => { VC.settings.sfxVol = v / 100; }, onChange: (v) => { set('sfxVol', v / 100); VC.bus.emit('sfx', { name: 'click' }); } })));
+  const pct = (v) => (v === 0 ? 'Off' : Math.round(v) + '%');
+  const MUTED_COL = '#707b92';
+  const vol = (key, def) => Math.round((st[key] != null ? st[key] : def) * 100);
+  /** Volume slider bound to settings[key] (0..1): live while dragging, persisted on release. */
+  const volSlider = (key, def, label, icon, color, desc, after) => {
+    const el = ui.slider({ label, icon, min: 0, max: 100, step: 1, value: vol(key, def), format: pct, tip: desc,
+      color: (v) => (v === 0 ? MUTED_COL : color),
+      onInput: (v) => { VC.settings[key] = v / 100; },
+      onChange: (v) => { set(key, v / 100); if (after) after(v); } });
+    return el;
+  };
+  const sliders = h('div', { class: 'set-vols' },
+    volSlider('masterVol', 1, 'Master volume', '🔊', '#e9eef8', 'Scales everything below'),
+    volSlider('musicVol', 0.5, 'Music', '🎵', '#b388ff', 'Generative soundtrack'),
+    volSlider('sfxVol', 0.7, 'Sound effects', '🔔', '#5ad1ff', 'Building, alerts and interface sounds', () => VC.bus.emit('sfx', { name: 'click' })),
+    volSlider('ambienceVol', 0.6, 'Ambience', '🌳', '#3ddc84', 'City hum, traffic, birds, wind, rain and disaster sounds'));
+  const syncMute = (m) => sliders.classList.toggle('muted', !!m);
+  const mute = ui.toggle({ label: 'Mute all sound', desc: 'Silences music, effects and ambience (also the 🔊 button in the top bar)', value: !!st.muted, onChange: (v) => { set('muted', v); syncMute(v); } });
+  syncMute(st.muted);
+  c.appendChild(ui.section('Volume', mute, sliders));
   c.appendChild(ui.note('Every sound and note in Voxelpolis is generated live by your browser — no audio files. Music adapts to the time of day and how your city is doing.'));
 }
 
+/** A real (non-demo) city is running. */
+const inCity = () => !!(VC.state && !VC.state.demo && VC.hud.visible);
 function renderGameplay(c) {
   const ui = VC.ui, st = S();
-  c.appendChild(ui.section('Simulation',
-    ui.toggle({ label: 'Random disasters', desc: 'Fires, tornadoes, meteors… You can still trigger them from the Disasters panel.', value: st.disasters, onChange: (v) => set('disasters', v) }),
-    ui.toggle({ label: 'Autosave', desc: 'Saves your city automatically every few minutes', value: st.autosave, onChange: (v) => set('autosave', v) })));
+  // Random disasters: ONE switch per city (S.disastersEnabled, same as the Disasters panel and the New City
+  // dialog); the settings value is only the default for cities founded from now on.
+  const city = inCity() ? VC.state : null;
+  const cityTg = city ? ui.toggle({ label: 'Random disasters in this city', desc: `Fires, tornadoes, meteors… in ${city.name || 'this city'}. Same switch as the 🌪️ Disasters panel; you can always trigger them by hand there.`, value: city.disastersEnabled !== false, onChange: (v) => {
+    if (VC.disasters && VC.disasters.setEnabled) VC.disasters.setEnabled(v);
+    else city.disastersEnabled = v;
+    VC.panels && VC.panels.refresh && VC.panels.refresh('disasters');
+  } }) : null;
+  const defTg = ui.toggle({ label: city ? 'Disasters in new cities' : 'Random disasters', desc: 'Default for the “Natural disasters” option when you found a new city.', value: st.disasters !== false, onChange: (v) => set('disasters', v) });
+  c.appendChild(ui.section('Simulation', cityTg, defTg,
+    ui.toggle({ label: 'Autosave', desc: 'Keeps a rolling backup of your city while you play', value: st.autosave, onChange: (v) => set('autosave', v) })));
   c.appendChild(ui.section('Camera & building',
     ui.toggle({ label: 'Edge scrolling', desc: 'Move the camera when the mouse touches the screen edge', value: st.edgeScroll, onChange: (v) => set('edgeScroll', v) }),
     ui.toggle({ label: 'Invert zoom', desc: 'Reverse the mouse-wheel zoom direction', value: st.invertZoom, onChange: (v) => set('invertZoom', v) }),
@@ -92,7 +122,8 @@ function renderInterface(c) {
     h('div', { class: 'row' },
       ui.button('Restore defaults', () => ui.confirm('Reset every setting to its default value?', () => {
         const keep = { tutorial: VC.settings.tutorial };
-        Object.assign(VC.settings, VC.DEFAULT_SETTINGS, keep, { showFps: false, ticker: true, minimapOpen: true });
+        // keys the defaults table may not list (masterVol, ssao, godRays) are reset explicitly
+        Object.assign(VC.settings, { masterVol: 1, ssao: true, godRays: true, muted: false }, VC.DEFAULT_SETTINGS, keep, { showFps: false, ticker: true, minimapOpen: true });
         VC.saveSettings();
         VC.gfx && VC.gfx.resize && VC.gfx.resize();
         openSettings('interface');
@@ -137,13 +168,13 @@ const GUIDE = [
   { icon: '🛣️', title: 'Build roads', text: 'Everything starts with roads. Pick <b>Roads</b> <kbd>1</kbd> and drag across the land. Zones only develop within a few tiles of a street or avenue; highways move traffic fast but give no zone access.' },
   { icon: '🏘️', title: 'Zone land', text: 'Paint <b style="color:var(--R)">Residential</b> for homes, <b style="color:var(--C)">Commercial</b> for shops and offices, <b style="color:var(--I)">Industrial</b> for factories <kbd>2</kbd>. Denser zones unlock as your population grows.' },
   { icon: '📊', title: 'Read the demand', text: 'The <b>R C I</b> bars in the top bar show what citizens want. Bars above the line mean “build more of this!”. Balance homes with jobs.' },
-  { icon: '⚡', title: 'Power', text: 'Build a power plant <kbd>3</kbd>. Buildings and zones pass electricity to their neighbours; bridge gaps with power lines. Watch the ⚡ pill for shortages.' },
-  { icon: '💧', title: 'Water', text: 'Place a <b>water pump</b> next to a river or lake, or a <b>water tower</b> anywhere <kbd>4</kbd>. No water, no growth.' },
+  { icon: '⚡', title: 'Power', text: 'Build a power plant <kbd>3</kbd> next to a road. Electricity travels along roads, power lines and touching buildings — empty zoned land does not carry it. Watch the ⚡ pill for shortages.' },
+  { icon: '💧', title: 'Water', text: 'Place a <b>water pump</b> next to a river or lake, or a <b>water tower</b> anywhere <kbd>4</kbd>, beside a road: water flows through the pipes under roads, and pumps and towers need power. No water, no growth.' },
   { icon: '🚓', title: 'Services', text: 'Police, fire, clinics and schools cover a radius around them <kbd>5</kbd> <kbd>6</kbd>. Covered neighbourhoods are safer, healthier and worth more. Parks <kbd>7</kbd> make everyone happier.' },
   { icon: '💰', title: 'Budget', text: 'Taxes pay for everything. Open the budget <kbd>M</kbd> to tune tax rates per zone and wealth level, fund departments and enact policies. Keep the monthly net above zero — or take a loan.' },
   { icon: '💎', title: 'Land value & growth', text: 'Buildings level up when land value, services and happiness are high. Pollution, crime, noise and traffic drag value down. Use overlays <kbd>O</kbd> to find problems.' },
   { icon: '😊', title: 'Happiness', text: 'Happy citizens pay taxes and stay. Jobs, services, parks, low taxes and clean air all help. Your approval rating is the 🙂 in the top bar.' },
-  { icon: '🌪️', title: 'Disasters', text: 'Fires, tornadoes, meteors, earthquakes, UFOs… and Cubezilla. Keep fire coverage high and cash in the bank. Toggle random disasters in Settings.' },
+  { icon: '🌪️', title: 'Disasters', text: 'Fires, tornadoes, meteors, earthquakes, UFOs… and Cubezilla. Keep fire coverage high and cash in the bank. Switch random disasters on or off for your city in the Disasters panel <kbd>X</kbd>.' },
   { icon: '🏆', title: 'Milestones', text: 'Growing your peak population earns new titles, cash grants and unlocks: avenues, dense zones, big services, landmarks and wonders.' },
 ];
 const TIPS = [
@@ -176,12 +207,22 @@ function openHelp(tab) {
     { key: 'tips', label: 'Tips', icon: '💡', render: renderTips },
   ], { active: tab || w._tab || 'guide', onChange: (k) => (w._tab = k) }));
 }
+const MOUSE_RE = /drag|click|wheel|scroll|tap|pinch/i;
+/**
+ * 'Wheel / + / −' -> [Wheel] or [+] or [−]; 'Ctrl + Z' -> [Ctrl]+[Z]; 'W A S D / Arrows' -> 4 caps or [Arrows].
+ * Alternatives are separated by a slash with spaces around it, chords by a plus with spaces around it (or
+ * glued, as in 'Ctrl+Z'); a lone '+' or '/' is a key of its own. Mouse gestures render as mouse chips.
+ */
 function keyChips(keys) {
   const wrap = h('span', { class: 'hk-keys' });
-  String(keys).split(/\s*\/\s*/).forEach((alt, i) => {
+  const alts = String(keys).trim().split(/\s+\/\s+/);
+  alts.forEach((alt, i) => {
     if (i) wrap.appendChild(h('span', { class: 'hk-or' }, 'or'));
-    alt.split(/\s*\+\s*/).forEach((k, j) => {
+    let chord = alt.split(/\s+\+\s+/);
+    if (chord.length === 1 && /^[^\s+]+\+[^\s+]+$/.test(alt)) chord = alt.split('+');
+    chord.forEach((k, j) => {
       if (j) wrap.appendChild(h('span', { class: 'hk-or' }, '+'));
+      if (MOUSE_RE.test(k)) { wrap.appendChild(h('span', { class: 'hk-mouse' }, '🖱️ ' + k)); return; }
       // "W A S D" -> four caps; multi-word labels stay together
       const parts = /^([A-Z0-9] )+[A-Z0-9]$/.test(k) ? k.split(' ') : [k];
       parts.forEach((p) => wrap.appendChild(h('kbd', { class: 'kbd' }, p)));

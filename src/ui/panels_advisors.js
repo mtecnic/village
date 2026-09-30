@@ -140,8 +140,8 @@ P.defs.advisors = {
         U.show(c.head, !!issueTitle);
         U.tone(c.head, info.severity === 'bad' ? 'bad' : info.severity === 'warn' ? 'warn' : info.severity === 'good' ? 'good' : '');
         const issues = Array.isArray(info.issues) ? info.issues : [];
-        const esc = (t) => String(t).replace(/</g, '&lt;');
-        U.attr(c.el, 'data-tip', adv ? `<b>${VC.ADVISORS[k].name}</b><br>${esc(adv)}${issues.length > 1 ? '<br><br>' + issues.map((x) => '• ' + esc(x.title)).join('<br>') : ''}` : null);
+        const esc = U.esc;
+        U.attr(c.el, 'data-tip', adv ? `<b>${esc(VC.ADVISORS[k].name)}</b><br>${esc(adv)}${issues.length > 1 ? '<br><br>' + issues.map((x) => '• ' + esc(x.title)).join('<br>') : ''}` : null);
       }
       let shown = advFilter ? all.filter((m) => m.advisor === advFilter) : all.slice();
       shown = shown.sort(byNewest).slice(0, 80);
@@ -185,7 +185,7 @@ function msLadder(c) {
   MS.forEach((m, i) => {
     const st = h('div', { class: 'pn-ms-dot' });
     const un = unlocksFor(i);
-    const chips = h('div', { class: 'pn-ms-unl' }, un.map((u) => h('span', { class: 'pn-ms-chip', 'data-tip': `<b>${u.name}</b><br>${u.kind} · unlocks at ${U.int(u.unlock)} residents` }, u.icon)));
+    const chips = h('div', { class: 'pn-ms-unl' }, un.map((u) => h('span', { class: 'pn-ms-chip', 'data-tip': `<b>${U.esc(u.name)}</b><br>${u.kind} · unlocks at ${U.int(u.unlock)} residents` }, u.icon)));
     const el = h('div', { class: 'pn-ms' }, st,
       h('div', { class: 'pn-ms-main' },
         h('div', { class: 'pn-ms-top' }, h('span', { class: 'pn-ms-icon' }, RANK_ICONS[i] || '🏆'), h('span', { class: 'pn-ms-name' }, m.name), h('span', { class: 'pn-ms-pop' }, i ? U.int(m.pop) + ' residents' : 'Start'), h('span', { class: 'pn-grow' }), m.reward ? h('span', { class: 'pn-ms-reward' }, '+' + U.money(m.reward)) : null),
@@ -216,7 +216,7 @@ function msAchievements(c) {
     const el = h('div', { class: 'pn-ach' }, h('div', { class: 'pn-ach-icon' }, a.icon || '🏅'), h('div', { class: 'pn-ach-name' }, a.name || a.key), h('div', { class: 'pn-ach-desc' }, a.desc || ''));
     el.set = (x) => {
       U.cls(el, 'done', !!x.done);
-      U.attr(el, 'data-tip', `<b>${x.name || x.key}</b><br>${x.desc || ''}<br>${x.done ? '✅ Unlocked' + (x.day != null ? ' on ' + VC.fmt.fullDate(x.day) : '') : '🔒 Not yet unlocked'}`);
+      U.attr(el, 'data-tip', `<b>${U.esc(x.name || x.key)}</b><br>${U.esc(x.desc || '')}<br>${x.done ? '✅ Unlocked' + (x.day != null ? ' on ' + VC.fmt.fullDate(x.day) : '') : '🔒 Not yet unlocked'}`);
     };
     return el;
   };

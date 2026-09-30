@@ -1,8 +1,9 @@
 /*
  * VOXELPOLIS — Save & Load panel ('save'): save the current city to a named slot (overwrite with
  * confirmation), list slots from VC.save.list() with thumbnail / population / date / money / saved
- * time, Load / Overwrite / Delete (all confirmed), Export / Import files. Every VC.save call may be
- * synchronous or return a Promise; buttons are disabled while an operation is in flight.
+ * time, Load / Overwrite / Delete / Import (all confirmed), Export files. Every VC.save call may be
+ * synchronous or return a Promise; buttons are disabled while an operation is in flight. Save names are
+ * user text: always escaped (U.esc) before they go into HTML. Esc in the name field closes the panel.
  */
 const P = VC.panels, U = P.util, h = VC.h;
 
@@ -50,8 +51,12 @@ P.defs.save = {
     const input = h('input', { class: 'pn-input', type: 'text', maxlength: 40, placeholder: 'Save name', value: S.name || 'My City', onkeydown: (e) => {
       e.stopPropagation(); // typing must not trigger game hotkeys
       if (e.key === 'Enter') doSave(input.value);
+      else if (e.key === 'Escape') {
+        e.preventDefault();
+        input.blur();
+        P.close('save');
+      }
     } });
-    input.addEventListener('keyup', (e) => e.stopPropagation());
     const saveBtn = VC.ui.button('Save city', () => doSave(input.value), { icon: '💾', cls: 'primary' });
     p.body.appendChild(h('div', { class: 'pn-card pn-save-new' }, h('div', { class: 'pn-save-new-title' }, '💾 Save current city'), h('div', { class: 'pn-save-new-row' }, input, saveBtn)));
     const list = h('div', { class: 'pn-slots' });
@@ -60,13 +65,15 @@ P.defs.save = {
     const countEl = h('span', { class: 'pn-muted-note' });
     p.body.appendChild(h('div', { class: 'pn-sec' }, h('div', { class: 'pn-toolbar' }, h('span', { class: 'pn-sec-title pn-inline' }, 'Saved cities'), countEl), loading, list, empty));
     // export/import never lock the panel: a file picker the user cancels may never settle its promise
+    const fail = (text, e) => VC.ui.toast(U.esc(text + (e && e.message ? ' ' + e.message : '')), { type: 'bad', icon: '💾', sfx: 'error' });
     const expBtn = VC.ui.button('Export file', () => U.async(() => VC.save.exportFile(), (ok, v, e) => {
-      if (e) VC.bus.emit('toast', { text: 'Export failed. ' + (e.message || ''), type: 'bad', icon: '💾' });
+      if (e) fail('Export failed.', e);
     }), { icon: '⬇️', cls: 'small', tip: 'Download the current city as a file you can back up or share' });
-    const impBtn = VC.ui.button('Import file', () => U.async(() => VC.save.importFile(), (ok, v, e) => {
-      if (e) VC.bus.emit('toast', { text: 'Import failed. ' + (e.message || ''), type: 'bad', icon: '💾' });
+    // importing replaces the running city, like Load: confirm first (the file picker opens from the dialog's button)
+    const impBtn = VC.ui.button('Import file', () => VC.ui.confirm('Import a city file?<br>It replaces the current city — unsaved progress will be lost.', () => U.async(() => VC.save.importFile(), (ok, v, e) => {
+      if (e) fail('Import failed.', e);
       refresh();
-    }), { icon: '⬆️', cls: 'small', tip: 'Load a city from a previously exported file' });
+    }), { title: '📥 Import city', yes: 'Choose file…' }), { icon: '⬆️', cls: 'small', tip: 'Load a city from a previously exported file' });
     const autoNote = h('span', { class: 'pn-muted-note' });
     p.body.appendChild(h('div', { class: 'pn-save-foot' }, expBtn, impBtn, h('span', { class: 'pn-grow' }), autoNote));
 
@@ -81,18 +88,18 @@ P.defs.save = {
       setBusy(true);
       U.async(fn, (ok, v, e) => {
         setBusy(false);
-        if (ok && okText) VC.bus.emit('toast', { text: okText, type: 'good', icon: '💾' });
-        if (!ok && failText) VC.bus.emit('toast', { text: failText + (e && e.message ? ' ' + e.message : ''), type: 'bad', icon: '💾' });
+        if (ok && okText) VC.ui.toast(okText, { type: 'good', icon: '💾', sfx: 'success' });
+        if (!ok && failText) fail(failText, e);
         if (ok && after) after(v);
         if (refreshAfter !== false) refresh();
       });
     }
     function doSave(name) {
       name = String(name || '').trim() || S.name || 'My City';
-      if (!has('save')) return VC.bus.emit('toast', { text: 'Saving is not available.', type: 'bad', icon: '💾' });
+      if (!has('save')) return fail('Saving is not available.');
       const exists = slots.some((s) => String(s.slot) === name || s.name === name);
-      const go = () => run(() => VC.save.save(name), `City saved as <b>${name.replace(/</g, '&lt;')}</b>.`, 'Save failed — storage may be full or unavailable.');
-      if (exists) VC.ui.confirm(`Overwrite the save <b>${name.replace(/</g, '&lt;')}</b>?`, go, { title: '💾 Overwrite save', yes: 'Overwrite' });
+      const go = () => run(() => VC.save.save(name), `City saved as <b>${U.esc(name)}</b>.`, 'Save failed — storage may be full or unavailable.');
+      if (exists) VC.ui.confirm(`Overwrite the save <b>${U.esc(name)}</b>?`, go, { title: '💾 Overwrite save', yes: 'Overwrite' });
       else go();
     }
     function refresh() {
@@ -119,15 +126,15 @@ P.defs.save = {
       const when = h('div', { class: 'pn-slot-when' });
       const load = VC.ui.button('Load', () => {
         const x = el._s;
-        VC.ui.confirm(`Load <b>${String(x.name).replace(/</g, '&lt;')}</b>?<br>Unsaved progress in the current city will be lost.`, () => run(() => VC.save.load(x.slot), `Loaded <b>${String(x.name).replace(/</g, '&lt;')}</b>.`, 'Could not load this save.', false, () => P.close('save')), { title: '📂 Load city', yes: 'Load' });
+        VC.ui.confirm(`Load <b>${U.esc(x.name)}</b>?<br>Unsaved progress in the current city will be lost.`, () => run(() => VC.save.load(x.slot), `Loaded <b>${U.esc(x.name)}</b>.`, 'Could not load this save.', false, () => P.close('save')), { title: '📂 Load city', yes: 'Load' });
       }, { icon: '📂', cls: 'small primary' });
       const over = VC.ui.button('', () => {
         const x = el._s;
-        VC.ui.confirm(`Overwrite <b>${String(x.name).replace(/</g, '&lt;')}</b> with the current city?`, () => run(() => VC.save.save(x.slot), 'Save overwritten.', 'Save failed.'), { title: '💾 Overwrite save', yes: 'Overwrite' });
+        VC.ui.confirm(`Overwrite <b>${U.esc(x.name)}</b> with the current city?`, () => run(() => VC.save.save(x.slot), 'Save overwritten.', 'Save failed.'), { title: '💾 Overwrite save', yes: 'Overwrite' });
       }, { icon: '💾', cls: 'small', tip: 'Overwrite with the current city' });
       const del = VC.ui.button('', () => {
         const x = el._s;
-        VC.ui.confirm(`Delete <b>${String(x.name).replace(/</g, '&lt;')}</b> permanently?`, () => run(() => VC.save.remove(x.slot), 'Save deleted.', 'Could not delete this save.'), { title: '🗑️ Delete save', yes: 'Delete' });
+        VC.ui.confirm(`Delete <b>${U.esc(x.name)}</b> permanently?`, () => run(() => VC.save.remove(x.slot), 'Save deleted.', 'Could not delete this save.'), { title: '🗑️ Delete save', yes: 'Delete' });
       }, { icon: '🗑️', cls: 'small danger', tip: 'Delete this save' });
       const el = h('div', { class: 'pn-slot' }, thumb, h('div', { class: 'pn-slot-info' }, name, meta, when), h('div', { class: 'pn-slot-btns' }, load, over, del));
       el.set = (x) => {

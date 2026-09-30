@@ -5,16 +5,19 @@
  *                 (latest save), New City (menu_newcity.js), Load City (save list + import), Settings,
  *                 How to Play, Credits, rotating tips. The demo state is flagged S.demo = true.
  *   PAUSE MENU    pause(): Resume, Save City, Settings, How to Play, Main Menu (confirm). Pauses the sim
- *                 and restores the previous speed on resume().
+ *                 and restores the previous speed on resume(). The overlay sits above every window: windows
+ *                 open when pausing are hidden until resume; windows opened from the pause card come on top
+ *                 of the overlay (#ui.pz-open) while the card dims.
  *   TRANSITIONS   fade(fn, text): full-screen fade with a spinning voxel cube while fn() runs.
  *   KEYBOARD      while the title screen or pause menu is up, game hotkeys are blocked (capture phase);
  *                 Esc closes the top window, then backs out of sub-panels / resumes.
  * API: active, show(), hide(), pause(), resume(), isPaused(), startGame(opts), loadGame(slot), fade(fn, text),
- *      saves() -> Promise<[normalised save info]>
+ *      saves() -> Promise<[normalised save info]>, resumeSpeed() -> speed the game resumes at while the pause
+ *      menu is open (null otherwise; a save taken from the pause menu should store this, not 0)
  */
 const h = VC.h;
 const MN = { built: false, sub: null, demoCenter: null, tipIdx: 0, tipTimer: 0, logoW: 0 };
-const PZ = { open: false, prev: 1, el: null, t: 0 };
+const PZ = { open: false, prev: 1, el: null, t: 0, hidden: [] };
 
 /* ---------------- 5x7 voxel font ---------------- */
 const FONT = {
@@ -201,7 +204,8 @@ function startDemo() {
   const r = VC.M.rng((Math.random() * 1e9) >>> 0);
   let S = null;
   try {
-    S = VC.newGame({ seed: (r() * 4294967295) >>> 0, size: 96, mapType: r.pick(DEMO_MAPS), difficulty: 'sandbox', name: 'Demo', disasters: false });
+    // demo: true is set on the state before any module sees it (no sounds, toasts or cards for its events)
+    S = VC.newGame({ seed: (r() * 4294967295) >>> 0, size: 96, mapType: r.pick(DEMO_MAPS), difficulty: 'sandbox', name: 'Demo', disasters: false, demo: true });
     S.demo = true;
     S.disastersEnabled = false;
     const res = VC.debug && VC.debug.sampleCity ? VC.debug.sampleCity({ grow: true, blocks: 5, seed: (r() * 1e6) | 0 }) : null;
@@ -271,7 +275,7 @@ function openLoad() {
         h('button', { class: 'btn small primary', onclick: (e) => { e.stopPropagation(); loadGame(s.slot); } }, 'Load'),
         h('button', { class: 'btn small ghost sv-del', 'data-tip': 'Delete', onclick: (e) => {
           e.stopPropagation();
-          VC.ui.confirm(`Delete <b>${VC.hud.escapeHtml(s.name)}</b>? This cannot be undone.`, () => {
+          VC.ui.confirm(`Delete <b>${VC.ui.esc(s.name)}</b>? This cannot be undone.`, () => {
             Promise.resolve(VC.save && VC.save.remove && VC.save.remove(s.slot)).then(() => { row.classList.add('out'); setTimeout(() => { openLoad(); refreshButtons(); }, 200); });
           }, { yes: 'Delete', danger: true, title: 'Delete saved city?' });
         } }, '🗑️'));
@@ -331,10 +335,9 @@ function startGame(opts) {
     if (VC.tools && VC.tools.select) VC.tools.select('select');
     VC.gfx.setOverlay('none');
     VC.hud.show();
-    const esc = VC.hud.escapeHtml;
-    VC.ui.toast(`<b>Welcome to ${esc(S.name)}, Mayor!</b><br>Start by building a road.`, { type: 'good', icon: '🏙️', duration: 6000 });
+    VC.ui.toast(`<b>Welcome to ${VC.ui.esc(S.name)}, Mayor!</b><br>Start by building a road.`, { type: 'good', icon: '🏙️', duration: 6000 });
     if (VC.settings.tutorial) setTimeout(() => VC.hud.startTutorial(), 900);
-  }, `Founding ${VC.hud.escapeHtml ? VC.hud.escapeHtml(opts.name || 'your city') : 'your city'}…`);
+  }, `Founding ${opts.name || 'your city'}…`); // fade text is set with textContent
 }
 function loadGame(slot) {
   fade(() => {
@@ -380,6 +383,14 @@ function buildPause() {
         btn('🏠', 'Main Menu', () => ui.confirm('Return to the main menu?<br><span style="color:var(--text3)">Unsaved progress will be lost.</span>', () => { closePause(); menu.show(); }, { yes: 'Main Menu', title: 'Leave this city?', danger: true }), 'danger'))));
   PZ.el.addEventListener('pointerdown', (e) => { if (e.target === PZ.el) resume(); });
   ui.root.insertBefore(PZ.el, ui.layer);
+  const sync = () => { if (PZ.open) syncPauseWindows(); };
+  VC.bus.on('windowOpened', sync);
+  VC.bus.on('windowClosed', () => setTimeout(sync, 0));
+}
+/** Dims the pause card while a window opened from it is on top of the overlay. */
+function syncPauseWindows() {
+  const vis = VC.ui.visibleWindows ? VC.ui.visibleWindows() : VC.ui.openWindows();
+  PZ.el.classList.toggle('has-win', vis.length > 0);
 }
 function pause() {
   const S = VC.state;
@@ -391,21 +402,36 @@ function pause() {
   VC.setSpeed(0);
   VC.ui.closePopovers && VC.ui.closePopovers();
   VC.hud.closePalette && VC.hud.closePalette();
+  // open windows would otherwise sit above (or be mistaken for) the pause card: hide them until resume
+  PZ.hidden = [];
+  for (const id of VC.ui.openWindows()) {
+    const w = VC.ui.getWindow(id);
+    if (w && w.el.style.display !== 'none') { w.hide(); PZ.hidden.push(id); }
+  }
+  VC.ui.root.classList.add('pz-open');
+  PZ.el.classList.remove('has-win');
   const st = S.stats || {};
   const mi = VC.hud.milestoneIndex ? VC.hud.milestoneIndex(S) : Math.max(0, Math.min(VC.MILESTONES.length - 1, S.milestone | 0));
-  PZ.city.textContent = `${S.name} · ${VC.MILESTONES[mi].name} · ${VC.fmt.fullDate(S.time.day)}`;
+  PZ.city.textContent = `${S.name} · ${VC.MILESTONES[mi].name} · ${VC.fmt.fullDate(S.time.day)}`; // textContent: no escaping needed
   PZ.stats.innerHTML = '';
   PZ.stats.append(
     h('span', null, '👥 ', h('b', null, VC.fmt.num(st.pop || 0))),
     h('span', null, '💰 ', h('b', null, S.sandbox ? '∞' : VC.fmt.money(S.money))),
-    h('span', null, '😊 ', h('b', null, Math.round(((st.approval != null ? st.approval : st.happiness) || 0) * 100) + '%')));
+    h('span', null, '😊 ', h('b', null, st.pop > 0 ? Math.round(((st.approval != null ? st.approval : st.happiness) || 0) * 100) + '%' : '—')));
   PZ.el.classList.remove('out');
   PZ.el.classList.add('show');
 }
 function closePause() {
   if (!PZ.open) return;
   PZ.open = false;
-  PZ.el.classList.remove('show');
+  PZ.el.classList.remove('show', 'has-win');
+  VC.ui.root.classList.remove('pz-open');
+  // bring back the windows hidden by pause() (still open unless something closed them meanwhile)
+  for (const id of PZ.hidden) {
+    const w = VC.ui.getWindow(id);
+    if (w && w.el.style.display === 'none') w.show();
+  }
+  PZ.hidden = [];
 }
 function resume() {
   if (!PZ.open) return;
@@ -417,7 +443,7 @@ function resume() {
 function onKey(e) {
   if (!menu.active && !PZ.open) return;
   const t = e.target;
-  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+  if (t && (VC.ui.isTextEntry(t) || t.tagName === 'SELECT')) return; // sliders / checkboxes do not swallow keys
   if (VC.ui.modalCount && VC.ui.modalCount()) return;
   if (e.code === 'Escape') {
     if (PZ.open && performance.now() - PZ.t < 120) { e.stopImmediatePropagation(); return; }
@@ -483,6 +509,7 @@ const menu = (VC.menu = {
   pause,
   resume,
   isPaused: () => PZ.open,
+  resumeSpeed: () => (PZ.open ? (PZ.prev == null ? 1 : PZ.prev) : null),
   startGame,
   loadGame,
   fade,

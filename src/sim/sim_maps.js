@@ -1,8 +1,8 @@
 /*
  * VOXELPOLIS — simulation: derived per-tile maps (part of VC.sim).
  *
- *   VC.sim.computeMaps()  rewrites every S.maps[VC.MAP_KEYS] layer (Uint8 0..255), bumps S.ver.maps,
- *                         emits 'mapsUpdated'. ~1-3 ms on 128x128 (all passes are O(N) on Float32 scratch).
+ *   VC.sim.computeMaps()  rewrites every S.maps[VC.MAP_KEYS] layer (Uint8 0..255) except 'traffic'
+ *                         (traffic.js owns it), bumps S.ver.maps, emits 'mapsUpdated'.
  *
  * COVERAGE (police, fire, health, edu, park, transit, garbage): each built service building stamps a
  *   plateau-then-smooth-falloff disc; radius & strength scale with VC.econ.effectiveness(dept) and
@@ -14,12 +14,19 @@
  * LAND VALUE: base 60 + water views + elevation + def.lv stamps + parks + services + shops + trees
  *   - pollution - crime - noise - industry; smoothed.
  * HAPPINESS: per-building happiness painted on footprints and feathered 1 tile around.
+ *
+ * EFFICIENCY: everything except the coverage stamps is computed only inside the DEVELOPED RECT
+ * (bounding box of buildings + roads plus a 20-tile margin covering the largest pollution radius,
+ * blur and wind drift), so a small town on a 256 map costs a fraction of the full map. Box blurs are
+ * rect-aware and match full-map blurs (cells outside the rect are zero). Outside the rect, land value
+ * is a cached static base (water views, elevation, forests) rebuilt only when terrain heights change
+ * (detected on 'dirty') or every 60 sim days (tree changes).
  */
 const SIM = (VC.sim = VC.sim || {});
 const X = (SIM._ = SIM._ || {});
 const C = VC.C, M = VC.M;
 
-const SVC_KEYS = ['police', 'fire', 'health', 'edu', 'park', 'transit', 'garbage'];
+const IND_POL = [0, 70, 95, 120]; // industrial pollution per tile by density
 
 X.eff = function (dept) {
   const e = VC.econ && VC.econ.effectiveness ? VC.econ.effectiveness(dept) : 1;
@@ -32,41 +39,55 @@ X.ensureMaps = function (S) {
   X.mapN = N;
   for (const k of ['fA', 'fB', 'polF', 'noiF', 'lvF', 'indF', 'comF', 'popF', 'crF', 'treeD', 'hapS', 'hapW']) X[k] = new Float32Array(N);
   X.waterDist = new Uint8Array(N);
-  X.waterVer = -1;
+  X.lvBase = new Uint8Array(N);
+  X.lvPrev = new Uint8Array(N); // last land value (crime's poverty input)
+  X.hCopy = null;
+  X.staticVer = -1;
 };
 
 /* ---------------- helpers ---------------- */
-function blurH(src, dst, W, H, r) {
-  for (let z = 0; z < H; z++) {
+/*
+ * Rect-aware separable box blur rows/columns. Only cells in [x0..x1] x [z0..z1] are read and
+ * written; everything outside is treated as zero while the divisor is the true window size
+ * clipped at the MAP edges — identical to a full-map blur when the outside really is zero.
+ */
+function blurH(src, dst, W, x0, z0, x1, z1, r) {
+  for (let z = z0; z <= z1; z++) {
     const o = z * W;
-    let sum = 0, cnt = 0;
-    for (let x = 0; x <= r && x < W; x++) { sum += src[o + x]; cnt++; }
-    for (let x = 0; x < W; x++) {
+    let sum = 0;
+    for (let x = x0; x <= x0 + r && x <= x1; x++) sum += src[o + x];
+    let cnt = Math.min(x0 + r, W - 1) - Math.max(x0 - r, 0) + 1;
+    for (let x = x0; x <= x1; x++) {
       dst[o + x] = sum / cnt;
       const xa = x + r + 1, xr = x - r;
-      if (xa < W) { sum += src[o + xa]; cnt++; }
-      if (xr >= 0) { sum -= src[o + xr]; cnt--; }
+      if (xa <= x1) sum += src[o + xa];
+      if (xa < W) cnt++;
+      if (xr >= x0) sum -= src[o + xr];
+      if (xr >= 0) cnt--;
     }
   }
 }
-function blurV(src, dst, W, H, r) {
-  for (let x = 0; x < W; x++) {
-    let sum = 0, cnt = 0;
-    for (let z = 0; z <= r && z < H; z++) { sum += src[z * W + x]; cnt++; }
-    for (let z = 0; z < H; z++) {
+function blurV(src, dst, W, H, x0, z0, x1, z1, r) {
+  for (let x = x0; x <= x1; x++) {
+    let sum = 0;
+    for (let z = z0; z <= z0 + r && z <= z1; z++) sum += src[z * W + x];
+    let cnt = Math.min(z0 + r, H - 1) - Math.max(z0 - r, 0) + 1;
+    for (let z = z0; z <= z1; z++) {
       dst[z * W + x] = sum / cnt;
       const za = z + r + 1, zr = z - r;
-      if (za < H) { sum += src[za * W + x]; cnt++; }
-      if (zr >= 0) { sum -= src[zr * W + x]; cnt--; }
+      if (za <= z1) sum += src[za * W + x];
+      if (za < H) cnt++;
+      if (zr >= z0) sum -= src[zr * W + x];
+      if (zr >= 0) cnt--;
     }
   }
 }
-/** In-place separable box blur, `passes` times (2-3 passes approximate a gaussian). */
-function blur(buf, W, H, r, passes) {
+/** In-place separable box blur over rect R, `passes` times (2 passes ~ gaussian). */
+function blur(buf, S, R, r, passes) {
   const t = X.fB === buf ? X.fA : X.fB;
   for (let p = 0; p < passes; p++) {
-    blurH(buf, t, W, H, r);
-    blurV(t, buf, W, H, r);
+    blurH(buf, t, S.W, R[0], R[1], R[2], R[3], r);
+    blurV(t, buf, S.W, S.H, R[0], R[1], R[2], R[3], r);
   }
 }
 /** Additive smooth radial stamp into a Float32 buffer: strength at the center, 0 at radius r. */
@@ -113,7 +134,7 @@ function stampCover(map, S, cx, cz, r, strength) {
 }
 /** Distance (tiles, capped at 12) from every land tile to open water. */
 function computeWaterDist(S) {
-  const W = S.W, H = S.H, N = S.N, d = X.waterDist, q = X.queue, hgt = S.height;
+  const W = S.W, N = S.N, d = X.waterDist, q = X.queue, hgt = S.height;
   let qh = 0, qt = 0;
   for (let i = 0; i < N; i++) {
     if (hgt[i] < C.SEA) { d[i] = 0; q[qt++] = i; } else d[i] = 255;
@@ -128,7 +149,71 @@ function computeWaterDist(S) {
     if (i >= W && d[i - W] > nd) { d[i - W] = nd; q[qt++] = i - W; }
     if (i < N - W && d[i + W] > nd) { d[i + W] = nd; q[qt++] = i + W; }
   }
-  X.waterVer = S.ver.terrain;
+}
+/** Static land value (no city influence): base + water views + elevation + forests. */
+function refreshStatic(S) {
+  computeWaterDist(S);
+  const N = S.N, base = X.lvBase, hgt = S.height, wd = X.waterDist, trees = S.trees;
+  for (let i = 0; i < N; i++) {
+    const h = hgt[i];
+    if (h < C.SEA) { base[i] = 0; continue; }
+    let v = 60;
+    const w = wd[i];
+    if (w <= 8) v += (9 - w) * 5;
+    const el = (h - C.SEA) * 1.1;
+    v += (el > 22 ? 22 : el) + trees[i] * 6.5; // forests: shade + a little park value
+    base[i] = v > 255 ? 255 : v;
+  }
+  X.staticVer = X.terrVer;
+  X.staticDay = S.time.day;
+}
+
+/** Height-change detector (called on 'dirty'): terrain edits invalidate the static fields. */
+X.heightChanged = function (S, r) {
+  if (!X.hCopy || X.hCopy.length !== S.N) return;
+  const W = S.W, h = S.height, c = X.hCopy;
+  let changed = false;
+  for (let z = r.z0; z <= r.z1; z++)
+    for (let x = r.x0; x <= r.x1; x++) {
+      const i = z * W + x;
+      if (h[i] !== c[i]) { c[i] = h[i]; changed = true; }
+    }
+  if (changed) X.terrVer = (X.terrVer || 0) + 1;
+};
+
+/** Developed rect (buildings + roads) + margin, or null when nothing is built. */
+function devRect(S) {
+  let x0 = S.W, z0 = S.H, x1 = -1, z1 = -1;
+  for (const b of S.buildings.values()) {
+    if (b.x < x0) x0 = b.x;
+    if (b.z < z0) z0 = b.z;
+    if (b.x + b.w - 1 > x1) x1 = b.x + b.w - 1;
+    if (b.z + b.d - 1 > z1) z1 = b.z + b.d - 1;
+  }
+  const rb = X.roadBox;
+  if (rb) {
+    if (rb[0] < x0) x0 = rb[0];
+    if (rb[1] < z0) z0 = rb[1];
+    if (rb[2] > x1) x1 = rb[2];
+    if (rb[3] > z1) z1 = rb[3];
+  }
+  if (x1 < 0) return null;
+  if (X.fullRect) { x0 = 0; z0 = 0; x1 = S.W - 1; z1 = S.H - 1; } // debug: verify rect == full map
+  const m = 20;
+  const R = X._rect || (X._rect = [0, 0, 0, 0]);
+  R[0] = Math.max(0, x0 - m);
+  R[1] = Math.max(0, z0 - m);
+  R[2] = Math.min(S.W - 1, x1 + m);
+  R[3] = Math.min(S.H - 1, z1 + m);
+  return R;
+}
+
+function finish(S, t0) {
+  X.mapsDirty = false;
+  X.lastMaps = performance.now();
+  X.mapsMs = X.lastMaps - t0;
+  S.ver.maps++;
+  VC.bus.emit('mapsUpdated');
 }
 
 /* ---------------- main ---------------- */
@@ -139,11 +224,29 @@ SIM.computeMaps = function () {
   X.ensureNet(S);
   X.ensureMaps(S);
   const W = S.W, H = S.H, N = S.N, maps = S.maps, mods = S.mods;
+  if (!X.hCopy || X.hCopy.length !== N) {
+    X.hCopy = new Uint8Array(S.height);
+    X.terrVer = (X.terrVer || 0) + 1;
+  }
+  if (X.staticVer !== X.terrVer || S.time.day - X.staticDay >= 60 || S.time.day < X.staticDay) refreshStatic(S);
+  for (const k of VC.MAP_KEYS) if (k !== 'traffic' && k !== 'landValue') maps[k].fill(0);
+  // land value: static base everywhere (scaled by policy); city effects overwrite the developed rect
+  const lvMul = Math.max(0, 1 + (mods.landValue || 0));
+  const lvOut = maps.landValue, base = X.lvBase;
+  const eduAdd = (X.cityEdu || 0) * 6;
+  for (let i = 0; i < N; i++) {
+    const bv = base[i];
+    const v = bv ? (bv + eduAdd) * lvMul : 0;
+    lvOut[i] = v >= 255 ? 255 : v;
+  }
+  const R = devRect(S);
+  if (!R) return finish(S, t0);
+  const rx0 = R[0], rz0 = R[1], rx1 = R[2], rz1 = R[3];
+
   const polF = X.polF, noiF = X.noiF, lvF = X.lvF, indF = X.indF, comF = X.comF, popF = X.popF, crF = X.crF;
-  const hapS = X.hapS, hapW = X.hapW, fA = X.fA, treeD = X.treeD;
-  polF.fill(0); noiF.fill(0); lvF.fill(0); indF.fill(0); comF.fill(0); popF.fill(0); crF.fill(0); hapS.fill(0); hapW.fill(0);
-  for (const k of SVC_KEYS) maps[k].fill(0);
-  if (X.waterVer !== S.ver.terrain) computeWaterDist(S);
+  const hapS = X.hapS, hapW = X.hapW, fA = X.fA, fB = X.fB, treeD = X.treeD;
+  polF.fill(0); noiF.fill(0); lvF.fill(0); indF.fill(0); comF.fill(0); popF.fill(0); crF.fill(0);
+  hapS.fill(0); hapW.fill(0); fA.fill(0); fB.fill(0); treeD.fill(0);
 
   const effCache = X._effCache || (X._effCache = {});
   for (const d of VC.DEPARTMENTS) effCache[d.key] = X.eff(d.key);
@@ -169,7 +272,7 @@ SIM.computeMaps = function () {
       if (def.pollution) stampRadial(polF, S, cx, cz, def.pollR || 4, def.pollution * (b.fire > 0 ? 1.4 : 1));
       if (def.noise) stampRadial(noiF, S, cx, cz, def.noiseR || 3, def.noise);
       if (def.lv) stampRadial(lvF, S, cx, cz, def.lvR || 4, def.lv);
-      const jobsPer = (b.simJobs != null ? b.simJobs : b.pop) / area;
+      const jobsPer = (b.simJobs || 0) / area;
       const resPer = def.housing ? b.pop / area : 0;
       for (let z = b.z; z < b.z + b.d; z++)
         for (let x = b.x; x < b.x + b.w; x++) {
@@ -194,7 +297,7 @@ SIM.computeMaps = function () {
       ind = 0.6 + 0.2 * b.den;
       // dirty low-tech vs clean high-tech (level 3 or rich = educated workforce)
       const clean = b.level >= 3 || b.wealth >= 2 ? 0.3 : b.wealth === 1 ? 0.7 : 1;
-      pol = [0, 70, 95, 120][b.den] * (0.35 + 0.65 * occ) * clean * (b.built < 1 ? 0.3 : 1);
+      pol = IND_POL[b.den] * (0.35 + 0.65 * occ) * clean * (b.built < 1 ? 0.3 : 1);
       noi = 18 + 10 * b.den;
     }
     if (b.simGarbage) pol += b.simGarbage * 28;
@@ -217,117 +320,126 @@ SIM.computeMaps = function () {
 
   /* ---- roads and trees ---- */
   const road = S.road, traffic = maps.traffic, trees = S.trees;
-  for (let i = 0; i < N; i++) {
-    const r = road[i];
-    if (r) {
-      const t = traffic[i] * (1 / 255);
-      polF[i] += (r === 3 ? 22 : r === 2 ? 8 : 3) + 70 * t;
-      noiF[i] += (r === 3 ? 70 : r === 2 ? 38 : 18) + 70 * t;
+  for (let z = rz0; z <= rz1; z++)
+    for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
+      const r = road[i];
+      if (r) {
+        const t = traffic[i] * (1 / 255);
+        polF[i] += (r === 3 ? 22 : r === 2 ? 8 : 3) + 70 * t;
+        noiF[i] += (r === 3 ? 70 : r === 2 ? 38 : 18) + 70 * t;
+      }
+      treeD[i] = trees[i] * (1 / 3);
     }
-    treeD[i] = trees[i] * (1 / 3);
-  }
-  blur(treeD, W, H, 2, 1);
+  blur(treeD, S, R, 2, 1);
 
   /* ---- park coverage gets a little from forests ---- */
   const park = maps.park;
-  for (let i = 0; i < N; i++) {
-    if (treeD[i] > 0.02) {
-      const v = park[i] + treeD[i] * 40;
-      park[i] = v > 255 ? 255 : v;
+  for (let z = rz0; z <= rz1; z++)
+    for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
+      if (treeD[i] > 0.02) {
+        const v = park[i] + treeD[i] * 40;
+        park[i] = v > 255 ? 255 : v;
+      }
     }
-  }
 
   /* ---- pollution: blur, drift downwind, sinks ---- */
-  blur(polF, W, H, 2, 2);
+  blur(polF, S, R, 2, 2);
   const wind = S.weather ? M.sat(S.weather.wind != null ? S.weather.wind : 0.5) : 0.5;
   const wdir = S.weather && S.weather.windDir != null ? S.weather.windDir : 0.6;
   const sh = 1 + 2 * wind;
   const sx = Math.round(Math.cos(wdir) * sh), sz = Math.round(Math.sin(wdir) * sh);
   const pMul = Math.max(0, 1 + (mods.pollution || 0));
   const polOut = maps.pollution;
-  for (let z = 0; z < H; z++) {
+  for (let z = rz0; z <= rz1; z++) {
     const uz = M.clamp(z - sz, 0, H - 1);
-    for (let x = 0; x < W; x++) {
+    for (let x = rx0; x <= rx1; x++) {
       const i = z * W + x;
       const up = polF[uz * W + M.clamp(x - sx, 0, W - 1)];
       // -6: trace amounts (quiet streets) read as clean air
-      let v = (0.55 * polF[i] + 0.45 * up - treeD[i] * 26 - park[i] * 0.05 - 6) * pMul;
+      const v = (0.55 * polF[i] + 0.45 * up - treeD[i] * 26 - park[i] * 0.05 - 6) * pMul;
       polOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
     }
   }
 
   /* ---- noise ---- */
-  blur(noiF, W, H, 1, 2);
+  blur(noiF, S, R, 1, 2);
   const nMul = Math.max(0, 1 + (mods.noise || 0));
   const noiOut = maps.noise;
-  for (let i = 0; i < N; i++) {
-    const v = (noiF[i] - treeD[i] * 10) * nMul;
-    noiOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
-  }
+  for (let z = rz0; z <= rz1; z++)
+    for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
+      const v = (noiF[i] - treeD[i] * 10) * nMul;
+      noiOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
+    }
 
-  /* ---- crime ---- */
-  const lvOld = maps.landValue, police = maps.police;
+  /* ---- crime (poverty uses the previous land value) ---- */
+  const police = maps.police, lvPrev = X.lvPrev;
   const unemp = S.stats.unemployment || 0;
-  for (let i = 0; i < N; i++) {
-    const p = popF[i];
-    if (p <= 0 && crF[i] <= 0) { fA[i] = 0; continue; }
-    const dens = p >= 45 ? 1 : p / 45;
-    const lvn = lvOld[i] * (1 / 153); // 153 = 0.6 * 255
-    const poverty = 0.35 + 0.65 * (1 - (lvn > 1 ? 1 : lvn)) + unemp * 1.2;
-    fA[i] = (p > 0 ? 0.1 : 0) + dens * poverty * 0.75 + crF[i];
-  }
-  blur(fA, W, H, 1, 2);
+  for (let z = rz0; z <= rz1; z++)
+    for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
+      const p = popF[i];
+      if (p <= 0 && crF[i] <= 0) continue;
+      const dens = p >= 45 ? 1 : p / 45;
+      const lvn = lvPrev[i] * (1 / 153); // 153 = 0.6 * 255
+      const poverty = 0.35 + 0.65 * (1 - (lvn > 1 ? 1 : lvn)) + unemp * 1.2;
+      fA[i] = (p > 0 ? 0.1 : 0) + dens * poverty * 0.75 + crF[i];
+    }
+  blur(fA, S, R, 1, 2);
   const cMul = Math.max(0, 1 + (mods.crime || 0));
   const crOut = maps.crime;
-  for (let i = 0; i < N; i++) {
-    const v = (fA[i] - police[i] * (0.8 / 255) - park[i] * (0.08 / 255)) * cMul * 255;
-    crOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
-  }
+  for (let z = rz0; z <= rz1; z++)
+    for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
+      const v = (fA[i] - police[i] * (0.8 / 255) - park[i] * (0.08 / 255)) * cMul * 255;
+      crOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
+    }
 
-  /* ---- land value ---- */
-  blur(comF, W, H, 2, 2);
-  blur(indF, W, H, 2, 2);
+  /* ---- land value (rect) ---- */
+  blur(comF, S, R, 2, 2);
+  blur(indF, S, R, 2, 2);
   const hgt = S.height, wd = X.waterDist, edu = maps.edu, health = maps.health;
-  const lvMul = Math.max(0, 1 + (mods.landValue || 0));
-  for (let i = 0; i < N; i++) {
-    if (hgt[i] < C.SEA) { fA[i] = 0; continue; }
-    let v = 60;
-    const w = wd[i];
-    if (w <= 8) v += (9 - w) * 5;
-    const el = (hgt[i] - C.SEA) * 1.1;
-    v += el > 22 ? 22 : el;
-    v += lvF[i];
-    v += park[i] * (30 / 255) + (edu[i] + health[i] + police[i]) * (12 / 255);
-    v += (comF[i] > 1.5 ? 1.5 : comF[i]) * 10 + treeD[i] * 15 + cityEdu * 6;
-    v -= polOut[i] * 0.45 + crOut[i] * 0.3 + noiOut[i] * 0.2 + (indF[i] > 1 ? 1 : indF[i]) * 45;
-    fA[i] = v * lvMul;
+  for (let z = rz0; z <= rz1; z++)
+    for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
+      if (hgt[i] < C.SEA) { fA[i] = 0; continue; }
+      let v = 60;
+      const w = wd[i];
+      if (w <= 8) v += (9 - w) * 5;
+      const el = (hgt[i] - C.SEA) * 1.1;
+      v += el > 22 ? 22 : el;
+      v += lvF[i];
+      v += park[i] * (30 / 255) + (edu[i] + health[i] + police[i]) * (12 / 255);
+      v += (comF[i] > 1.5 ? 1.5 : comF[i]) * 10 + treeD[i] * 15 + cityEdu * 6;
+      v -= polOut[i] * 0.45 + crOut[i] * 0.3 + noiOut[i] * 0.2 + (indF[i] > 1 ? 1 : indF[i]) * 45;
+      fA[i] = v * lvMul;
+    }
+  // (no final blur: its inputs are already smooth, and blurring would mix in the zero-valued water
+  // tiles and rob waterfront lots of their premium)
+  // blend into the static base near the rect border so there is no visible seam
+  // (only on rect sides that are not the map edge)
+  for (let z = rz0; z <= rz1; z++) {
+    const ez = Math.min(rz0 > 0 ? z - rz0 : 99, rz1 < H - 1 ? rz1 - z : 99);
+    for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
+      if (hgt[i] < C.SEA) { lvOut[i] = 0; continue; }
+      const e = Math.min(ez, rx0 > 0 ? x - rx0 : 99, rx1 < W - 1 ? rx1 - x : 99);
+      let v = fA[i];
+      if (e < 4) v += ((base[i] + eduAdd) * lvMul - v) * (1 - e / 4);
+      lvOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
+    }
   }
-  blur(fA, W, H, 1, 1);
-  const lvOut = maps.landValue;
-  for (let i = 0; i < N; i++) {
-    const v = hgt[i] < C.SEA ? 0 : fA[i];
-    lvOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
-  }
+  lvPrev.set(lvOut);
 
   /* ---- happiness: footprints + 1-tile feather ---- */
-  fA.set(hapS);
-  const fB = X.fB;
-  const t = X.lvF; // lvF no longer needed: reuse as scratch
-  blurH(fA, t, W, H, 1); blurV(t, fA, W, H, 1);
-  t.set(hapW);
-  blurH(t, fB, W, H, 1); blurV(fB, t, W, H, 1);
+  const t = lvF; // lvF is no longer needed: reuse as scratch
+  blurH(hapS, fB, W, rx0, rz0, rx1, rz1, 1);
+  blurV(fB, fA, W, H, rx0, rz0, rx1, rz1, 1);
+  blurH(hapW, fB, W, rx0, rz0, rx1, rz1, 1);
+  blurV(fB, t, W, H, rx0, rz0, rx1, rz1, 1);
   const hOut = maps.happiness;
-  for (let i = 0; i < N; i++) {
-    let v = 0;
-    if (hapW[i] > 0) v = hapS[i] / hapW[i];
-    else if (t[i] > 0.05) v = fA[i] / t[i];
-    v *= 255;
-    hOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
-  }
-
-  X.mapsDirty = false;
-  X.lastMaps = performance.now();
-  X.mapsMs = X.lastMaps - t0;
-  S.ver.maps++;
-  VC.bus.emit('mapsUpdated');
+  for (let z = rz0; z <= rz1; z++)
+    for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
+      let v = 0;
+      if (hapW[i] > 0) v = hapS[i] / hapW[i];
+      else if (t[i] > 0.05) v = fA[i] / t[i];
+      v *= 255;
+      hOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
+    }
+  return finish(S, t0);
 };

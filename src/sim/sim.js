@@ -8,10 +8,13 @@
  * TIME: update() turns rdt * C.SPEEDS[speed] / C.DAY_SEC into whole days (<= 8 tickDay() per frame).
  *   Construction progress is advanced continuously per frame (smooth build-up animation); when tickDay()
  *   is called directly (VC.debug.run) it advances construction itself.
- * DAILY: construction, occupancy (move-ins / job filling), happiness, garbage, abandonment,
- *   fire ignition/spread, growth slice (1/4 of the map in a fixed random order), stats.
- *   day%4==1 networks, day%4==2 maps, day%8==3 traffic, day%3==0 demand (smoothed).
- * MONTHLY: level-ups, wealth drift, rubble clearing, long-abandoned buildings collapse -> then 'month'.
+ * DAILY: construction, occupancy (move-ins / job filling), stats; for a quarter of the buildings
+ *   ((id + day) & 3): happiness, garbage, abandonment, downgrade, level-up, fire ignition. Fire
+ *   spread/extinguish, growth slice (1/4 of the map in a fixed random order), abandoned 12+ months
+ *   -> rubble. day%4==1 networks, day%4==2 maps, day%8==3 traffic, day%3==0 demand (smoothed).
+ * GROWTH BUDGET: capacity units per zone per day (demand x sub-linear city size), spent by new
+ *   buildings and level-ups; lot sizes are capped by the zone's unmet need.
+ * MONTHLY: wealth drift, rubble clearing (6 months), abandonment summary -> then 'month' / 'year'.
  * RESPONSIVENESS: bldAdd/bldRemove/roadChange/power-line edits schedule recalcNetworks() (throttled to
  *   ~150 ms, also while paused); service placement/budget/policy changes schedule computeMaps().
  *
@@ -502,8 +505,10 @@ function updateStats(S) {
 
 /** Per-day city-level caches used by happiness/demand. */
 function refreshCity(S) {
-  X.taxZ = [0, 0, 0, 0];
-  X.taxW = [null, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  if (!X.taxZ) {
+    X.taxZ = [0, 0, 0, 0];
+    X.taxW = [null, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  }
   for (let z = 1; z <= 3; z++) {
     const zk = ZK[z];
     for (let w = 0; w < 3; w++) X.taxW[z][w] = ownTax(S, zk, w);
@@ -599,9 +604,14 @@ function desirability(S, zt, i) {
     const svc = (m.police[i] + m.fire[i] + m.health[i] + m.edu[i]) / 1020;
     d = 0.3 + lv * 0.6 - pol * 0.6 - cri * 0.3 - noi * 0.2 + svc * 0.25 + (m.park[i] / 255) * 0.15;
   } else if (zt === 2) {
-    d = 0.35 + lv * 0.45 - cri * 0.3 - pol * 0.15 + Math.min(0.2, (m.traffic[i] / 255) * 0.3);
+    // shops like passing trade on the street out front (busy, not jammed)
+    const r = X.accRoad ? X.accRoad[i] : -1;
+    const t = r >= 0 ? m.traffic[r] / 255 : 0;
+    d = 0.35 + lv * 0.45 - cri * 0.3 - pol * 0.15 + (t < 0.6 ? t * 0.35 : 0.21 - (t - 0.6) * 0.4);
   } else {
-    d = 0.6 - lv * 0.2 - cri * 0.1;
+    // industry wants cheap land and fast roads for freight
+    const r = X.accRoad ? X.accRoad[i] : -1;
+    d = 0.6 - lv * 0.2 - cri * 0.1 + (r >= 0 && S.road[r] >= 2 ? 0.1 : 0);
   }
   return clamp(d, 0.05, 1);
 }
@@ -706,7 +716,7 @@ function placeGrow(S, x0, z0, w, d, zt, den) {
 const ZONE_SHARE = [0, 1, 0.4, 0.5];
 function growBudget(S) {
   const t = X.tot;
-  const rate = (14 + 0.45 * Math.sqrt(t.pop + (t.capC + t.capI) * 0.5)) * Math.max(0, 1 + (S.mods.growth || 0));
+  const rate = (9 + 0.42 * Math.sqrt(t.pop + (t.capC + t.capI) * 0.5)) * Math.max(0, 1 + (S.mods.growth || 0));
   for (let z = 1; z <= 3; z++) {
     const u = Math.max(0, S.demand[ZK[z]]) * rate * ZONE_SHARE[z];
     X.growRate[z] = u;
@@ -909,7 +919,9 @@ Object.assign(SIM, {
     bus.on('roadChange', () => { X.netDirty = true; });
     bus.on('dirty', (r) => {
       const S = VC.state;
-      if (X.ready && S && !X.netDirty && X.plineChanged(S, r)) X.netDirty = true;
+      if (!X.ready || !S) return;
+      if (!X.netDirty && X.plineChanged(S, r)) X.netDirty = true;
+      if (X.heightChanged) X.heightChanged(S, r);
     });
     const md = () => { X.mapsDirty = true; };
     bus.on('budgetChanged', md);
@@ -921,6 +933,8 @@ Object.assign(SIM, {
     X.ensureNet(S);
     X.ensureMaps(S);
     if (X.ensureTraffic) X.ensureTraffic(S);
+    X.hCopy = null; // new terrain: rebuild static land value / water distance
+    X.staticVer = -1;
     X.acc = 0;
     X.rnd = M.rng(((S.seed ^ 0x51ed5eed) + S.time.day * 7919) >>> 0);
     const N = S.N;

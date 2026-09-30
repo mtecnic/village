@@ -352,11 +352,21 @@ SIM.recalcNetworks = function () {
   X.ensureNet(S);
   const N = S.N, W = S.W, H = S.H, cond = X.cond, road = S.road, pline = S.pline, flags = S.flags;
   const tileB = X.tileB, blist = X.blist;
+  let rx0 = W, rz0 = H, rx1 = -1, rz1 = -1;
   for (let i = 0; i < N; i++) {
-    cond[i] = (road[i] ? 3 : 0) | (pline[i] ? 1 : 0);
+    const r = road[i];
+    cond[i] = (r ? 3 : 0) | (pline[i] ? 1 : 0);
     flags[i] &= ~F.ACCESS;
     tileB[i] = -1;
+    if (r) {
+      const x = i % W, z = (i - x) / W;
+      if (x < rx0) rx0 = x;
+      if (x > rx1) rx1 = x;
+      if (z < rz0) rz0 = z;
+      if (z > rz1) rz1 = z;
+    }
   }
+  X.roadBox = rx1 >= 0 ? [rx0, rz0, rx1, rz1] : null; // developed-area bounds for computeMaps
   X.plineCopy.set(pline);
   computeAccess(S);
 

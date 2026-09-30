@@ -9,10 +9,20 @@
  *   edge scroll when VC.settings.edgeScroll
  *   touch       1 finger = tool (or pan with the select tool, tap = inspect); 2 fingers = pinch zoom + twist
  *               rotate + pan (any tool drag is cancelled)
- * KEYBOARD (central; ignored while typing in INPUT/TEXTAREA/SELECT, behind menus and modals): see KEYMAP.
+ * KEYBOARD (central; behind menus and modals): see KEYMAP. Ignored only while TYPING — focus in a text-like
+ *   field (text/search/number/email/password/… inputs, textarea, select, contenteditable). Sliders, checkboxes,
+ *   radios and buttons keep focus after a click but never swallow hotkeys (a focused slider keeps only its own
+ *   arrow / Home / End / PgUp / PgDn keys; Space never also "clicks" a focused control).
+ *   Interface hidden (H / photo mode, VC.hud.isVisible() false): only camera keys, H, Esc, C, O, Space, speed keys
+ *   and Ctrl+S work — no invisible windows, palettes or edits.
  *   Continuous camera moves use real dt: pan speed ∝ zoom distance (Shift = faster).
- * API: KEYMAP [{group, keys, action}] (help window), keys Set of held codes, mouse {x, y (client px), buttons,
- *   over}, mods {shift, ctrl, alt}, enabled(), PANEL_KEYS {code: panelKey}.
+ * FEEDBACK: toggles (cinematic, grid, overlay, undo) show ONE toast via VC.ui.toast directly (a bus 'toast' would
+ *   add the audio module's notify sound); overlay cycling reuses a single toast that updates in place.
+ * API: KEYMAP [{group, keys, action}] (help window; keys: alternatives separated by ', ', chords by ' + ', so a
+ *   bare '+' / '−' is a key of its own), keys Set of held codes, mouse {x, y (client px), buttons, over},
+ *   mods {shift, ctrl, alt}, enabled(), PANEL_KEYS {code: panelKey}, isTyping(e),
+ *   zoomDir() -> 1 | -1 (VC.settings.invertZoom; multiply wheel deltas by it), wheelZoom(e) -> camera zoom factor
+ *   for a wheel event (normalised delta, clamped, invert applied) — for other zoomable views such as the minimap.
  */
 const M = VC.M;
 
@@ -29,10 +39,31 @@ let tmode = null; // touch mode: 'tool' | 'panOrTap' | 'pan' | 'gesture' | 'wait
 let gest = null; // two-finger gesture state
 let lastWheel = 0;
 
+/** Input types that take no text: hotkeys pass through them. */
+const NON_TEXT = new Set(['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'color', 'file']);
+/** True while the key goes into a text-like field (so it must not trigger hotkeys). */
 function isTyping(e) {
   const t = e && e.target;
-  return !!(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable));
+  if (!t || !t.tagName) return false;
+  if (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return true;
+  return t.tagName === 'INPUT' && !NON_TEXT.has(String(t.type || 'text').toLowerCase());
 }
+/** Keys a focused slider handles itself. */
+const SLIDER_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown']);
+/** Hotkeys that still work while the interface is hidden (camera, look & time; no windows, palettes or edits). */
+const HIDDEN_OK = new Set(['Escape', 'KeyH', 'KeyC', 'KeyO', 'Space', 'Comma', 'Period', 'BracketLeft', 'BracketRight']);
+/** Interface shown (false in H / photo mode). */
+function uiVisible() {
+  const H = VC.hud;
+  if (!H) return true;
+  if (typeof H.isVisible === 'function') return !!H.isVisible();
+  return !(H.uiHidden || H.photo);
+}
+/** Normalised wheel delta in px (line / page modes scaled). */
+function wheelPx(e, v) {
+  return v * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+}
+const zoomDir = () => (VC.settings && VC.settings.invertZoom ? -1 : 1);
 function local(e) {
   const r = cv.getBoundingClientRect();
   return [e.clientX - r.left, e.clientY - r.top];
@@ -54,38 +85,62 @@ function capture(id) {
 function release(id) {
   try { if (cv.hasPointerCapture && cv.hasPointerCapture(id)) cv.releasePointerCapture(id); } catch (e) { /* ignore */ }
 }
-function toast(text, icon) {
-  VC.bus.emit('toast', { text, type: 'info', icon });
+/**
+ * One info toast shown directly (no bus 'toast': audio would add its notify sound). reuse: a previous toast element
+ * to update in place instead of stacking a new one. Returns the element (or null).
+ */
+function toast(text, icon, o = {}) {
+  const U = VC.ui;
+  if (!U || !U.toast || (VC.state && VC.state.demo)) return null;
+  if (o.sfx) VC.bus.emit('sfx', { name: o.sfx, vol: 0.5 });
+  const el = o.reuse;
+  if (el && el.isConnected && !el.classList.contains('out')) {
+    const tx = el.querySelector('.toast-text'), ic = el.querySelector('.toast-icon');
+    if (tx && ic) {
+      tx.innerHTML = text;
+      ic.textContent = icon || '';
+      return el;
+    }
+  }
+  return U.toast(text, { type: o.type || 'info', icon, duration: o.duration });
 }
+/** Fades a toast out like VC.ui does (used for the self-managed overlay toast). */
+function toastOut(el) {
+  if (!el || !el.isConnected || el.classList.contains('out')) return;
+  el.classList.add('out');
+  setTimeout(() => el.remove(), 380);
+}
+const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 const I = (VC.input = {
   keys: new Set(),
   mouse: { x: 0, y: 0, buttons: 0, over: false },
   mods: { shift: false, ctrl: false, alt: false },
   PANEL_KEYS,
+  // keys: alternatives separated by ', ', chords by ' + ' (a lone '+' or '−' is a key); see hud_settings keyChips
   KEYMAP: [
-    { group: 'Camera', keys: 'W A S D / Arrows', action: 'Pan the camera (hold Shift = faster)' },
+    { group: 'Camera', keys: 'W A S D, Arrows', action: 'Pan the camera (hold Shift = faster)' },
     { group: 'Camera', keys: 'Right-drag', action: 'Rotate and tilt' },
     { group: 'Camera', keys: 'Middle-drag', action: 'Pan (drag the ground)' },
     { group: 'Camera', keys: 'Left-drag', action: 'Pan with the Inspect tool' },
-    { group: 'Camera', keys: 'Wheel / + / −', action: 'Zoom toward the cursor' },
-    { group: 'Camera', keys: 'Q / E', action: 'Rotate left / right' },
-    { group: 'Camera', keys: 'PgUp / PgDn', action: 'Tilt the camera' },
+    { group: 'Camera', keys: 'Wheel, +, −', action: 'Zoom toward the cursor' },
+    { group: 'Camera', keys: 'Q, E', action: 'Rotate left / right' },
+    { group: 'Camera', keys: 'PgUp, PgDn', action: 'Tilt the camera' },
     { group: 'Camera', keys: 'Double-click', action: 'Focus on a building' },
     { group: 'Camera', keys: 'C', action: 'Cinematic camera' },
     { group: 'Building', keys: '1 … 0', action: 'Open tool groups' },
     { group: 'Building', keys: 'T', action: 'Terraform tools' },
     { group: 'Building', keys: 'B', action: 'Bulldozer' },
     { group: 'Building', keys: 'Left-drag', action: 'Build roads, zones, power lines' },
-    { group: 'Building', keys: 'Shift + drag', action: 'Straight road / power line' },
+    { group: 'Building', keys: 'Shift + Left-drag', action: 'Straight road / power line' },
     { group: 'Building', keys: 'R', action: 'Rotate building (Shift+R: back)' },
     { group: 'Building', keys: 'Ctrl + Wheel', action: 'Brush size (terrain, trees)' },
-    { group: 'Building', keys: 'Right-click / Esc', action: 'Cancel / back to Inspect' },
+    { group: 'Building', keys: 'Right-click, Esc', action: 'Cancel / back to Inspect' },
     { group: 'Building', keys: 'Ctrl + Z', action: 'Undo last action (' + ((VC.actions && VC.actions.UNDO_SEC) || 10) + ' s)' },
     { group: 'Building', keys: 'L', action: 'Toggle build grid' },
     { group: 'Building', keys: 'Delete', action: 'Demolish the selected building' },
     { group: 'Game', keys: 'Space', action: 'Pause / resume' },
-    { group: 'Game', keys: ', / .', action: 'Slower / faster (also [ / ])' },
+    { group: 'Game', keys: '[, ]', action: 'Slower / faster (the , and . keys work too)' },
     { group: 'Game', keys: 'O', action: 'Cycle map overlays (Shift+O: back)' },
     { group: 'Game', keys: 'H', action: 'Hide interface (photo mode)' },
     { group: 'Game', keys: 'F1', action: 'Help' },
@@ -102,6 +157,15 @@ const I = (VC.input = {
     { group: 'Managers', keys: 'X', action: 'Disasters' },
     { group: 'Managers', keys: 'K', action: 'Save & load' },
   ],
+
+  isTyping,
+  /** +1, or -1 with VC.settings.invertZoom: multiply wheel deltas by it (minimap & co. zoom like the 3D view). */
+  zoomDir,
+  /** Camera zoom factor (VC.camera.zoom(f)) for a wheel event: normalised delta, clamped, invert applied. */
+  wheelZoom(e) {
+    const d = M.clamp(wheelPx(e, e.deltaY || 0), -300, 300) * zoomDir();
+    return Math.exp(d * 0.0016);
+  },
 
   /** Game input is live (a city is running and no title menu is up). */
   enabled() {
@@ -326,9 +390,7 @@ function onWheel(e) {
   e.preventDefault();
   if (!I.enabled()) return;
   const T = tools();
-  let d = e.deltaY || e.deltaX; // Shift+wheel scrolls horizontally in some browsers
-  if (e.deltaMode === 1) d *= 33;
-  else if (e.deltaMode === 2) d *= 400;
+  const d = wheelPx(e, e.deltaY || e.deltaX); // Shift+wheel scrolls horizontally in some browsers
   if ((e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) && T && T.isBrush && T.isBrush()) {
     const now = performance.now();
     if (now - lastWheel > 90 && d) {
@@ -338,10 +400,8 @@ function onWheel(e) {
     return;
   }
   if (!e.deltaY) return;
-  d = M.clamp(e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1), -300, 300);
-  if (VC.settings && VC.settings.invertZoom) d = -d;
   const [px, py] = local(e);
-  cam().zoom(Math.exp(d * 0.0016), px, py);
+  cam().zoom(I.wheelZoom(e), px, py);
 }
 
 function onDblClick(e) {
@@ -463,8 +523,12 @@ function onKeyDown(e) {
   if (!I.enabled()) return;
   if (VC.ui && VC.ui.modalCount && VC.ui.modalCount() > 0) return;
   const code = e.code;
+  const tg = e.target;
+  // a focused slider keeps its own keys (value steps); everything else is a hotkey
+  if (tg && tg.tagName === 'INPUT' && tg.type === 'range' && SLIDER_KEYS.has(code)) return;
   const T = tools();
   const ctrl = e.ctrlKey || e.metaKey;
+  const shown = uiVisible();
   // ---- Ctrl / Cmd shortcuts ----
   if (ctrl) {
     if (code === 'KeyS') {
@@ -474,7 +538,7 @@ function onKeyDown(e) {
       }
     } else if (code === 'KeyZ' && !e.shiftKey) {
       e.preventDefault();
-      if (!e.repeat) undo();
+      if (!e.repeat && shown) undo(); // no invisible edits in photo mode
     }
     return;
   }
@@ -482,6 +546,15 @@ function onKeyDown(e) {
   if (HOLD.has(code)) {
     I.keys.add(code);
     if (code.startsWith('Arrow') || code.startsWith('Page')) e.preventDefault();
+    return;
+  }
+  // interface hidden (H / photo mode): camera, time and look keys only — never invisible windows / palettes / edits
+  if (!shown && !HIDDEN_OK.has(code)) {
+    // consumed: later hotkey fallbacks (panels, HUD) must not open invisible windows either
+    if (/^(Key|Digit|Numpad|F\d)/.test(code) || code === 'Delete') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
     return;
   }
   if (e.repeat && code !== 'KeyR') return;
@@ -504,12 +577,14 @@ function onKeyDown(e) {
   }
   switch (code) {
     case 'Escape':
-      escape();
+      if (!shown) showUI();
+      else escape();
       break;
     case 'Space': {
       e.preventDefault();
+      // no double action: a focused button / checkbox / radio would also "click" on keyup
       const ae = document.activeElement;
-      if (ae && ae !== cv && ae.blur && ae.tagName === 'BUTTON') ae.blur(); // no double action on a focused button
+      if (ae && ae !== cv && ae !== document.body && ae.blur && (ae.tagName === 'BUTTON' || ae.tagName === 'INPUT' || ae.getAttribute('role') === 'button')) ae.blur();
       VC.togglePause();
       break;
     }
@@ -525,22 +600,23 @@ function onKeyDown(e) {
       if (T) T.rotate(e.shiftKey ? -1 : 1);
       break;
     case 'KeyH':
-      if (VC.hud && VC.hud.toggleUI) VC.hud.toggleUI();
+      if (!shown) showUI();
+      else if (VC.hud && VC.hud.toggleUI) VC.hud.toggleUI(false);
       break;
     case 'KeyC': {
       const c = cam();
       c.cinematic = !c.cinematic;
-      toast(c.cinematic ? 'Cinematic camera <b>on</b> — press C to stop' : 'Cinematic camera <b>off</b>', '🎬');
+      if (shown) toast(c.cinematic ? 'Cinematic camera <b>on</b> — press C to stop' : 'Cinematic camera <b>off</b>', '🎬', { sfx: 'click' });
       break;
     }
     case 'KeyO':
-      cycleOverlay(e.shiftKey ? -1 : 1);
+      cycleOverlay(e.shiftKey ? -1 : 1, shown);
       break;
     case 'KeyL': {
       const st = VC.settings;
       st.showGrid = st.showGrid === false;
       if (VC.saveSettings) VC.saveSettings();
-      toast('Build grid <b>' + (st.showGrid ? 'on' : 'off') + '</b>', '📐');
+      toast('Build grid <b>' + (st.showGrid ? 'on' : 'off') + '</b>', '📐', { sfx: 'click' });
       break;
     }
     case 'F1':
@@ -561,23 +637,39 @@ function escape() {
   if (VC.ui && VC.ui.closeTop && VC.ui.closeTop()) return;
   if (VC.menu && VC.menu.pause) VC.menu.pause();
 }
+/** Leaves H / photo mode (the HUD usually handles H/Esc itself in the capture phase; this is the fallback). */
+function showUI() {
+  const H = VC.hud;
+  if (!H) return;
+  if (H.photo && H.photoMode) H.photoMode(false);
+  else if (H.toggleUI) H.toggleUI(true);
+}
 
-function cycleOverlay(dir) {
+/** Overlay cycling: ONE toast that updates in place while O is pressed repeatedly, then fades out. */
+let ovToast = null, ovTimer = 0;
+function cycleOverlay(dir, shown) {
   const G = VC.gfx, list = VC.OVERLAYS;
   if (!G || !G.setOverlay) return;
   const i = Math.max(0, list.findIndex((o) => o.key === G.overlay));
   const o = list[(i + dir + list.length) % list.length];
   G.setOverlay(o.key);
-  toast(o.icon + ' ' + o.name, null);
+  if (!shown) return; // photo mode: the map colours are the feedback
+  const n = list.indexOf(o);
+  const text = '<b>' + escHtml(o.name) + '</b>' + (n > 0 ? ' <small>' + n + '/' + (list.length - 1) + '</small>' : '');
+  ovToast = toast(text, o.icon, { reuse: ovToast, duration: 600000, sfx: 'click' });
+  clearTimeout(ovTimer);
+  const el = ovToast;
+  if (el) ovTimer = setTimeout(() => toastOut(el), 2200);
 }
 
 function undo() {
   const A = VC.actions;
   if (!A || !A.undo) return;
   const r = A.undo();
-  if (r.ok) VC.bus.emit('toast', { text: 'Undone: <b>' + r.label + '</b>' + (r.refund > 0 ? ' — refunded ' + VC.fmt.money(r.refund) : ''), type: 'info', icon: '↩️' });
+  // success: actions play the 'whoosh'; failure: one error sound. One toast either way.
+  if (r.ok) toast('Undone: <b>' + escHtml(r.label) + '</b>' + (r.refund > 0 ? ' — refunded ' + VC.fmt.money(r.refund) : ''), '↩️');
   else {
     VC.bus.emit('sfx', { name: 'error' });
-    VC.bus.emit('toast', { text: r.reason, type: 'warn', icon: '↩️' });
+    toast(escHtml(r.reason), '↩️', { type: 'warn' });
   }
 }

@@ -16,10 +16,18 @@
  *         Duplicate suppression: every sound belongs to a GROUP with a minimum re-trigger window, so the
  *         same event reported by several modules (e.g. 'built' + sfx 'build', HUD 'fanfare' + advisors
  *         'milestone') plays once. Voice cap 32 (low-priority sounds are dropped first).
- * AUTO-HANDLED BUS EVENTS (see api notes): built, bldRemove, milestone, achievement, advisor, noMoney,
- *         disaster (start), windowOpened/windowClosed, toast, policyChanged, speed; UI button hover.
- * API     play, stop(), duck(amount, sec), spatial(x, z), unlocked(), ready(), stats, list() (sound names),
- *         dsp (offline synthesis toolkit), buffer(name, variant).
+ * AUTO-HANDLED BUS EVENTS: built (by kind), bldRemove (reason bulldoze/fire/disaster), milestone,
+ *         achievement, advisor (by severity), noMoney, disaster (phase 'start': alarm + type sound),
+ *         windowOpened/windowClosed, toast (by type), policyChanged, speed; plus a soft hover tick on UI
+ *         buttons. Other modules may still emit 'sfx' for the same events: group de-duplication plays one.
+ * RENDERING  sounds render once into cached AudioBuffers; frequent ones are pre-rendered in idle time after
+ *         unlock (requestIdleCallback + a 3 ms slice per frame); heavy rare ones on first use or when a
+ *         disaster starts. Emits bus 'audioStarted' once the context runs.
+ * API     play(name, opts) -> bool, duck(amount, sec), stop(), spatial(x, z) -> {g, pan, lp}, ready(),
+ *         unlocked(), volumes() -> {music, sfx, amb, master}, lastPlayed(group), list() (sound names),
+ *         buffer(name, variant), warm([names]), job(fn, urgent), dsp (offline synthesis toolkit),
+ *         toBuffer(data, trim), stats {played, deduped, dropped, voices, live (nodes), renders, names{}}.
+ *         A zero-volume bus creates no nodes (muted music stops scheduling).
  */
 const M = VC.M;
 const A = (VC.audio = Object.assign(VC.audio || {}, {
@@ -631,9 +639,10 @@ A.volumes = () => lastVols;
 /** Queues idle-time rendering of every variant of the named recipes. */
 function warm(names) {
   for (const n of names) {
-    const R = A.RECIPES[A.ALIAS[n] || n];
+    const key = A.RECIPES[n] ? n : A.ALIAS[n];
+    const R = A.RECIPES[key];
     if (!R) continue;
-    for (let v = 0; v < (R.variants || 1); v++) jobs.push(() => A.buffer(A.ALIAS[n] || n, v));
+    for (let v = 0; v < (R.variants || 1); v++) jobs.push(() => A.buffer(key, v));
   }
   pump();
 }
@@ -650,7 +659,7 @@ A.list = () => Object.keys(A.RECIPES).concat(Object.keys(A.ALIAS)).sort();
 A.play = function (name, opts) {
   if (!A.ready() || !name) return false;
   const o = opts || {};
-  name = A.ALIAS[name] || name;
+  if (!A.RECIPES[name] && A.ALIAS[name]) name = A.ALIAS[name]; // a real recipe always wins over a synonym
   const R = A.RECIPES[name];
   if (!R) {
     if (!warnedUnknown[name]) { warnedUnknown[name] = 1; console.info('[audio] unknown sfx "' + name + '"'); }

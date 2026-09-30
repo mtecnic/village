@@ -609,7 +609,7 @@ Object.assign(A.ALIAS, {
   emergency: 'siren', police: 'siren', ambulance: 'siren',
   honk: 'horn', car: 'horn',
   window: 'open', window_open: 'open', window_close: 'close',
-  transition: 'whoosh', swoosh: 'whoosh',
+  transition: 'whoosh', swish: 'whoosh', // ('swoosh' is the ambient car pass-by recipe)
   unpause: 'tick', resume: 'tick', speed: 'tick',
   hammer: 'construct', construction: 'construct',
   complete: 'success', done: 'success', ok: 'success',

@@ -15,6 +15,12 @@
  * as irregular foliage but still mesh to <= 250 quads. Nothing leaves the 8x8 footprint. 5-6 variants
  * each. Maples use their own MAPLE colours and cherries BLOSSOM pinks; palms, pines and cypresses
  * only evergreen shades (PALM, HEDGE, PINE*), so the season table below leaves them green.
+ * WINTER: deciduous crowns (oak, maple, birch, cherry) hide a SKELETON — the leader, limbs and twigs drawn
+ * only through voxels buried inside the canopy (the summer look is unchanged). Their definitions carry
+ * `openFoliage: true`, so the registry also builds model.winter meshes in which the wood faces touching leaves
+ * exist (VC.voxel.mesh open set); when the renderer drops the leaves in late autumn it draws those, and the bare
+ * tree keeps a real branch structure (the summer meshes stay as lean as before). Bush flowers and
+ * fallen cherry petals use FOLIAGE-flagged colours (BLOOM_*), so they follow the seasons like leaves.
  *
  * Non-building models (props, vehicles, creatures) are centred on their grid: the renderer's origin
  * is the bottom centre (sx/2, 0, sz/2); the front faces +Z. See the per-file headers for meta fields.
@@ -28,7 +34,8 @@
  *   TREES                    every tree key
  *   toWorld(model, p, x, y, z, angle, out?)  model-local voxel point -> world (meta points)
  *   signalVariant(phase, rot)   traffic_light variant for a VC.agents.signal() phase (props file)
- *   col(name)                custom palette entries: BLOSSOM, BLOSSOM_L, MAPLE, MAPLE_L, NAV_GREEN, KAIJU_D
+ *   col(name)                custom palette entries: BLOSSOM, BLOSSOM_L, MAPLE, MAPLE_L, NAV_GREEN, KAIJU_D,
+ *                            IRON (street furniture), BLOOM_R/Y/P/W/V (seasonal bush flowers and petals)
  *   text(g, str, x, y, z, c, face)  3x5 pixel font; fit, under, blobIn, mirrorX, beam, disc, ring,
  *                            exposed, sprinkle: grid helpers
  */
@@ -45,6 +52,13 @@ const CUSTOM = {
   MAPLE_L: ['#79bf42', MAT.FOLIAGE],
   NAV_GREEN: ['#3cff6e', MAT.NIGHTLIGHT | MAT.NOSNOW],
   KAIJU_D: ['#27502d', 0],
+  IRON: ['#3c434b', MAT.METAL], // painted cast iron (lamp posts): dark, but not a black hole on asphalt
+  // flowers that belong to a plant: FOLIAGE, so they sway, turn with autumn and drop in winter
+  BLOOM_R: ['#e83a4a', MAT.FOLIAGE],
+  BLOOM_Y: ['#f8d83a', MAT.FOLIAGE],
+  BLOOM_P: ['#e87ab8', MAT.FOLIAGE],
+  BLOOM_W: ['#f4f4f4', MAT.FOLIAGE],
+  BLOOM_V: ['#9a5ad8', MAT.FOLIAGE],
 };
 const customIdx = {};
 /** Palette index of a named custom nature color (BLOSSOM, BLOSSOM_L, MAPLE, MAPLE_L, NAV_GREEN, KAIJU_D). */
@@ -270,6 +284,48 @@ function roots(g, rng, n, c = P.TRUNK) {
     g.set(s[0], 0, s[1], c);
   }
 }
+/** True for a FOLIAGE voxel buried inside the canopy (no empty 6-neighbour): wood drawn there never shows in leaf. */
+function buried(g, x, y, z) {
+  const v = g.get(x, y, z);
+  return !!v && (VC.voxel.flags(v) & MAT.FOLIAGE) !== 0 && !K.exposed(g, x, y, z);
+}
+/** 3D voxel line that only replaces buried leaves (a hidden limb / twig). */
+function hiddenLine(g, x0, y0, z0, x1, y1, z1, c) {
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), Math.abs(z1 - z0), 1);
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const x = Math.round(x0 + (x1 - x0) * t), y = Math.round(y0 + (y1 - y0) * t), z = Math.round(z0 + (z1 - z0) * t);
+    if (buried(g, x, y, z)) g.set(x, y, z, c);
+  }
+}
+/**
+ * Winter skeleton of a deciduous crown (drawn AFTER the canopy, through buried leaves only): a leader continuing
+ * the trunk up to y1, `n` limbs from the leader out to ~0.8 of the crown radius, and a forked twig at each limb end.
+ * o = {y0 (leader start), y1 (leader top), cy, rx, ry (crown), n, x, z (leader corner, default trunk), c}
+ */
+function skeleton(g, rng, o) {
+  const c = o.c || P.TRUNK;
+  const lx = o.x == null ? 3 : o.x, lz = o.z == null ? 3 : o.z;
+  // leader: 2x2 in the lower crown, a single column higher up
+  for (let y = o.y0; y < o.y1; y++) {
+    const w = y < o.y0 + (o.y1 - o.y0) * 0.55 ? 2 : 1;
+    for (let dz = 0; dz < w; dz++) for (let dx = 0; dx < w; dx++) if (buried(g, lx + dx, y, lz + dz)) g.set(lx + dx, y, lz + dz, c);
+  }
+  const a0 = rng() * Math.PI * 2;
+  for (let k = 0; k < o.n; k++) {
+    const a = a0 + (k / o.n) * Math.PI * 2 + rng.range(-0.35, 0.35);
+    const ys = Math.round(o.y0 + (o.y1 - o.y0) * rng.range(0.1, 0.75));
+    const r = o.rx * rng.range(0.7, 0.95);
+    const ex = Math.round(3.5 + Math.cos(a) * r), ez = Math.round(3.5 + Math.sin(a) * r);
+    const ey = Math.round(Math.min(o.cy + o.ry * 0.75, ys + rng.range(1.2, 2.6)));
+    hiddenLine(g, lx, ys, lz, ex, ey, ez, c);
+    // forked twig
+    for (const sg of [-1, 1]) {
+      const b = a + sg * rng.range(0.5, 0.9);
+      hiddenLine(g, ex, ey, ez, Math.round(ex + Math.cos(b) * 1.4), ey + rng.int(1, 2), Math.round(ez + Math.sin(b) * 1.4), c);
+    }
+  }
+}
 /** Branch from the trunk (3.5, y, 3.5) out toward angle a, reaching radius r, rising dy. */
 function branch(g, y, a, r, dy, c = P.TRUNK) {
   const x1 = Math.round(3.5 + Math.cos(a) * r), z1 = Math.round(3.5 + Math.sin(a) * r);
@@ -305,6 +361,7 @@ const T = 8; // tree grid width/depth
 
 VC.models.define('tree_oak', {
   variants: 6,
+  openFoliage: true,
   gen(rng) {
     const g = new VC.VoxelGrid(T, 18, T);
     const th = rng.int(3, 4);
@@ -312,15 +369,24 @@ VC.models.define('tree_oak', {
     roots(g, rng, rng.int(2, 3));
     // forked limbs reaching out under the crown
     const a0 = rng() * Math.PI * 2, nb = rng.int(2, 3);
-    for (let k = 0; k < nb; k++) branch(g, th, a0 + (k / nb) * Math.PI * 2, 2.7, 2);
+    const limbs = [];
+    for (let k = 0; k < nb; k++) limbs.push(a0 + (k / nb) * Math.PI * 2);
+    for (const a of limbs) branch(g, th, a, 2.7, 2);
     crown(g, rng, { cy: th + 4, rx: 2.9, ry: 2.7, n: 6, spread: 2.1, lr: 1.85, dark: P.LEAF_D, mid: P.LEAF, light: P.LEAF_L, cap: 2.1 });
     trunk2(g, 0, th);
+    // the limbs again where the crown swallowed them, then the hidden winter skeleton
+    for (const a of limbs) {
+      const x1 = VC.M.clamp(Math.round(3.5 + Math.cos(a) * 2.7), 0, 7), z1 = VC.M.clamp(Math.round(3.5 + Math.sin(a) * 2.7), 0, 7);
+      hiddenLine(g, Math.round(3.5 + Math.cos(a) * 0.8), th, Math.round(3.5 + Math.sin(a) * 0.8), x1, th + 2, z1, P.TRUNK);
+    }
+    skeleton(g, rng, { y0: th, y1: th + 6, cy: th + 4, rx: 2.9, ry: 2.7, n: 4 });
     return K.fit(g);
   },
 });
 
 VC.models.define('tree_maple', {
   variants: 6,
+  openFoliage: true,
   gen(rng) {
     const g = new VC.VoxelGrid(T, 20, T);
     const th = rng.int(3, 4);
@@ -332,6 +398,7 @@ VC.models.define('tree_maple', {
     const MA = K.col('MAPLE'), ML = K.col('MAPLE_L');
     crown(g, rng, { cy: th + 5, rx: 2.7, ry: 3.7, n: 6, spread: 1.95, lr: 1.8, dark: MA, mid: ML, light: ML, cap: 1.9, capC: P.BIRCH_LEAF });
     trunk2(g, 0, th);
+    skeleton(g, rng, { y0: th, y1: th + 8, cy: th + 5, rx: 2.7, ry: 3.7, n: 5 });
     return K.fit(g);
   },
 });
@@ -339,6 +406,7 @@ VC.models.define('tree_maple', {
 VC.models.define('tree_birch', {
   lodMinFill: 1,
   variants: 6,
+  openFoliage: true,
   gen(rng) {
     const g = new VC.VoxelGrid(T, 22, T);
     const hs = rng.int(13, 16);
@@ -346,7 +414,7 @@ VC.models.define('tree_birch', {
     const stems = [[3, 3, 3, 3]];
     if (rng.chance(0.75)) stems.push([4, 4, rng.pick([5, 6]), rng.pick([5, 6])]);
     if (rng.chance(0.35)) stems.push([3, 4, 1, rng.pick([5, 6])]);
-    const tops = [];
+    const tops = [], stemVox = [];
     stems.forEach(([x0, z0, x1, z1], si) => {
       const n = si === 0 ? hs : hs - rng.int(2, 4);
       let px = x0, pz = z0;
@@ -354,8 +422,9 @@ VC.models.define('tree_birch', {
         const f = Math.pow(y / n, 1.6);
         const x = Math.round(x0 + (x1 - x0) * f), z = Math.round(z0 + (z1 - z0) * f);
         const band = (y + si * 2) % 4 === 1 && y > 0 && y < n - 4;
-        if (x !== px || z !== pz) g.set(px, y, pz, P.TRUNK_BIRCH);
+        if (x !== px || z !== pz) { g.set(px, y, pz, P.TRUNK_BIRCH); stemVox.push([px, y, pz, P.TRUNK_BIRCH]); }
         g.set(x, y, z, band ? P.BLACK : P.TRUNK_BIRCH);
+        stemVox.push([x, y, z, band ? P.BLACK : P.TRUNK_BIRCH]);
         px = x;
         pz = z;
       }
@@ -369,6 +438,15 @@ VC.models.define('tree_birch', {
       const cy = t[1] - rng.range(0.3, 5) + (k === 0 ? 1 : 0);
       const r = rng.range(1.5, 2);
       K.blobIn(g, t[0] + Math.cos(a) * d, cy, t[2] + Math.sin(a) * d, r, r * 0.9, r, cy > t[1] - 2 ? P.BIRCH_LEAF : P.LEAF_L);
+    }
+    // winter: the white stems again inside the clumps, plus fine twigs off the stem tops
+    for (const [x, y, z, c] of stemVox) if (buried(g, x, y, z)) g.set(x, y, z, c);
+    for (const t of tops) {
+      const b0 = rng() * Math.PI * 2;
+      for (let k = 0; k < 3; k++) {
+        const a = b0 + (k / 3) * Math.PI * 2;
+        hiddenLine(g, Math.floor(t[0]), t[1] - 3, Math.floor(t[2]), Math.round(t[0] - 0.5 + Math.cos(a) * 1.8), t[1] - 1 + rng.int(0, 1), Math.round(t[2] - 0.5 + Math.sin(a) * 1.8), P.WOOD_D);
+      }
     }
     return K.fit(g);
   },
@@ -477,6 +555,7 @@ VC.models.define('tree_palm', {
 
 VC.models.define('tree_cherry', {
   variants: 5,
+  openFoliage: true,
   gen(rng) {
     const g = new VC.VoxelGrid(T, 16, T);
     const B = K.col('BLOSSOM'), BL = K.col('BLOSSOM_L');
@@ -490,8 +569,16 @@ VC.models.define('tree_cherry', {
     for (const e of ends) K.blobIn(g, e[0] + 0.5, e[1] + 1.2, e[2] + 0.5, 2, 1.45, 2, B);
     K.blobIn(g, 4, th + 5.3, 4, 2.5, 1.8, 2.5, B);
     K.blobIn(g, 4 + rng.range(-0.8, 0.8), th + 6.4, 4 + rng.range(-0.8, 0.8), 2, 1.1, 2, BL);
-    // a couple of fallen petals by the trunk
-    for (const [x, z] of [[2, 5], [5, 2], [6, 5], [1, 2]]) if (rng.chance(0.5) && !g.get(x, 0, z)) g.set(x, 0, z, P.FLOWER_P);
+    // winter: the limbs again inside the clouds + a hidden skeleton in the crown
+    for (const e of ends) {
+      const x1 = VC.M.clamp(e[0], 0, 7), z1 = VC.M.clamp(e[2], 0, 7);
+      hiddenLine(g, 3, th - 1, 3, x1, e[1], z1, P.WOOD_D);
+      for (const sg of [-1, 1]) hiddenLine(g, x1, e[1], z1, x1 + sg * rng.int(0, 1), e[1] + 2, z1 - sg * rng.int(0, 1), P.WOOD_D);
+    }
+    skeleton(g, rng, { y0: th, y1: th + 6, cy: th + 5.3, rx: 2.5, ry: 1.8, n: 3, c: P.WOOD_D });
+    // a couple of fallen petals by the trunk (seasonal: they vanish outside blossom time)
+    const petal = K.col('BLOOM_P');
+    for (const [x, z] of [[2, 5], [5, 2], [6, 5], [1, 2]]) if (rng.chance(0.5) && !g.get(x, 0, z)) g.set(x, 0, z, petal);
     return K.fit(g);
   },
 });
@@ -508,8 +595,9 @@ VC.models.define('tree_bush', {
       const ry = rng.range(1.6, 2.3);
       K.blobIn(g, 4 + Math.cos(a) * d, ry - 0.4, 4 + Math.sin(a) * d, r, ry, r, k === 0 ? P.HEDGE : k % 2 ? P.LEAF_D : P.LEAF);
     }
-    // flowers / berries by variant (0: plain green)
-    const FL = [0, P.FLOWER_R, P.FLOWER_Y, P.FLOWER_P, P.FLOWER_W, P.FLOWER_V][v % 6];
+    // flowers / berries by variant (0: plain green); FOLIAGE colours, so they follow the seasons
+    const fk = [null, 'BLOOM_R', 'BLOOM_Y', 'BLOOM_P', 'BLOOM_W', 'BLOOM_V'][v % 6];
+    const FL = fk ? K.col(fk) : 0;
     if (FL) K.sprinkle(g, rng, rng.int(6, 9), new Set([P.HEDGE, P.LEAF_D, P.LEAF]), FL, 1);
     return K.fit(g);
   },

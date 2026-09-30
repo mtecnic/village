@@ -6,7 +6,9 @@
  *
  * 'rocket' (12 x 50 x 12, base center at [6, 0, 6], meta.nozzle) is also used by the fx
  * module for launches; space_center.meta.rocket = {x, y, z} is the pad position (parent voxels)
- * of the static rocket, so a launch can hide/replace it at exactly the same spot.
+ * of the static rocket. The pad rocket is a PART of the space center (speed 0, pad: true), not pasted
+ * voxels: the building renderer hides it while VC.fx.isLaunching(b) (the fx module flies its twin from
+ * the same spot) and raises a fresh one out of the pad after a cooldown.
  */
 const P = VC.P, K = VC.civicKit;
 
@@ -211,7 +213,11 @@ function lattice(g, x, z, w, d, y0, h, col, brace) {
 }
 VC.models.define('space_center', {
   variants: 1,
-  parts: [{ model: 'radar_dish', pivot: DISH_AT, partPivot: [6.5, 0, 6.5], axis: 'y', speed: 0.5 }],
+  parts: [
+    { model: 'radar_dish', pivot: DISH_AT, partPivot: [6.5, 0, 6.5], axis: 'y', speed: 0.5 },
+    // the pad rocket: static (speed 0); pad = hidden while its launch is in the air
+    { model: 'rocket', pivot: ROCKET_AT, partPivot: [6, 0, 6], axis: 'y', speed: 0, pad: true },
+  ],
   gen(rng) {
     const g = K.grid(5, 5, 72);
     K.lot(g, P.CONCRETE_L);
@@ -222,9 +228,7 @@ VC.models.define('space_center', {
     K.hazard(g, 21, 1, 19, 18, 1, 1);
     g.box(28, 1, 13, 4, 1, 7, P.BLACK);
     g.box(28, 0, 13, 4, 1, 7, P.CONCRETE_DD);
-    // static rocket on the pad + venting LOX
-    const rk = VC.models.grid('rocket');
-    if (rk) g.paste(rk, ROCKET_AT[0] - 6, ROCKET_AT[1], ROCKET_AT[2] - 6);
+    // the rocket on the pad is a part (see parts); venting LOX beside it
     g.emit(ROCKET_AT[0] + 3, 14, ROCKET_AT[2] + 1, 'steam', 0.6);
     g.meta.rocket = { x: ROCKET_AT[0], y: ROCKET_AT[1], z: ROCKET_AT[2] };
     // service tower with access arms and lightning mast

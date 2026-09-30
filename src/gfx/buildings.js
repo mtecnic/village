@@ -1,6 +1,8 @@
 /*
- * VOXELPOLIS — building / tree renderer (VC.bldgfx: layer 'buildings', order 100) and the shared
- * INSTANCED VOXEL ENGINE (VC.bldgfx.eng) that gfx/props.js (VC.props, layer 'props', order 150) builds on.
+ * VOXELPOLIS — building / tree renderer (VC.bldgfx: layer 'buildings', order -10, i.e. before the terrain so
+ * early-Z rejects the terrain under lots) and the shared INSTANCED VOXEL ENGINE (VC.bldgfx.eng) that
+ * gfx/props.js (VC.props, layer 'props', order 150) builds on. Glow sprites are a second layer 'bld_glow'
+ * (order 640, after the water).
  *
  * INSTANCE STORE
  *   Everything drawn here (buildings, trees, props, animated parts, the placement ghost) is a SLOT:
@@ -13,47 +15,69 @@
  *   (seed, reveal, flags, id) in t3. Slots change only on events — bus bldAdd / bldRemove / bldChange,
  *   'dirty' rects (trees, terrain height), live construction / fire / UFO lifts, 'flagsUpdated' — and only
  *   changed slots are uploaded (per-slot texSubImage2D, or dirty-row runs for bulk changes).
+ *   The vertex shader reads t0, t1 (+ t2 outside the shadow pass; parts all four): t3 is constant per model
+ *   and comes from the per-draw uniform uMdl, and only trees fetch palette flags per vertex.
  *
  * CULLING + LOD (per pass: camera, each shadow cascade)
  *   Slots are bucketed per 8x8-tile CELL (per set: 0 = buildings/trees/parts, 1 = props) with conservative
- *   bounds. Visible cells (ctx.frustum, or planes from the camera matrix) are scanned; each instance picks a
- *   LOD tier by camera distance (0 full mesh, 1 model.lod, 2 a 1/4-resolution mesh built lazily here from
- *   model.grid), tiny/far things are skipped, and the visible slot indices are counting-sorted per
- *   (model, tier) into a stream buffer. Result: ONE drawElementsInstanced per visible (model, tier); the
- *   vertex shader reads the instance from the data texture (attribute 2 = slot index). Shadow passes use
- *   tier >= 1 (the far cascade tier 2) and skip small casters.
+ *   bounds. Visible cells (ctx.frustum, or planes from the camera matrix; whole cells beyond the set's longest
+ *   skip distance are dropped) are scanned — nearest first in the camera pass, so each bucket is ordered front
+ *   to back — and each instance picks a LOD tier by camera distance (0 full mesh, 1 model.lod, 2 a
+ *   1/4-resolution mesh built lazily here from model.grid; props stop at tier 1, models without a distinct
+ *   LOD mesh stay in one bucket). The LOD distance is the preset's lodDist on high/ultra (moved closer only by
+ *   dynamic resolution / wide FOV) and screen-space on medium/low (see lodDistance). Tiny/far things are
+ *   skipped (SKIP_DEF: props end at 0.9 lodDist, their glows stay), and the visible slot indices are
+ *   counting-sorted per (model, tier) into a stream buffer. Result: ONE drawElementsInstanced per visible
+ *   (model, tier) — bindVertexArray + one attribute pointer + one uniform per draw (the instance attribute's
+ *   enable/divisor live in each model VAO). Shadow passes use tier >= 1 (the far cascade tier 2) and skip small
+ *   casters (props, tiny buildings and distant trees in the far cascade).
  *
  * SHADERS: one uber voxel shader with #define variants: KIND 0 building, 1 tree, 2 prop, 3 part (matrix);
  *   SHADOW (depth only; trees keep a discard for bare winter crowns); GHOST (translucent hologram).
  *   Buildings: construction reveal (vertices clamp to the cut plane, so the shell stays closed and
  *   rises layer by layer) with a glowing cut line, scaffolding + netting band and a poured-slab cap; night
- *   windows lit per window from per-zone schedules driven by the time of day (homes in the evening,
- *   offices dark late, TV flicker, warm/neutral/cool tints), unpowered/abandoned buildings dark; sky
- *   reflections + sun specular on glass/windows/metal; snow on up faces (not NOSNOW); rain sheen;
- *   abandoned grime + boarded/broken windows; fire glow from inside with a charred top that grows with
- *   b.fire; pulsing cyan rim + scanline on the selected building, brighten (select) / red (bulldoze) on
- *   hover; earthquake shaking. Trees: wind sway with travelling gusts + leaf flutter, autumn colours per
- *   species/tree, bare deciduous crowns in winter, blossoms in spring, snow caps, backlit leaves.
- *   Coarse LOD tiers (uFar) paint procedural lit windows on facades so the far city still sparkles.
- *   Camera-pass buckets are drawn nearest first (early-Z), tree 'discard' only exists in the winter
- *   variant, wet top faces are left to shade() when the lighting library handles them (BG_LIBWET), and
- *   LIB_SOFT (software rasterizer) uses a cheap sky gradient for reflections and coarser LOD distances.
+ *   windows lit per 2x3-voxel window cell from per-zone schedules driven by the time of day (homes in the
+ *   evening, offices stay partly lit late, shop displays glow all night, TV flicker, warm/neutral/cool tints;
+ *   glass curtain walls light in per-floor strips), unpowered/abandoned buildings dark; sky reflections + sun
+ *   specular on glass/windows/metal; snow on up faces (not NOSNOW); rain sheen; abandoned grime +
+ *   boarded/broken windows; fire glow from inside with a charred top that grows with b.fire; pulsing cyan rim +
+ *   scanline on the selected building, brighten (select) / red (bulldoze) on hover; earthquake shaking.
+ *   Trees: wind sway with travelling gusts + leaf flutter, autumn colours per species/tree, bare deciduous
+ *   crowns in winter (all leaves drop; the model.winter meshes show the hidden branch skeleton), blossoms in
+ *   spring, snow caps, backlit leaves, soft crown AO.
+ *   Coarse LOD tiers (uFar) keep the full mesh's window character: the same 2x3 window cells are hashed, drawn
+ *   as box-filtered panes (bgPane: dark glass by day, the same lit cells by night), so there is no LOD pop or
+ *   sparkle; they also reflect a cheap sky gradient instead of the full sky model.
+ *   Tree 'discard' only exists in the winter variant, wet top faces are left to shade() when the lighting
+ *   library handles them (BG_LIBWET), and LIB_SOFT (software rasterizer) uses a cheap sky gradient for
+ *   reflections and coarser LOD distances.
  *
- * GLOW SPRITES: model.lights become additive camera-facing soft sprites (transparent pass): night-only
- *   lights switch on progressively at dusk, always-on lights stay lit, red always-on lights blink
- *   (aviation beacons). Static sprites are rebuilt (throttled) when instances/flags change; props and
- *   animated parts add dynamic sprites every frame (eng.dynSprite).
+ * GLOW SPRITES: model.lights become additive camera-facing soft sprites (layer 'bld_glow'): night-only lights
+ *   switch on progressively at dusk, always-on lights stay lit, red always-on lights blink (aviation beacons).
+ *   Static sprites are rebuilt (throttled) only when a lit slot changed (added, removed, moved, re-flagged);
+ *   props and animated parts add dynamic sprites every frame (eng.dynSprite / allocation-free eng.dynReserve).
+ *
+ * PARTS: animated sub-models (model.parts); static ones (speed 0) are rewritten only when their parent changes.
+ *   A part with `pad: true` (the space center's rocket) is hidden while VC.fx.isLaunching(b) — the fx module flies
+ *   its twin — and rises out of the pad again after a cooldown.
  *
  * CONSTRUCTION: while b.built < 0.3 a 'construction' site model (if defined) rises on the lot, then the
  *   real model rises (reveal = (built - 0.3) / 0.7); level-up replays (b.simReplay) reveal from b.built.
- *   Completion and level changes "pop". Models are built lazily through VC.models; uncached models queue
- *   and are built within a per-frame time budget (no hitches), VC.bldgfx.warm() flushes the queue.
+ *   Completion and level changes "pop". Models are built lazily through VC.models; uncached models queue and
+ *   are built within ~7 ms per frame (on-screen buildings first) plus idle time; idle time also pre-builds the
+ *   next-level look of growables. VC.bldgfx.warm() flushes the queue.
  *
- * API (VC.bldgfx): setGhost({key, x, z, rot, valid} | null), handlesLift (true: draws b.disLift UFO lifts),
- *   warm(ms?) (build queued models now), inspect(id) (debug: render state of a building), stats,
- *   eng (instancing engine used by gfx/props.js, see E at the end of this file), SPECIES, FL.
+ * GHOST: the placement hologram (cyan-white when valid, red when not) hides the trees on its footprint. Its
+ *   depth pre-pass would hide the tool gizmos drawn after it, so the core may call drawGhostLate(ctx) after its
+ *   gizmos; while it does, the transparent pass skips the ghost.
+ *
+ * API (VC.bldgfx): setGhost({key, x, z, rot, valid} | null), drawGhostLate(ctx), handlesLift (true: draws
+ *   b.disLift UFO lifts), warm(ms?) (build queued models + requested 1/4-res meshes now), inspect(id) (debug:
+ *   render state of a building, incl. partState), stats, eng (instancing engine used by gfx/props.js, see E at
+ *   the end of this file), SPECIES, FL.
  * Also reads: VC.tools.selectedId / hoverId / hover / current, VC.disasters.active (earthquake shake,
- *   UFO lifts), VC.particles.burst('dust') when a construction site turns into its building, VC.gfx.env.
+ *   UFO lifts), VC.particles.burst('dust') when a construction site turns into its building, VC.gfx.env,
+ *   VC.fx.isLaunching.
  */
 const M = VC.M, C = VC.C;
 const TAU = Math.PI * 2;
@@ -69,20 +93,24 @@ const FL = { ABANDONED: 1, FIRE: 2, UNPOWERED: 4, R: 8, C: 16, I: 32, CIVIC: 64,
 const SPECIES = ['tree_oak', 'tree_maple', 'tree_birch', 'tree_pine', 'tree_cypress', 'tree_palm', 'tree_cherry', 'tree_bush'];
 const NO_POP = -1000;
 const SITE_END = 0.3; // construction site phase (fraction of b.built)
+const PEND_MS = 7; // per-frame model build budget (ms)
 const NIGHTLIFE_KEYS = { casino: 1, stadium: 1, ferris_wheel: 1, tv_tower: 1, arcology: 1, sports_field: 1 };
 
 const B = (VC.bldgfx = {
   name: 'buildings',
-  order: 100,
+  // drawn BEFORE the terrain (order 0): opaque either way, but the terrain's expensive fragments under lots and
+  // towers are then rejected by early-Z instead of being shaded and overdrawn
+  order: -10,
   handlesLift: true,
   FL,
   SPECIES,
-  stats: { slots: 0, buildings: 0, trees: 0, parts: 0, models: 0, pending: 0, l2: 0, sprites: 0, dynSprites: 0, visible: 0, draws: 0, verts: 0, gatherMs: 0 },
+  stats: { slots: 0, buildings: 0, trees: 0, parts: 0, models: 0, pending: 0, l2: 0, l2Queue: 0, sprites: 0, dynSprites: 0, visible: 0, draws: 0, verts: 0, gatherMs: 0 },
 
   init() {
     gl = VC.gfx.gl;
     initGL();
     VC.gfx.addLayer(B);
+    VC.gfx.addLayer(GLOW);
     const bus = VC.bus;
     bus.on('bldAdd', (b) => live() && onAdd(b));
     bus.on('bldRemove', (b) => live() && onRemove(b));
@@ -129,14 +157,24 @@ const B = (VC.bldgfx = {
     drawSet(ctx, SET_MAIN, false);
   },
   transparent(ctx) {
+    // the ghost moves after the gizmos once the core calls drawGhostLate (its depth pre-pass would hide the
+    // tool's footprint slab); until then it is drawn here
+    if ((VC.gfx.frameCount | 0) - ghostLateFrame > 2) drawGhost(ctx);
+  },
+  /**
+   * Placement hologram, for the render core to call AFTER its gizmos (tool footprint slab, arrows): the hologram's
+   * depth pre-pass then cannot hide them. Expects the transparent-pass GL state (depth test on, blending on).
+   */
+  drawGhostLate(ctx) {
+    ghostLateFrame = VC.gfx.frameCount | 0;
     drawGhost(ctx);
-    drawSprites(ctx);
   },
 
   /** Placement preview: {key, x, z, rot, valid} or null. Draws the catalog model as a hologram. */
   setGhost(g) {
     if (!g || !g.key || !VC.models.has(g.key)) {
       ghost = null;
+      hideGhostTrees(null);
       return;
     }
     let m = null;
@@ -147,13 +185,16 @@ const B = (VC.bldgfx = {
     }
     if (!m) {
       ghost = null;
+      hideGhostTrees(null);
       return;
     }
     const def = VC.BLD[g.key];
     const rot = (g.rot | 0) & 3;
     const sz = def ? def.size : [Math.max(1, Math.round(m.sx / 8)), Math.max(1, Math.round(m.sz / 8))];
     const w = rot & 1 ? sz[1] : sz[0], d = rot & 1 ? sz[0] : sz[1];
+    const old = ghost;
     ghost = { key: g.key, x: g.x | 0, z: g.z | 0, w, d, rot, valid: !!g.valid, mw: getMW(m, K_BLD) };
+    if (!old || old.x !== ghost.x || old.z !== ghost.z || old.w !== w || old.d !== d) hideGhostTrees(ghost);
   },
 
   /** Debug: render state of building id -> {slot, model, site, reveal, flags, y, lift, fire, parts, pending} or null. */
@@ -166,17 +207,33 @@ const B = (VC.bldgfx = {
       reveal: rec.slot > 0 ? D[o + 6] : null, flags: rec.slot > 0 ? D[o + 7] : null,
       y: rec.slot > 0 ? D[o + 1] : null, yaw: rec.slot > 0 ? D[o + 3] : null, lift: rec.lift, fire: rec.slot > 0 ? D[o + 9] : null,
       popT: rec.slot > 0 ? D[o + 10] : null, parts: rec.parts ? rec.parts.length : 0, live: liveSet.has(rec),
+      partState: rec.parts ? rec.parts.map((p) => ({ model: p.mw.m.key, shown: p.wk !== 0, sink: p.wsink || 0, cooldownUntil: p.padBack == null ? null : p.padBack })) : null,
     };
   },
 
   /** Builds queued models synchronously (up to ms milliseconds, default: all). Returns the remaining queue length. */
   warm(ms) {
     if (curS !== VC.state) return 0;
-    processPending(ms == null ? 1e9 : ms);
+    const t0 = performance.now(), lim = ms == null ? 1e9 : ms;
+    processPending(lim, true);
+    while (l2Queue.length && performance.now() - t0 < lim) buildL2(l2Queue.shift()); // requested 1/4-res meshes too
     flushTex();
     return pendQ.length;
   },
 });
+
+/**
+ * Glow sprites (model lights, street lamps, traffic-light heads, part lights) in their own transparent layer
+ * after the water (500): additive halos over rivers and bays are no longer overwritten by the water surface.
+ */
+const GLOW = {
+  name: 'bld_glow',
+  order: 640,
+  transparent(ctx) {
+    if (curS && curS === ctx.S) drawSprites(ctx);
+  },
+};
+let ghostLateFrame = -100;
 
 function callSafe(fn, self, a, b) {
   try {
@@ -210,7 +267,7 @@ let cellSeen = new Int32Array(0); // frameCount when the camera pass last saw th
 // models
 const MWS = [];
 const mwMap = new Map();
-let mwKind = new Uint8Array(64), mwHasL2 = new Uint8Array(64), mwL2State = new Uint8Array(64);
+let mwKind = new Uint8Array(64), mwHasL2 = new Uint8Array(64), mwL2State = new Uint8Array(64), mwSameL1 = new Uint8Array(64);
 const mwSkip = [new Float32Array(64), new Float32Array(64), new Float32Array(64)]; // (factor * lodDist)^2 per mode (camera, shadow near, shadow far), in units of lodDist^2
 const l2Queue = [];
 // lit slots (model has lights) for the static sprite list
@@ -435,17 +492,21 @@ function ensureMwArrays(n) {
   mwKind = growU8(mwKind, len, 0);
   mwHasL2 = growU8(mwHasL2, len, 0);
   mwL2State = growU8(mwL2State, len, 0);
+  mwSameL1 = growU8(mwSameL1, len, 0);
   for (let k = 0; k < 3; k++) {
     const a = new Float32Array(len);
     a.set(mwSkip[k]);
     mwSkip[k] = a;
   }
 }
-/** Default skip distances (in lodDist units) per kind: [camera, shadow near, shadow far]. */
+/**
+ * Default skip distances (in lodDist units) per kind: [camera, shadow near, shadow far]. Props (1-2 voxel poles)
+ * stop well before they would shrink below a pixel; their night glows are separate sprites and stay visible.
+ */
 const SKIP_DEF = [
-  [Infinity, Infinity, Infinity], // buildings: always drawn
-  [Infinity, 2.2, 3.2], // trees
-  [1.4, 0.45, 0], // props
+  [Infinity, Infinity, Infinity], // buildings: always drawn (tiny ones skip the far shadow cascade, see getMW)
+  [Infinity, 2.2, 2.6], // trees
+  [0.9, 0.45, 0], // props
   [2.5, 0.8, 0], // parts
 ];
 /** Returns the renderer wrapper of VC model m for a kind (created on first use). */
@@ -458,9 +519,12 @@ function getMW(m, kind) {
   ensureMwArrays(idx + 1);
   const l0 = m.vao && m.quads ? { vao: m.vao, quads: m.quads } : null;
   const l1 = m.lod && m.lod.vao && m.lod.quads ? { vao: m.lod.vao, quads: m.lod.quads } : l0;
+  const w = m.winter;
   const mw = {
     idx, m, kind,
     lv: [l0, l1, null],
+    // bare-crown meshes (trees with a hidden winter skeleton), used while bareSeason()
+    lvWinter: w && w.vao ? [{ vao: w.vao, quads: w.quads }, w.lod && w.lod.vao ? { vao: w.lod.vao, quads: w.lod.quads } : null, null] : null,
     vox: m.vox || C.VOX,
     cx: m.sx / 2, cz: m.sz / 2, h: m.sy,
     height: m.height || m.sy * (m.vox || C.VOX),
@@ -474,19 +538,28 @@ function getMW(m, kind) {
   mwKind[idx] = kind;
   mwHasL2[idx] = 0;
   mwL2State[idx] = l0 ? 0 : 3;
+  mwSameL1[idx] = l1 === l0 ? 1 : 0;
   // tiny models (bushes, hydrants) are skipped earlier
   const small = mw.height < 0.35 && mw.radius < 0.45;
   for (let k = 0; k < 3; k++) {
     const f = SKIP_DEF[kind][k] * (small && kind !== K_BLD ? 0.6 : 1);
     mwSkip[k][idx] = f === Infinity ? Infinity : f * f;
   }
+  // flat / tiny buildings (plazas, sheds, rubble) cast a few texels at most in the far cascade
+  if (kind === K_BLD && mw.height < 0.45) mwSkip[2][idx] = 1.6 * 1.6;
+  // big animated parts (pad rocket, wind rotors, wheels) stay visible like buildings
+  if (kind === K_PART && mw.height > 2.5) { mwSkip[0][idx] = Infinity; mwSkip[1][idx] = Infinity; mwSkip[2][idx] = 3.2 * 3.2; }
+  for (let k = 0; k < 3; k++) if (mwSkip[k][idx] > kindSkip[k][kind]) kindSkip[k][kind] = mwSkip[k][idx];
   B.stats.models = MWS.length;
   return mw;
 }
 /** Overrides skip distances (in units of quality lodDist; Infinity = never skip, 0 = never draw) for a wrapper. */
 function setSkip(mw, cam, shNear, shFar) {
   const a = [cam, shNear, shFar];
-  for (let k = 0; k < 3; k++) mwSkip[k][mw.idx] = a[k] === Infinity ? Infinity : a[k] * a[k];
+  for (let k = 0; k < 3; k++) {
+    const v = (mwSkip[k][mw.idx] = a[k] === Infinity ? Infinity : a[k] * a[k]);
+    if (v > kindSkip[k][mw.kind]) kindSkip[k][mw.kind] = v;
+  }
 }
 /** Fast 1/4-resolution downsample (most common colour of each 4x4x4 block, windows/emissive preferred). */
 function downsample4(g) {
@@ -507,11 +580,15 @@ function downsample4(g) {
               n++;
               let k = 0;
               while (k < nc && cols[k] !== c) k++;
-              if (k === nc) { cols[nc] = c; cnts[nc] = pal[c * 4 + 3] & 5 ? 0.6 : 0; nc++; }
-              cnts[k] += 1;
+              // emissive / night lights weigh 3x and survive the downsample; windows get a small nudge only
+              // (else coarse facades turn into all-window blocks that sparkle at night)
+              const fl = pal[c * 4 + 3];
+              if (k === nc) { cols[nc] = c; cnts[nc] = fl & 68 ? 0.6 : fl & 1 ? 0.3 : 0; nc++; }
+              cnts[k] += fl & 4 ? 3 : 1;
             }
           }
-        if (n >= 6 || (n > 0 && by === 0)) {
+        // sparse blocks vanish (a 1-voxel pole must not become a 4-voxel slab); ground blocks need 3 voxels
+        if (n >= 6 || (n >= 3 && by === 0)) {
           let best = 0;
           for (let k = 1; k < nc; k++) if (cnts[k] > cnts[best]) best = k;
           o.v[bx + nx * (bz + nz * by)] = cols[best];
@@ -535,6 +612,7 @@ function buildL2(mi) {
 /* ================================================================== */
 /* Lit slots (sprites)                                                 */
 /* ================================================================== */
+/** Adds / removes slot s from the lit list; the static sprites are rebuilt only when the list really changed. */
 function setLit(s, on) {
   const p = sLit[s];
   if (on) {
@@ -542,20 +620,22 @@ function setLit(s, on) {
     if (nLit >= litList.length) litList = growI32(litList, litList.length * 2, 0);
     litList[nLit++] = s;
     sLit[s] = nLit;
+    spritesDirty = true;
   } else if (p) {
     const last = litList[--nLit];
     litList[p - 1] = last;
     sLit[last] = p;
     sLit[s] = 0;
+    spritesDirty = true;
   }
-  spritesDirty = true;
 }
 /** Sets the model of slot s (mw may be null = hidden) and keeps derived state in sync. */
 function setModel(s, mw) {
   const mi = mw ? mw.idx : -1;
   if (sModel[s] === mi) return;
   sModel[s] = mi;
-  setLit(s, !!(mw && mw.lights && !mw.noStaticLights));
+  const lit = !!(mw && mw.lights && !mw.noStaticLights);
+  if (lit || sLit[s]) setLit(s, lit); // aspect swaps of unlit props (traffic lights) never touch the sprite list
   if (mw) {
     const o = s * SLOT_F;
     if (mwKind[mi] !== K_PART) {
@@ -645,8 +725,7 @@ function onRemove(b) {
   recs.delete(b.id);
   recsVer++;
   liveSet.delete(rec);
-  rec.removed = true;
-  spritesDirty = true;
+  rec.removed = true; // (release() already marked the sprites dirty if the slot was lit)
   B.stats.buildings = recs.size;
 }
 function onChange(b) {
@@ -718,10 +797,7 @@ function refreshRec(rec, full) {
   rec.fire = b.fire > 0 ? b.fire : 0;
   rec.lift = lift;
   rec.flags = flagsOf(b, rec);
-  if (wasBuilding && reveal >= 1 && !full) {
-    rec.popT = nowT();
-    spritesDirty = true;
-  }
+  if (wasBuilding && reveal >= 1 && !full) rec.popT = nowT();
   D[o] = cx; D[o + 1] = gy + lift; D[o + 2] = cz; D[o + 3] = (b.rot & 3) * Math.PI * 0.5 + spin;
   D[o + 4] = 1; D[o + 5] = seedOf(b); D[o + 6] = reveal; D[o + 7] = rec.flags;
   D[o + 8] = b.id; D[o + 9] = rec.fire; D[o + 10] = rec.popT; D[o + 11] = 0;
@@ -731,7 +807,7 @@ function refreshRec(rec, full) {
   const r = Math.max(mw.radius, Math.hypot(b.w, b.d) * 0.5) + 0.3;
   place(s, cx, cz, r, gy - 0.3, gy + lift + mw.height * 1.2 + 0.5);
   if (isLive(rec)) liveSet.add(rec);
-  spritesDirty = true;
+  if (sLit[s]) spritesDirty = true; // position / flags / reveal of a lit slot changed
 }
 /** Dust puff when the construction site turns into the building. */
 function siteDone(b) {
@@ -787,19 +863,29 @@ function updateLive() {
   }
 }
 /** Re-evaluates instance flags (power, abandonment, fire, zone) — all at once after network updates. */
+let flagSweep = -1; // next rrList index of a full sweep in progress (-1: none)
+const FLAG_SWEEP = 1500; // recs re-checked per frame during a full sweep (a big city's sweep spans a few frames)
 function refreshFlags() {
   if (!recs.size) return;
-  if (flagsAll) {
-    flagsAll = false;
-    for (const rec of recs.values()) checkFlags(rec);
-    return;
-  }
-  // round robin: a few per frame catch changes made without events (e.g. b.powered)
   if (rrVer !== recsVer) {
     rrList.length = 0;
     for (const rec of recs.values()) rrList.push(rec);
     rrVer = recsVer;
   }
+  if (flagsAll) {
+    flagsAll = false;
+    flagSweep = 0;
+  }
+  if (flagSweep >= 0) {
+    const end = Math.min(rrList.length, flagSweep + FLAG_SWEEP);
+    for (let k = flagSweep; k < end; k++) {
+      const rec = rrList[k];
+      if (!rec.removed) checkFlags(rec);
+    }
+    flagSweep = end >= rrList.length ? -1 : end;
+    return;
+  }
+  // round robin: a few per frame catch changes made without events (e.g. b.powered)
   const n = Math.min(48, rrList.length);
   for (let k = 0; k < n; k++) {
     flagCursor = (flagCursor + 1) % rrList.length;
@@ -814,25 +900,88 @@ function checkFlags(rec) {
     rec.flags = f;
     D[rec.slot * SLOT_F + 7] = f;
     markDirty(rec.slot);
-    spritesDirty = true;
+    if (sLit[rec.slot]) spritesDirty = true;
     if (isLive(rec)) liveSet.add(rec);
   }
   if (rec.b.fire > 0 && !liveSet.has(rec)) liveSet.add(rec);
 }
-/** Builds queued models within a time budget. */
-function processPending(budgetMs) {
-  if (!pendQ.length) return;
+/**
+ * Builds queued models within a time budget. On-screen buildings first: pass 0 scans the queue round-robin (from
+ * where the previous call stopped, time-checked while scanning, so a huge backlog never blows the budget) and
+ * builds the recs whose lot is inside the camera frustum; pass 1 then continues in FIFO order.
+ * `all` = ignore visibility (warm()).
+ */
+let pendCursor = 0, pendAvg = 1.5; // pendAvg: running mean ms of one model build
+/** Builds the model of rec now; false if the budget cannot afford another build (typical build time). */
+function pendBuild(rec, t0, budgetMs) {
+  const t = performance.now();
+  if (t > t0 && t - t0 + pendAvg > budgetMs) return false;
+  rec.pending = false;
+  resolveRec(rec, true);
+  const dt = performance.now() - t;
+  if (dt > 0.2) pendAvg += (Math.min(dt, 40) - pendAvg) * 0.2; // cached-model recs (~free) do not count
+  return true;
+}
+function processPending(budgetMs, all) {
+  const n = pendQ.length;
+  if (!n) return;
   const t0 = performance.now();
-  let i = 0;
-  while (i < pendQ.length) {
-    const rec = pendQ[i++];
-    if (rec.removed || !rec.pending) continue;
-    rec.pending = false;
-    resolveRec(rec, true);
-    if (performance.now() - t0 > budgetMs) break;
+  const G = VC.gfx, fr = G.camFrustum;
+  let done = 0, stop = false;
+  if (!all && fr && G.boxVisible) {
+    let i = pendCursor < n ? pendCursor : 0;
+    for (let k = 0; k < n; k++, i = i + 1 === n ? 0 : i + 1) {
+      const rec = pendQ[i];
+      if (rec) {
+        if (rec.removed || !rec.pending) { pendQ[i] = null; done++; }
+        else {
+          const b = rec.b, y = rec.y || VC.world.topY(b.x, b.z);
+          if (G.boxVisible(fr, b.x, y - 0.5, b.z, b.x + b.w, y + 6, b.z + b.d)) {
+            if (!pendBuild(rec, t0, budgetMs)) { stop = true; pendCursor = i; break; }
+            pendQ[i] = null;
+            done++;
+            if (performance.now() - t0 > budgetMs) { stop = true; pendCursor = i + 1; break; }
+            continue;
+          }
+        }
+      }
+      if ((k & 31) === 31 && performance.now() - t0 > budgetMs) { stop = true; pendCursor = i + 1; break; }
+    }
+    if (!stop) pendCursor = 0;
   }
-  pendQ.splice(0, i);
+  if (!stop) {
+    for (let i = 0; i < n; i++) {
+      const rec = pendQ[i];
+      if (!rec) continue;
+      if (!rec.removed && rec.pending && !pendBuild(rec, t0, budgetMs)) break;
+      pendQ[i] = null;
+      done++;
+      if (performance.now() - t0 > budgetMs) break;
+    }
+  }
+  if (done) {
+    // compact (resolveRec may have queued new recs at the end: they are kept); the scan cursor follows its entry
+    let w = 0, cur = 0;
+    for (let i = 0; i < pendQ.length; i++) {
+      if (i === pendCursor) cur = w;
+      if (pendQ[i]) pendQ[w++] = pendQ[i];
+    }
+    pendCursor = pendCursor >= pendQ.length ? w : cur;
+    pendQ.length = w;
+  }
   B.stats.pending = pendQ.length;
+}
+/** Idle-time model building (between frames) so a big backlog drains without long frames. */
+let pendIdle = false;
+function pendingIdle() {
+  if (pendIdle || !pendQ.length || typeof requestIdleCallback !== 'function') return;
+  pendIdle = true;
+  requestIdleCallback((dl) => {
+    pendIdle = false;
+    if (curS !== VC.state) return;
+    const left = dl.timeRemaining();
+    if (left > 3) processPending(Math.min(12, left - 2), false);
+  }, { timeout: 250 });
 }
 
 /**
@@ -846,7 +995,7 @@ function prewarm() {
     for (const d of VC.CATALOG || []) if (VC.models.has(d.key)) warmList.push([d.key, 0]);
     for (const k of SPECIES) if (VC.models.has(k)) warmList.push([k, 0]);
   }
-  if (!warmList.length) return;
+  if (!warmList.length && !nextLevelWork()) return;
   warmIdle = true;
   requestIdleCallback((dl) => {
     warmIdle = false;
@@ -858,7 +1007,37 @@ function prewarm() {
         if (parts) for (const p of parts) if (p && p.model && VC.models.has(p.model)) VC.models.get(p.model, p.variant || 0);
       } catch (e) { /* the registry logs generator failures */ }
     }
+    // then the next-level look of existing growables, so level-ups rarely wait in the build queue
+    let guard = 0;
+    while (!warmList.length && dl.timeRemaining() > 4 && guard++ < 64 && nextLevelWork()) warmNextLevel();
   }, { timeout: 2000 });
+}
+let nlCursor = 0, nlVer = -1, nlDone = 0;
+/** True while some growable may still lack its next-level model (one sweep over the buildings per recs change). */
+function nextLevelWork() {
+  if (nlVer !== recsVer) { nlVer = recsVer; nlDone = 0; }
+  return nlDone < recs.size;
+}
+function warmNextLevel() {
+  if (rrVer !== recsVer) {
+    rrList.length = 0;
+    for (const rec of recs.values()) rrList.push(rec);
+    rrVer = recsVer;
+  }
+  if (!rrList.length) { nlDone = recs.size; return; }
+  nlCursor = (nlCursor + 1) % rrList.length;
+  nlDone++;
+  const rec = rrList[nlCursor], b = rec && rec.b;
+  if (!b || rec.removed || b.key !== 'grow' || !(b.level < 3)) return;
+  const zk = (VC.ZONES[b.zt] || VC.ZONES[1]).key;
+  const params = { fw: fwOf(b), fd: fdOf(b), level: b.level + 1, wealth: b.wealth || 0 };
+  const key = 'grow_' + zk + b.den, def = VC.models.defs[key];
+  if (!def) return;
+  const nv = def.variants || 1, v = (((b.variant | 0) % nv) + nv) % nv;
+  if (VC.models.cached().has(VC.models.cacheKey(key, v, params))) return;
+  try {
+    VC.models.get(key, v, params);
+  } catch (e) { /* logged by the registry */ }
 }
 
 /* ---------------- animated parts ---------------- */
@@ -910,7 +1089,14 @@ function writePart(pr) {
   else { R[0] = ca; R[1] = 0; R[2] = sa; R[3] = 0; R[4] = 1; R[5] = 0; R[6] = -sa; R[7] = 0; R[8] = ca; }
   // Ry(yaw) rows: [c 0 s; 0 1 0; -s 0 c] (x' = x c + z s, z' = -x s + z c)
   const c = Math.cos(yaw), s = Math.sin(yaw);
-  const k = rec.reveal < 0.999 ? 0 : sc * ratio; // hidden until the parent is complete
+  let k = rec.reveal < 0.999 ? 0 : sc * ratio; // hidden until the parent is complete
+  let sink = 0;
+  if (def.pad && k) {
+    // launch-pad payload (space center rocket): gone while its twin flies, back after a cooldown, rising out of the pad
+    const st = padState(pr);
+    if (st < 0) k = 0;
+    else sink = (1 - st) * (1 - st) * pmw.height * D[ps + 4];
+  }
   for (let j = 0; j < 3; j++) {
     A[j] = (c * R[j] + s * R[6 + j]) * k;
     A[3 + j] = R[3 + j] * k;
@@ -918,7 +1104,7 @@ function writePart(pr) {
   }
   const pv = def.pivot || [0, 0, 0], pp = def.partPivot || [0, 0, 0];
   const lx = (pv[0] - mw.cx) * sc, ly = pv[1] * sc, lz = (pv[2] - mw.cz) * sc;
-  const tx = px + lx * c + lz * s, ty = py + ly, tz = pz - lx * s + lz * c;
+  const tx = px + lx * c + lz * s, ty = py + ly - sink, tz = pz - lx * s + lz * c;
   for (let r = 0; r < 3; r++) {
     const a0 = A[r * 3], a1 = A[r * 3 + 1], a2 = A[r * 3 + 2];
     D[o + r * 4] = a0; D[o + r * 4 + 1] = a1; D[o + r * 4 + 2] = a2;
@@ -928,6 +1114,32 @@ function writePart(pr) {
   markDirty(pr.slot);
   const pr2 = pmw.radius / Math.max(ratio, 1e-3) + mw.radius + 0.5;
   place(pr.slot, px, pz, pr2, py - 0.5, py + mw.height + pmw.height * ratio + 1);
+  // what this pose depends on (static parts are only rewritten when it changes)
+  pr.wx = px; pr.wy = py; pr.wz = pz; pr.wyaw = yaw; pr.wrev = rec.reveal; pr.wfl = rec.flags; pr.wk = k; pr.wsink = sink;
+}
+function staticPartDirty(pr, rec) {
+  const ps = rec.slot * SLOT_F;
+  if (D[ps] !== pr.wx || D[ps + 1] !== pr.wy || D[ps + 2] !== pr.wz || D[ps + 3] !== pr.wyaw || rec.reveal !== pr.wrev || rec.flags !== pr.wfl) return true;
+  if (!pr.def.pad || rec.reveal < 0.999) return false;
+  const st = padState(pr);
+  return st < 0 ? pr.wk !== 0 : pr.wk === 0 || st < 1 || pr.wsink !== 0;
+}
+const PAD_COOLDOWN = 14, PAD_RISE = 5; // seconds: empty pad after a launch, then the next rocket rises
+/** Launch-pad part state: -1 hidden (launching / cooling down), else 0..1 rise progress (1 = standing). */
+function padState(pr) {
+  const fx = VC.fx, t = VC.gfx.time || 0;
+  const flying = !!(fx && fx.isLaunching && fx.isLaunching(pr.parent.b));
+  if (flying) {
+    pr.padAway = true;
+    return -1;
+  }
+  if (pr.padAway) {
+    pr.padAway = false;
+    pr.padBack = t + PAD_COOLDOWN;
+  }
+  if (pr.padBack == null || t >= pr.padBack + PAD_RISE) return 1;
+  if (t < pr.padBack) return -1;
+  return M.smoothstep(0, 1, (t - pr.padBack) / PAD_RISE);
 }
 function updateParts(rdt) {
   if (!parts.length) return;
@@ -941,11 +1153,15 @@ function updateParts(rdt) {
     let k = pr.def.anim === 'wind' ? 0.15 + 1.7 * wind : 1;
     if ((f & (FL.ABANDONED | FL.FIRE)) || ((f & FL.UNPOWERED) && pr.def.anim !== 'wind')) k = 0;
     pr.phase = (pr.phase + rdt * pr.speed * k) % (TAU * 64);
-    // only animate parts whose cell the camera saw recently (others keep their last pose)
+    // only animate parts whose cell the camera saw recently (others keep their last pose); static parts
+    // (speed 0, e.g. the pad rocket) are rewritten only when their parent or pad state changed
     const c = sCell[rec.slot];
+    if (pr.def.pad) padState(pr); // track launches even while off-screen (the cooldown starts when the flight ends)
     if (c >= 0 && frame - cellSeen[c] > 3 && pr.written) continue;
-    pr.written = true;
-    writePart(pr);
+    if (!pr.written || pr.speed || staticPartDirty(pr, rec)) {
+      pr.written = true;
+      writePart(pr);
+    }
     // lights on animated parts (ferris wheel gondolas...) are dynamic sprites
     const L = pr.mw.lights;
     if (L && rec.reveal >= 1 && !(f & FL.ABANDONED) && c >= 0 && frame - cellSeen[c] <= 3) {
@@ -1125,6 +1341,7 @@ function resetAll(S) {
   pendQ.length = 0;
   parts.length = 0;
   ghost = null;
+  ghostTrees = [];
   flagsAll = true;
   spritesDirty = true;
   B.stats.buildings = B.stats.trees = B.stats.parts = 0;
@@ -1150,13 +1367,19 @@ function resetAll(S) {
 /* ================================================================== */
 function frameUpdate(S, rdt) {
   quality = VC.gfx.quality();
-  // model queue: spend more when the backlog is big (e.g. right after a big city appeared)
-  if (pendQ.length) processPending(Math.min(40, 5 + pendQ.length * 0.4));
-  // lazy 1/4-res LOD meshes
+  // model queue: a fixed ~7 ms slice per frame (visible buildings first) + idle time between frames
+  const tq = performance.now();
+  if (pendQ.length) {
+    processPending(PEND_MS, false);
+    pendingIdle();
+  }
+  // lazy 1/4-res LOD meshes: what is left of an ~8 ms build budget (at least 1.5 ms, at most 4 ms)
   if (l2Queue.length) {
     const t0 = performance.now();
-    while (l2Queue.length && performance.now() - t0 < 3) buildL2(l2Queue.shift());
+    const budget = M.clamp(8 - (t0 - tq), 1.5, 4);
+    while (l2Queue.length && performance.now() - t0 < budget) buildL2(l2Queue.shift());
   }
+  B.stats.l2Queue = l2Queue.length;
   // safety net: tree counts changed without a 'dirty' rect -> rescan signatures
   if (S.ver.trees !== seenTreeVer) {
     seenTreeVer = S.ver.trees;
@@ -1204,10 +1427,10 @@ function frameUpdate(S, rdt) {
 const SCHED = [
   // homes
   [[0, 0.36], [1.5, 0.24], [4, 0.1], [5.5, 0.16], [7, 0.45], [8.5, 0.22], [12, 0.12], [16.5, 0.2], [18.5, 0.52], [20.5, 0.64], [22.5, 0.52], [24, 0.36]],
-  // offices
-  [[0, 0.07], [5.5, 0.07], [7.5, 0.45], [9, 0.85], [17, 0.85], [18.5, 0.62], [20, 0.32], [22, 0.12], [24, 0.07]],
-  // shops
-  [[0, 0.05], [7, 0.1], [9, 0.9], [20, 0.9], [21.5, 0.35], [23, 0.08], [24, 0.05]],
+  // offices (downtown never goes fully dark: cleaners, late shifts, lobbies)
+  [[0, 0.2], [5.5, 0.18], [7.5, 0.5], [9, 0.85], [17, 0.85], [18.5, 0.7], [20, 0.5], [22, 0.32], [24, 0.2]],
+  // shops (shop windows / displays stay softly lit at night)
+  [[0, 0.15], [7, 0.18], [9, 0.9], [20, 0.9], [21.5, 0.45], [23, 0.2], [24, 0.15]],
   // industry (shifts)
   [[0, 0.45], [6, 0.5], [8, 0.72], [18, 0.72], [20, 0.52], [24, 0.45]],
 ];
@@ -1259,15 +1482,33 @@ function boxVisible(pl, x0, y0, z0, x1, y1, z1) {
 }
 /* LOD tier thresholds per kind in units of lodDist: [full -> lod, lod -> 1/4]. */
 const TIER_F = [[1.0, 2.6], [0.42, 1.15], [0.35, 0.8], [0.9, 2.2]];
+/** Largest skip distance^2 (lodDist units) of any model per kind and mode, for whole-cell distance culling. */
+const kindSkip = [new Float32Array(NK), new Float32Array(NK), new Float32Array(NK)];
+let cellKeys = new Float64Array(0);
+/**
+ * Effective LOD distance. High / ultra use the preset's lodDist (tuned for ~1080-px renders: a voxel is ~2.4 px
+ * where the full mesh hands over to LOD 1) and only move closer when the dynamic resolution drops (autoScale) or the
+ * FOV widens. Medium / low are screen-space: the tiers follow the render height, so smaller targets (their render
+ * scales, small windows) switch to the coarse meshes as soon as a voxel shrinks to the same pixel size.
+ */
+function lodDistance() {
+  const G = VC.gfx, cam = VC.camera;
+  let lod = quality ? quality.lodDist : 90;
+  if (G.caps && G.caps.software) lod *= 0.55; // software rasterizers (headless tests): coarser meshes sooner
+  const fov = cam && cam.fov > 0.1 ? cam.fov : 0.5934;
+  let k = (0.30573 / Math.tan(fov * 0.5)) * M.clamp(G.autoScale || 1, 0.6, 1);
+  if (quality && quality.lodDist < 90) k *= (G.rh || 1080) / 1080;
+  return lod * M.clamp(k, 0.5, 1);
+}
 /**
  * Collects the visible slots of a set into (model, tier) buckets. mode: 0 camera, 1 shadow near, 2 shadow far.
  * Returns the number of visible instances; buckets are in used[0..nUsed), slot lists in out[].
+ * Camera pass: cells are visited nearest first, so every bucket's instances are ordered front to back (early-Z).
  */
 function gather(set, planes, mode) {
   ensureBuckets();
   nUsed = 0;
-  // software rasterizers (headless tests): switch to the coarser meshes sooner
-  const lod = (quality ? quality.lodDist : 90) * (VC.gfx.caps && VC.gfx.caps.software ? 0.55 : 1);
+  const lod = lodDistance();
   const L2 = lod * lod;
   // trees are skipped well beyond the draw distance (fog has swallowed them there)
   const dd = (quality ? quality.drawDist : 300) * (mode === 0 ? 1.7 : mode === 1 ? 0.8 : 1.1);
@@ -1283,13 +1524,30 @@ function gather(set, planes, mode) {
   const px = cam[0], py = cam[1], pz = cam[2];
   const lists = cellL[set], ns = cellN[set], cb = cellB[set];
   const frame = VC.gfx.frameCount | 0;
-  let k = 0;
+  // whole cells beyond the farthest skip distance of the set's kinds (props) are dropped without a scan
+  const ks = kindSkip[mode];
+  const cellCap = (set === SET_PROPS ? ks[K_PROP] : Math.max(ks[K_BLD], ks[K_TREE], ks[K_PART])) * L2;
+  // visible cells (+ sort keys: distance to the cell centre, camera pass only)
+  if (cellKeys.length < nCells) cellKeys = new Float64Array(nCells);
+  let nv = 0;
   for (let c = 0; c < nCells; c++) {
-    const n = ns[c];
-    if (!n) continue;
+    if (!ns[c]) continue;
     const o6 = c * 6;
-    if (planes && !boxVisible(planes, cb[o6], cb[o6 + 4], cb[o6 + 1], cb[o6 + 2], cb[o6 + 5], cb[o6 + 3])) continue;
-    if (mode === 0) cellSeen[c] = frame;
+    const x0 = cb[o6], z0 = cb[o6 + 1], x1 = cb[o6 + 2], z1 = cb[o6 + 3];
+    if (planes && !boxVisible(planes, x0, cb[o6 + 4], z0, x1, cb[o6 + 5], z1)) continue;
+    const ex = px < x0 ? x0 - px : px > x1 ? px - x1 : 0, ez = pz < z0 ? z0 - pz : pz > z1 ? pz - z1 : 0;
+    if (ex * ex + ez * ez > cellCap) continue;
+    if (mode === 0) {
+      cellSeen[c] = frame;
+      const cx = (x0 + x1) * 0.5 - px, cz = (z0 + z1) * 0.5 - pz;
+      cellKeys[nv++] = Math.floor(Math.sqrt(cx * cx + cz * cz) * 8) * 65536 + c;
+    } else cellKeys[nv++] = c;
+  }
+  if (mode === 0 && nv > 1) cellKeys.subarray(0, nv).sort();
+  let k = 0;
+  for (let v = 0; v < nv; v++) {
+    const c = cellKeys[v] % 65536;
+    const n = ns[c];
     const L = lists[c];
     for (let j = 0; j < n; j++) {
       const s = L[j];
@@ -1304,10 +1562,12 @@ function gather(set, planes, mode) {
       if (d2 > skip[mi] * L2 || (kd === K_TREE && d2 > treeCap)) continue;
       let tier = d2 < T0[kd] ? 0 : d2 < T1[kd] ? 1 : 2;
       if (tier < minTier) tier = minTier;
+      if (kd === K_PROP && tier > 1) tier = 1; // 1/4-res props are fat slabs: props end at their L1 mesh
       if (tier === 2 && !mwHasL2[mi]) {
         if (mwL2State[mi] === 0) { mwL2State[mi] = 1; l2Queue.push(mi); }
         tier = 1;
       }
+      if (tier === 1 && mwSameL1[mi]) tier = 0; // no distinct LOD mesh: one bucket, one draw
       const bk = mi * 3 + tier;
       if (bCnt[bk]++ === 0) { used[nUsed++] = bk; bMin[bk] = d2; }
       else if (d2 < bMin[bk]) bMin[bk] = d2;
@@ -1360,11 +1620,17 @@ function bareSeason() {
   const s = (VC.gfx.env && VC.gfx.env.season) || 0;
   return s > 2.45 && s < 3.99;
 }
-/** Instanced draw of one bucket (model LOD level lv with `count` slot indices starting at `start`). */
+/** VAOs whose instance attribute (2: slot index, divisor 1) is already enabled — the VAO keeps that state. */
+const instVaos = new WeakSet();
+/** Instanced draw of one bucket (model LOD level lv with `count` slot indices starting at `start`). streamBuf must be bound. */
 function drawBucket(lv, start, count) {
-  gl.bindVertexArray(lv.vao);
-  gl.enableVertexAttribArray(2);
-  gl.vertexAttribDivisor(2, 1);
+  const vao = lv.vao;
+  gl.bindVertexArray(vao);
+  if (!instVaos.has(vao)) {
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribDivisor(2, 1);
+    instVaos.add(vao);
+  }
   gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_INT, 4, start * 4);
   gl.drawElementsInstanced(gl.TRIANGLES, lv.quads * 6, gl.UNSIGNED_INT, 0, count);
 }
@@ -1381,26 +1647,31 @@ function drawSet(ctx, set, shadow) {
   if (!n) return 0;
   uploadStream(out, n);
   let draws = 0, verts = 0, curTier = -1;
+  const bare = bareSeason();
   for (let kind = 0; kind < NK; kind++) {
-    let prog = null;
+    let prog = null, uMdl = null;
     for (let u = 0; u < nUsed; u++) {
       const bk = used[u];
       const mi = (bk / 3) | 0;
       if (mwKind[mi] !== kind) continue;
-      const lv = MWS[mi].lv[bk - mi * 3];
+      const mw = MWS[mi];
+      const lvw = bare && mw.lvWinter ? mw.lvWinter[bk - mi * 3] : null;
+      const lv = lvw || mw.lv[bk - mi * 3];
       if (!lv || !lv.quads) continue;
       if (!prog) {
-        prog = PROGS[kind][(shadow ? 1 : 0) + (kind === K_TREE && bareSeason() ? 2 : 0)];
+        prog = PROGS[kind][(shadow ? 1 : 0) + (kind === K_TREE && bare ? 2 : 0)];
         prog.use();
         bindCommon(prog);
         gl.bindBuffer(gl.ARRAY_BUFFER, streamBuf);
         curTier = -1;
+        uMdl = prog.u.uMdl || null;
       }
       const tier = bk - mi * 3;
       if (tier !== curTier && prog.u.uFar) {
         curTier = tier;
         gl.uniform1f(prog.u.uFar, tier);
       }
+      if (uMdl) gl.uniform4f(uMdl, mw.cx, mw.cz, mw.vox, mw.h);
       drawBucket(lv, bStart[bk], bCnt[bk]);
       draws++;
       verts += lv.quads * 4 * bCnt[bk];
@@ -1437,10 +1708,16 @@ function drawGhost(ctx) {
   if (!lv) return;
   ONE_SLOT[0] = 0;
   uploadStream(ONE_SLOT, 1);
+  gl.enable(gl.DEPTH_TEST);
+  gl.enable(gl.CULL_FACE);
+  gl.cullFace(gl.BACK);
   ghostProg.use();
   bindCommon(ghostProg);
   const u = ghostProg.u;
-  if (u.uGhost) gl.uniform4f(u.uGhost, ghost.valid ? 0.25 : 1.0, ghost.valid ? 1.0 : 0.22, ghost.valid ? 0.5 : 0.16, ghost.valid ? 1 : 0);
+  // valid: bright cyan-white hologram (reads on green grass); invalid: red
+  if (u.uGhost) gl.uniform4f(u.uGhost, ghost.valid ? 0.35 : 1.0, ghost.valid ? 0.9 : 0.22, ghost.valid ? 1.6 : 0.16, ghost.valid ? 1 : 0);
+  const gm = ghost.mw;
+  if (u.uMdl) gl.uniform4f(u.uMdl, gm.cx, gm.cz, gm.vox, gm.h);
   gl.bindBuffer(gl.ARRAY_BUFFER, streamBuf);
   // depth prepass so only the front-most hologram surface blends
   gl.colorMask(false, false, false, false);
@@ -1455,6 +1732,25 @@ function drawGhost(ctx) {
   drawBucket(lv, 0, 1);
   gl.bindVertexArray(null);
 }
+/** Hides the trees on the ghost's footprint (they would poke through the hologram; placing clears them anyway). */
+let ghostTrees = [];
+function hideGhostTrees(g) {
+  for (const t of ghostTrees) if (sSet[t.s] !== 255 && sModel[t.s] < 0 && treeSlot[t.i * 3 + t.k] === t.s) setModel(t.s, t.mw);
+  ghostTrees = [];
+  if (!g || !treeSlot || !curS) return;
+  const S = curS;
+  for (let z = Math.max(0, g.z); z < Math.min(S.H, g.z + g.d); z++)
+    for (let x = Math.max(0, g.x); x < Math.min(S.W, g.x + g.w); x++) {
+      const i = z * S.W + x;
+      for (let k = 0; k < 3; k++) {
+        const s = treeSlot[i * 3 + k];
+        if (s > 0 && sModel[s] >= 0) {
+          ghostTrees.push({ s, i, k, mw: MWS[sModel[s]] });
+          setModel(s, null);
+        }
+      }
+    }
+}
 
 /* ================================================================== */
 /* Glow sprites                                                        */
@@ -1464,14 +1760,24 @@ function pushSprite(arr, n, x, y, z, size, r, g, b, mode) {
   arr[o] = x; arr[o + 1] = y; arr[o + 2] = z; arr[o + 3] = size;
   arr[o + 4] = r; arr[o + 5] = g; arr[o + 6] = b; arr[o + 7] = mode;
 }
-/** Adds a sprite for this frame only (props / animated parts). mode bits: 1 always, 2 blink, 4 ground pool, 16 flicker. */
-function dynSprite(x, y, z, size, r, g, b, mode) {
-  if ((nDyn + 1) * 8 > dynData.length) {
-    const nd = new Float32Array(dynData.length * 2);
+/** Makes room for n more dynamic sprites this frame; returns the float offset of the first one in dynData. */
+function dynReserve(n) {
+  if ((nDyn + n) * 8 > dynData.length) {
+    let len = dynData.length * 2;
+    while ((nDyn + n) * 8 > len) len *= 2;
+    const nd = new Float32Array(len);
     nd.set(dynData);
     dynData = nd;
   }
-  pushSprite(dynData, nDyn++, x, y, z, size, r, g, b, mode);
+  const o = nDyn * 8;
+  nDyn += n;
+  return o;
+}
+/** Adds a sprite for this frame only (props / animated parts). mode bits: 1 always, 2 blink, 4 ground pool, 16 flicker. */
+function dynSprite(x, y, z, size, r, g, b, mode) {
+  const o = dynReserve(1), a = dynData;
+  a[o] = x; a[o + 1] = y; a[o + 2] = z; a[o + 3] = size;
+  a[o + 4] = r; a[o + 5] = g; a[o + 6] = b; a[o + 7] = mode;
 }
 function rebuildSprites() {
   spritesDirty = false;
@@ -1588,6 +1894,12 @@ function initGL() {
 /* ================================================================== */
 /* Shaders                                                             */
 /* ================================================================== */
+/*
+ * Vertex shader. Per-vertex texel fetches are kept low (the layer is vertex-heavy): the model constants (centre,
+ * voxel size, height) come from the per-draw uniform uMdl instead of the instance texture; the palette flags are
+ * fetched per vertex only for trees (leaf flutter) — the other fragment shaders read them from their palette fetch;
+ * shadow casters (not trees) read 2 texels (no pop bounce, no ids).
+ */
 const VS = `
 layout(location=0) in vec3 aPos;
 layout(location=1) in uvec2 aInfo;
@@ -1595,11 +1907,14 @@ layout(location=2) in uint aSlot;
 uniform highp sampler2D uInst;
 uniform highp sampler2D uPal;
 uniform vec4 uQuake;
+uniform vec4 uMdl; // per draw: model centre x, z (voxels), voxel size, height (voxels)
 out vec3 vWp;
 out vec3 vVox;
 out float vAo;
 flat out uint vPal;
+#if KIND == 1
 flat out uint vMat;
+#endif
 flat out vec3 vN;
 flat out vec3 vNl;
 flat out vec4 vA;
@@ -1608,9 +1923,18 @@ const vec3 BG_NRM[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1
 vec4 bgFetch(int t){ return texelFetch(uInst, ivec2(t & 1023, t >> 10), 0); }
 void main(){
   int base = int(aSlot) * 4;
-  vec4 t0 = bgFetch(base), t1 = bgFetch(base + 1), t2 = bgFetch(base + 2), t3 = bgFetch(base + 3);
+  vec4 t0 = bgFetch(base), t1 = bgFetch(base + 1);
+#if KIND == 3
+  vec4 t2 = bgFetch(base + 2), t3 = bgFetch(base + 3);
+#elif defined(SHADOW) && KIND != 1
+  vec4 t2 = vec4(0.0, 0.0, -4000.0, 0.0), t3 = uMdl; // casters: no bounce, no id / fire
+#else
+  vec4 t2 = bgFetch(base + 2), t3 = uMdl;
+#endif
   vec3 nl = BG_NRM[aInfo.y & 7u];
+#if KIND == 1
   uint mat = uint(texelFetch(uPal, ivec2(int(aInfo.x), 0), 0).a * 255.0 + 0.5);
+#endif
   vec3 v = aPos;
   vec3 wp, n;
 #if KIND == 3
@@ -1662,11 +1986,15 @@ void main(){
 #endif
   vWp = wp;
   vVox = v - nl * 0.5;
+#if !defined(SHADOW) || KIND == 1
   vAo = float(aInfo.y >> 3u) / 3.0;
   vPal = aInfo.x;
-  vMat = mat;
   vN = n;
   vNl = nl;
+#endif
+#if KIND == 1
+  vMat = mat;
+#endif
   gl_Position = uViewProj * vec4(wp, 1.0);
 }`;
 
@@ -1675,7 +2003,9 @@ in vec3 vWp;
 in vec3 vVox;
 in float vAo;
 flat in uint vPal;
+#if KIND == 1
 flat in uint vMat;
+#endif
 flat in vec3 vN;
 flat in vec3 vNl;
 flat in vec4 vA;
@@ -1688,11 +2018,20 @@ const FS_BLD = FS_IN + `
 uniform vec4 uSched;   // lit-window fractions: homes, offices, shops, industry
 uniform vec4 uBG;      // tod, selected id, hovered id, hover mode (1 = bulldoze)
 uniform ivec4 uWinPal; // palette indices: office window, shop window
-uniform float uFar;    // LOD tier of this draw (coarse meshes lose window voxels -> procedural facade lights)
+uniform float uFar;    // LOD tier of this draw (coarse meshes lose window voxels -> procedural facade windows)
 out vec4 fragColor;
+// Window pane of the full-res facade grid (1 voxel wide, 2 of every 3 voxels tall, one per 2x3 cell), box-filtered
+// over the pixel footprint: it fades to its average coverage (1/3) once a cell is smaller than a pixel -> no sparkle.
+float bgPane(vec2 fu){
+  vec2 w = max(fwidth(fu) * 0.5, vec2(1e-3));
+  vec2 c = mod(fu, vec2(2.0, 3.0));
+  float px = clamp((min(c.x + w.x, 1.5) - max(c.x - w.x, 0.5)) / (2.0 * w.x), 0.0, 1.0);
+  float py = clamp((min(c.y + w.y, 3.0) - max(c.y - w.y, 1.0)) / (2.0 * w.y), 0.0, 1.0);
+  return mix(px * py, 1.0 / 3.0, smoothstep(0.3, 0.8, max(w.x, w.y * 0.667)));
+}
 void main(){
   vec4 pe = texelFetch(uPal, ivec2(int(vPal), 0), 0);
-  uint mat = vMat;
+  uint mat = uint(pe.a * 255.0 + 0.5);
   uint fl = uint(vA.z + 0.5);
   float seed = vA.x, reveal = vA.y, id = vA.w;
   vec3 n = vN;
@@ -1733,8 +2072,15 @@ void main(){
     }
   }
   // ---------------- windows ----------------
+  // Lit unit: a 2x3x2-voxel cell (a window column over one floor) on EVERY tier, hashed in full-res voxel units, so
+  // a coarse LOD lights the same cells as the full mesh (no night LOD pop). Glass curtain walls (window + glass
+  // colours) light per floor in 4-voxel strips instead: towers read as lit office floors, not random blocks.
+  // Coarse tiers draw the lit unit as a box-filtered window pane (bgPane) rather than a whole LOD cube.
+  bool faceX = abs(vNl.x) > 0.5;
+  vec2 fuv = vec2(faceX ? vVox.z : vVox.x, vVox.y);
   if (win) {
-    vec3 wc3 = vec3(floor(vVox.x * 0.5), floor(vVox.y / 3.0), floor(vVox.z * 0.5));
+    vec3 wc3 = glass ? vec3(floor(fuv.x * 0.25), floor(vVox.y / 3.0), floor(faceX ? vVox.x : vVox.z))
+                     : vec3(floor(vVox.x * 0.5), floor(vVox.y / 3.0), floor(vVox.z * 0.5));
     float h = hash13(wc3 + seed * 113.0);
     float h2 = hash13(wc3 * 1.7 + seed * 57.0 + 11.0);
     bool office = int(vPal) == uWinPal.x, shop = int(vPal) == uWinPal.y;
@@ -1754,31 +2100,35 @@ void main(){
       alb *= 0.5;
       if (!unpow && !burn && reveal >= 0.999 && h < f) {
         vec3 lc = h2 < 0.52 ? vec3(1.0, 0.55, 0.22) : h2 < 0.8 ? vec3(1.0, 0.74, 0.42) : h2 < 0.94 ? vec3(0.62, 0.74, 1.0) : vec3(0.3, 0.45, 1.0);
-        if (office) lc = mix(lc, vec3(0.75, 0.86, 1.0), 0.35);
+        if (office) lc = mix(lc, vec3(0.75, 0.86, 1.0), 0.2);
         float inten = 0.45 + 0.7 * fract(h2 * 7.31);
-        // mullions: a dark frame around every window voxel, so glass curtain walls read as panes
-        vec2 wuv = abs(vNl.x) > 0.5 ? vVox.zy : vVox.xy;
-        vec2 fw = abs(fract(wuv) - 0.5);
-        inten *= 0.35 + 0.65 * (1.0 - smoothstep(0.36, 0.47, max(fw.x, fw.y)));
+        if (uFar < 0.5) {
+          // mullions: a dark frame around every window voxel, so glass curtain walls read as panes
+          vec2 fw = abs(fract(fuv) - 0.5);
+          inten *= 0.35 + 0.65 * (1.0 - smoothstep(0.36, 0.47, max(fw.x, fw.y)));
+          inten *= 0.82 + 0.3 * fract(vVox.y);
+        } else inten *= glass ? 0.78 : 2.2 * bgPane(fuv); // (a pane covers ~1/3 of the coarse cell)
         if (h2 >= 0.94 && (fl & 8u) != 0u) inten *= 0.35 + 1.1 * tnoise(vec2(TIME * 0.37 + h * 9.0, h2 * 3.0)).r; // TV
-        inten *= 0.82 + 0.3 * fract(vVox.y);
-        em += lc * inten * 0.95 * night;
+        em += lc * inten * 1.25 * night;
         refl *= 1.0 - night;
       }
     }
   }
-  // coarse LOD: fake lit windows on facades so the far city still sparkles at night
-  if (uFar > 0.5 && !win && abs(vNl.y) < 0.5 && (fl & 120u) != 0u && !aband && !unpow && !burn && reveal >= 0.999 && night > 0.0 && vVox.y > 2.0 && (mat & 4u) == 0u) {
-    vec2 fu = vec2(abs(vNl.x) > 0.5 ? vVox.z : vVox.x, vVox.y);
-    vec2 cell = floor(fu / vec2(2.0, 3.0));
-    float h = hash13(vec3(cell, floor(abs(vNl.x) > 0.5 ? vVox.x : vVox.z)) + seed * 113.0);
-    float f = (fl & 32u) != 0u ? uSched.w : (fl & 16u) != 0u ? uSched.y : (fl & 8u) != 0u ? uSched.x : uSched.y * 0.7 + 0.12;
-    vec2 wf = abs(fract(fu / vec2(2.0, 3.0)) - 0.5);
-    float pane = 1.0 - smoothstep(0.3, 0.42, max(wf.x, wf.y * 1.2));
-    if (h < f * 0.8) {
-      float h2 = fract(h * 91.7);
-      vec3 lc = h2 < 0.55 ? vec3(1.0, 0.55, 0.22) : h2 < 0.85 ? vec3(1.0, 0.74, 0.42) : vec3(0.62, 0.74, 1.0);
-      em += lc * (0.45 + 0.6 * fract(h * 7.3)) * 0.9 * night * mix(0.55, 1.0, pane) * min(uFar, 1.0);
+  // coarse LOD walls: the window voxels mostly merged into wall blocks, so paint the same window grid procedurally
+  // (dark panes by day, the same lit cells as the full mesh by night)
+  if (uFar > 0.5 && !win && abs(vNl.y) < 0.5 && (fl & 120u) != 0u && !aband && reveal >= 0.999 && vVox.y > 2.0 && vVox.y < vB.y - 1.5 && (mat & 4u) == 0u && !glass) {
+    float pane = bgPane(fuv);
+    alb = mix(alb, alb * 0.45 + vec3(0.02, 0.025, 0.035), pane * 0.55);
+    if (!unpow && !burn && night > 0.0) {
+      vec3 wc3 = vec3(floor(vVox.x * 0.5), floor(vVox.y / 3.0), floor(vVox.z * 0.5));
+      float h = hash13(wc3 + seed * 113.0);
+      float f = (fl & 32u) != 0u ? uSched.w : (fl & 16u) != 0u ? uSched.y : (fl & 8u) != 0u ? uSched.x : uSched.y * 0.7 + 0.12;
+      if ((fl & 256u) != 0u) f = max(f, 0.8);
+      if (h < f * 0.75) {
+        float h2 = hash13(wc3 * 1.7 + seed * 57.0 + 11.0);
+        vec3 lc = h2 < 0.52 ? vec3(1.0, 0.55, 0.22) : h2 < 0.8 ? vec3(1.0, 0.74, 0.42) : vec3(0.62, 0.74, 1.0);
+        em += lc * (0.45 + 0.7 * fract(h2 * 7.31)) * 0.75 * 1.25 * night * pane;
+      }
     }
   }
 #endif
@@ -1788,7 +2138,7 @@ void main(){
   // ---------------- weather ----------------
   if (n.y > 0.5 && (mat & 128u) == 0u && SNOW > 0.0) {
     float sn = SNOW * smoothstep(0.1, 0.4, hash13(vc * 0.5 + seed) * 0.4 + SNOW * 0.6);
-    alb = mix(alb, vec3(0.86, 0.9, 0.96), sn);
+    alb = mix(alb, vec3(0.78, 0.82, 0.88), sn);
     refl *= 1.0 - sn;
   }
   if (WET > 0.0) {
@@ -1855,7 +2205,8 @@ void main(){
 #ifdef LIB_SOFT
     vec3 env = mix(uFog.rgb, uSkyAmb.rgb * 1.7, smoothstep(-0.1, 0.6, R.y));
 #else
-    vec3 env = skyColor(R);
+    // coarse tiers (far, a few pixels per face): a cheap sky gradient instead of the full sky model
+    vec3 env = uFar > 0.5 ? mix(uFog.rgb, uSkyAmb.rgb * 1.7, smoothstep(-0.1, 0.6, R.y)) : skyColor(R);
 #endif
     col += env * refl * (0.22 + 0.78 * fres);
   }
@@ -1909,11 +2260,12 @@ void main(){
     if (!bgEver(sp)) {
       float bare = bgBare(st, sp);
 #ifdef BARE
-      if (hv < bare * 0.82) discard;
+      // leaves fall one by one; a fully bare crown keeps only its trunk, limbs and twigs (meshed inside the crown)
+      if (hv < bare * 1.02) discard;
 #endif
       float blossom = smoothstep(0.02, 0.12, st) * (1.0 - smoothstep(0.55, 0.8, st));
       float aut = smoothstep(1.8, 2.3, st) * (1.0 - smoothstep(2.9, 3.1, st));
-      bool pink = pe.r > pe.g + 0.12 && pe.b > pe.g - 0.02;
+      bool pink = pe.r > pe.g + 0.12 && pe.b > pe.g - 0.02 && pe.b > pe.r * 0.5; // blossoms (not red berries)
       bool cherry = sp > 5.5 && sp < 6.5;
       if (pink && blossom < 0.5) alb = vec3(0.07, 0.2, 0.05) * (0.8 + 0.4 * hv);
       alb = mix(alb, bgAutumn(sp, hv, seed), aut);
@@ -1925,9 +2277,10 @@ void main(){
       alb *= 1.0 - 0.18 * smoothstep(2.6, 3.2, st) * (1.0 - smoothstep(3.7, 3.95, st));
     }
   }
-  if (n.y > 0.5 && SNOW > 0.0) alb = mix(alb, vec3(0.9, 0.93, 0.98), SNOW * (leaf ? 0.95 : 0.7) * step(0.2, hash13(vc * 1.3 + seed)));
+  if (n.y > 0.5 && SNOW > 0.0) alb = mix(alb, vec3(0.78, 0.82, 0.88), SNOW * (leaf ? 0.95 : 0.7) * step(0.2, hash13(vc * 1.3 + seed)));
   float hn = clamp(vVox.y / max(vB.y, 1.0), 0.0, 1.0);
-  float ao = (0.35 + 0.65 * vAo) * (0.72 + 0.28 * hn);
+  // gentle crown AO: dense evergreens stay green in their lower half instead of turning into black blobs
+  float ao = (0.5 + 0.5 * vAo) * (0.82 + 0.18 * hn);
 #ifndef BG_LIBWET
   if (WET > 0.0) alb *= 1.0 - WET * 0.25;
 #endif
@@ -1946,7 +2299,7 @@ const FS_TREE_SHADOW = FS_IN + FS_TREE_COMMON + `
 void main(){
   if ((vMat & 8u) != 0u && !bgEver(vB.w)) {
     float bare = bgBare(bgSeason(vA.x), vB.w);
-    if (bare > 0.0 && hash13(floor(vVox + 1e-3) + vA.x * 71.0) < bare * 0.82) discard;
+    if (bare > 0.0 && hash13(floor(vVox + 1e-3) + vA.x * 71.0) < bare * 1.02) discard;
   }
 }`;
 
@@ -1970,7 +2323,7 @@ void main(){
   float pulse = 0.82 + 0.18 * sin(TIME * 6.0);
   float scan = exp(-pow((fract(vVox.y / max(vB.y, 1.0) - TIME * 0.35) - 0.5) * 10.0, 2.0));
   vec3 col = mix(alb * lam, tint * lam, 0.62) * 0.85 + tint * (line * 1.4 + scan * 0.9);
-  float a = (0.3 + line * 0.45 + scan * 0.25) * pulse;
+  float a = (0.38 + line * 0.45 + scan * 0.25) * pulse;
   if (uGhost.w < 0.5) col *= 0.7 + 0.45 * step(0.5, fract((vWp.x + vWp.y + vWp.z) * 2.5));
   fragColor = vec4(col, clamp(a, 0.0, 0.95));
 }`;
@@ -2046,8 +2399,7 @@ const E = {
     markDirty(s);
     const r = mw ? mw.radius * scale + 0.3 : 1;
     place(s, x, z, r, y - 0.2, y + (mw ? mw.height * scale : 1) + 0.3);
-    spritesDirty = true;
-    return s;
+    return s; // (setModel marked the sprites dirty if the model has static lights)
   },
   /** Switches the model of slot s (e.g. traffic-light aspect). */
   setModel(s, mw) {
@@ -2055,7 +2407,6 @@ const E = {
   },
   remove(s) {
     release(s);
-    spritesDirty = true;
   },
   /** Raw slot data (read/write; call touch(s) after writing). */
   data: () => D,
@@ -2063,6 +2414,12 @@ const E = {
     markDirty(s);
   },
   dynSprite,
+  /**
+   * Allocation-free bulk variant of dynSprite: reserves n sprites and returns the float offset of the first; write
+   * 8 floats per sprite (x, y, z, size, r, g, b, mode) into E.dynArray() (fetch the array AFTER reserving).
+   */
+  dynReserve,
+  dynArray: () => dynData,
   /** Gathers + draws a set in the current layer pass (props layer uses set 1). */
   draw(ctx, set, shadow) {
     return drawSet(ctx, set, shadow);

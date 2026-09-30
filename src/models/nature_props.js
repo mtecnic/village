@@ -6,7 +6,8 @@
  * (sx/2, 0, sz/2)); odd grid widths keep 1-voxel poles exactly on that origin. Front = +Z.
  *
  *   streetlamp     scale .5, 9x19x9. Pole on the origin, arm overhangs +Z. Variants: 0 classic
- *                  (black cast-iron crook + lantern, warm LAMP), 1 modern (grey LED arm, LAMP_WHITE).
+ *                  (dark grey-green cast-iron crook + lantern, warm LAMP — not pure black, so the slim pole
+ *                  still reads against dark asphalt), 1 modern (grey LED arm, LAMP_WHITE).
  *                  meta.head = lamp position (voxels); g.light at the head (glows at night).
  *   traffic_light  scale .5, 9x18x17. Pole on the origin, mast arm along +Z over the lanes carrying
  *                  a double-faced head that faces +-X (seen by traffic moving along X); a small
@@ -43,15 +44,16 @@ VC.models.define('streetlamp', {
     const X = 4, Z = 4;
     if (v % 2 === 0) {
       // classic: stepped cast-iron base, fluted pole, shepherd's crook, hanging lantern
-      g.box(3, 0, 3, 3, 1, 3, P.BLACK);
-      g.box(X, 1, Z, 1, 15, 1, P.BLACK);
+      const IRON = K.col('IRON');
+      g.box(3, 0, 3, 3, 1, 3, IRON);
+      g.box(X, 1, Z, 1, 15, 1, IRON);
       g.set(X, 3, Z, P.GOLD);
       g.set(X, 16, Z, P.GOLD); // finial
-      g.box(X, 15, Z + 1, 1, 1, 3, P.BLACK); // arm
-      g.set(X, 14, Z + 1, P.BLACK); // scroll brace
-      g.set(X, 14, Z + 3, P.BLACK); // lantern cap
+      g.box(X, 15, Z + 1, 1, 1, 3, IRON); // arm
+      g.set(X, 14, Z + 1, IRON); // scroll brace
+      g.set(X, 14, Z + 3, IRON); // lantern cap
       g.box(X, 12, Z + 3, 1, 2, 1, P.LAMP);
-      g.set(X, 11, Z + 3, P.BLACK);
+      g.set(X, 11, Z + 3, IRON);
       g.meta.head = [X + 0.5, 12.5, Z + 3.5];
       g.light(X + 0.5, 12.5, Z + 3.5, [1, 0.78, 0.45], 1.2);
     } else {

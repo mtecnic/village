@@ -117,7 +117,8 @@ function renderInterface(c) {
   const ui = VC.ui, st = S();
   c.appendChild(ui.section('Display',
     ui.slider({ label: 'Interface scale', icon: '🔍', min: 0.8, max: 1.4, step: 0.05, value: st.uiScale || 1, ticks: [1], format: (v) => Math.round(v * 100) + '%', onChange: (v) => set('uiScale', +v.toFixed(2)) }),
-    ui.toggle({ label: 'News ticker', desc: 'Scrolling headlines along the bottom of the screen', value: st.ticker !== false, onChange: (v) => set('ticker', v) })));
+    ui.toggle({ label: 'News ticker', desc: 'Scrolling headlines along the bottom of the screen', value: st.ticker !== false, onChange: (v) => set('ticker', v) }),
+    ui.toggle({ label: 'Growth popups & celebrations', desc: 'Floating +residents, level-ups, coins and milestone confetti', value: st.juice !== false, onChange: (v) => set('juice', v) })));
   c.appendChild(ui.section('Reset',
     h('div', { class: 'row' },
       ui.button('Restore defaults', () => ui.confirm('Reset every setting to its default value?', () => {

@@ -406,6 +406,7 @@ VC.DEFAULT_SETTINGS = {
   uiScale: 1,
   tutorial: true,
   showFps: false,
+  juice: true,
   ticker: true,
   minimapOpen: true,
 };

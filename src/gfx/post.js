@@ -31,6 +31,7 @@ const PP = (VC.post = {
   stats: { features: '', ms: 0 },
   debugView: null,
   ok: false,
+  frame: 0,
   /** Tunables (exposure metering). */
   tune: { autoStrength: 0.3, keyDay: 0.18, keyNight: 0.05, autoRange: 1.5 },
 
@@ -64,6 +65,12 @@ const PP = (VC.post = {
     }
     PP.adaptIdx = 0;
     PP.adaptFresh = true;
+    PP.feat = {};
+    PP._downs = [];
+    PP._expo = new Float32Array(4);
+    PP._tilt = new Float32Array(4);
+    PP._focus = new Float32Array(2);
+    PP._raysCol = new Float32Array(3);
     PP.ok = true;
   },
 
@@ -79,13 +86,15 @@ const PP = (VC.post = {
     const hdr = G.hdr, rw = hdr.w, rh = hdr.h;
     const q = G.quality(), qk = (VC.settings && VC.settings.quality) || 'high', st = VC.settings || {};
     const low = qk === 'low';
-    const f = PP.feat || (PP.feat = {});
+    const f = PP.feat;
     f.bloom = !low && q.bloom !== false && st.bloom !== false;
     f.tilt = !low && !!q.tilt && st.tiltShift !== false;
     f.fxaa = !low && !!q.fxaa;
     f.ssao = !low && (q.ssao != null ? !!q.ssao : qk === 'high' || qk === 'ultra') && st.ssao !== false;
     f.rays = !low && (q.godrays != null ? !!q.godrays : qk !== 'medium') && st.godRays !== false;
     const hw = Math.max(1, (rw + 1) >> 1), hh = Math.max(1, (rh + 1) >> 1);
+    const fl = PP.float, P = PP.programs;
+    let u;
 
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
@@ -93,23 +102,26 @@ const PP = (VC.post = {
     gl.disable(gl.SCISSOR_TEST);
     gl.depthMask(false);
     gl.colorMask(true, true, true, true);
-    const P = PP.programs;
 
     /* ---- 1. auto exposure ---- */
     const lumT = rt('lum', 32, 18, false);
-    draw(P.lum, lumT, { uSrc: hdr.color }, (u) => gl.uniform2f(u.uStep, 0.25 / 32, 0.25 / 18));
-    const fl = PP.float;
-    const aPrev = rt('adapt' + PP.adaptIdx, 1, 1, fl, true), aNext = rt('adapt' + (1 - PP.adaptIdx), 1, 1, fl, true);
-    const rate = PP.adaptFresh || !fl ? 1 : 1 - Math.exp(-Math.min(ctx.rdt || 0.016, 0.1) * 1.6);
-    draw(P.adapt, aNext, { uLum: lumT.tex, uPrev: aPrev.tex }, (u) => gl.uniform1f(u.uRate, rate));
+    u = pass(P.lum, lumT);
+    tex(P.lum, 'uSrc', hdr.color);
+    gl.uniform2f(u.uStep, 0.25 / 32, 0.25 / 18);
+    G.fullscreen();
+    const aPrev = rt(PP.adaptIdx ? 'adapt1' : 'adapt0', 1, 1, fl, true), aNext = rt(PP.adaptIdx ? 'adapt0' : 'adapt1', 1, 1, fl, true);
+    u = pass(P.adapt, aNext);
+    tex(P.adapt, 'uLum', lumT.tex);
+    tex(P.adapt, 'uPrev', aPrev.tex);
+    gl.uniform1f(u.uRate, PP.adaptFresh || !fl ? 1 : 1 - Math.exp(-Math.min(ctx.rdt || 0.016, 0.1) * 1.6));
+    G.fullscreen();
     PP.adaptIdx = 1 - PP.adaptIdx;
     PP.adaptFresh = false;
     PP.adaptTex = aNext.tex;
     PP.adaptRT = aNext;
     const n = env.night || 0;
-    const expo = PP._expo || (PP._expo = new Float32Array(4));
+    const expo = PP._expo, T = PP.tune;
     expo[0] = env.exposure || 1;
-    const T = PP.tune;
     expo[1] = T.autoStrength; // auto-exposure strength (0 = off, 1 = full)
     expo[2] = M.lerp(T.keyDay, T.keyNight, n); // target key (exposed average luminance)
     expo[3] = T.autoRange; // max correction factor either way
@@ -117,63 +129,75 @@ const PP = (VC.post = {
     /* ---- 2. SSAO ---- */
     let aoTex = PP.dummy;
     if (f.ssao) {
-      const a0 = rt('ao0', hw, hh, false), a1 = rt('ao1', hw, hh, false);
+      const a0 = rt('ao0', hw, hh, false), a1 = rt('ao1', hw, hh, true);
       const R = M.clamp(0.28 + cam.dist * 0.011, 0.35, 2.4);
-      draw(qk === 'ultra' ? P.ssao12 : P.ssao8, a0, { uDepth: hdr.depth }, (u) => gl.uniform4f(u.uAOP, R, 1.35, R * 0.04, cam.far * 0.5));
-      draw(P.aoblur, a1, { uSrc: a0.tex, uDepth: hdr.depth }, (u) => gl.uniform2f(u.uTexel, 1 / hw, 1 / hh));
+      const Pa = qk === 'ultra' ? P.ssao12 : P.ssao8;
+      u = pass(Pa, a0);
+      tex(Pa, 'uDepth', hdr.depth);
+      gl.uniform4f(u.uAOP, R, 1.35, R * 0.04, cam.far * 0.5);
+      G.fullscreen();
+      u = pass(P.aoblur, a1);
+      tex(P.aoblur, 'uSrc', a0.tex);
+      tex(P.aoblur, 'uDepth', hdr.depth);
+      gl.uniform2f(u.uTexel, 1 / hw, 1 / hh);
+      G.fullscreen();
       aoTex = a1.tex;
     }
 
     /* ---- 3. bloom ---- */
-    let bloomTex = PP.black;
+    let bloomTex = PP.black, bloomNorm = 1;
     const bloomI = 0.2 + n * 0.7 + (env.blueHour || 0) * 0.15 + (env.lightning || 0) * 0.3;
     if (f.bloom) {
-      const levels = 6;
       let w = hw, h = hh;
-      const downs = PP._downs || (PP._downs = []);
+      const downs = PP._downs;
       downs.length = 0;
       const d0 = rt('bd0', w, h, fl);
-      const th = M.lerp(1.05, 0.62, n), knee = th * 0.6;
-      draw(P.bright, d0, { uSrc: hdr.color, uAdapt: PP.adaptTex }, (u) => {
-        gl.uniform2f(u.uTexel, 1 / rw, 1 / rh);
-        gl.uniform3f(u.uThresh, th, knee, fl ? 60 : 1);
-        gl.uniform4fv(u.uExpo, expo);
-      });
+      const th = M.lerp(1.05, 0.62, n);
+      u = pass(P.bright, d0);
+      tex(P.bright, 'uSrc', hdr.color);
+      tex(P.bright, 'uAdapt', PP.adaptTex);
+      gl.uniform2f(u.uTexel, 1 / rw, 1 / rh);
+      gl.uniform3f(u.uThresh, th, th * 0.6, fl ? 60 : 1);
+      gl.uniform4fv(u.uExpo, expo);
+      G.fullscreen();
       downs.push(d0);
-      for (let i = 1; i < levels; i++) {
+      for (let i = 1; i < LEVEL_W.length; i++) {
         const pw = w, ph = h;
         w = Math.max(1, (w + 1) >> 1);
         h = Math.max(1, (h + 1) >> 1);
         if (w < 3 || h < 3) break;
-        const d = rt('bd' + i, w, h, fl);
-        draw(P.down, d, { uSrc: downs[i - 1].tex }, (u) => gl.uniform2f(u.uTexel, 1 / pw, 1 / ph));
+        const d = rt(BD_NAMES[i], w, h, fl);
+        u = pass(P.down, d);
+        tex(P.down, 'uSrc', downs[i - 1].tex);
+        gl.uniform2f(u.uTexel, 1 / pw, 1 / ph);
+        G.fullscreen();
         downs.push(d);
       }
       // upsample: up_i = tent(up_{i+1}) + down_i * w_i ; bloom = up_0 / sum(w)
       const nl = downs.length;
       let src = downs[nl - 1], wsum = LEVEL_W[nl - 1];
       for (let i = nl - 2; i >= 0; i--) {
-        const d = downs[i], out = rt('bu' + i, d.w, d.h, fl);
-        const wi = LEVEL_W[i];
-        wsum += wi;
-        draw(P.up, out, { uSrc: src.tex, uBase: d.tex }, (u) => {
-          gl.uniform2f(u.uTexel, 1 / src.w, 1 / src.h);
-          gl.uniform1f(u.uBaseW, wi);
-        });
+        const d = downs[i], out = rt(BU_NAMES[i], d.w, d.h, fl);
+        wsum += LEVEL_W[i];
+        u = pass(P.up, out);
+        tex(P.up, 'uSrc', src.tex);
+        tex(P.up, 'uBase', d.tex);
+        gl.uniform2f(u.uTexel, 1 / src.w, 1 / src.h);
+        gl.uniform1f(u.uBaseW, LEVEL_W[i]);
+        G.fullscreen();
         src = out;
       }
       bloomTex = src.tex;
-      PP._bloomNorm = 1 / wsum;
+      bloomNorm = 1 / wsum;
     }
 
     /* ---- 4. tilt-shift DOF ---- */
     let dofTex = PP.black;
-    const tilt = PP._tilt || (PP._tilt = new Float32Array(4));
-    const focus = PP._focus || (PP._focus = new Float32Array(2));
+    const tilt = PP._tilt, focus = PP._focus;
     {
       const z = M.sat((cam.dist - 10) / 140);
       const maxCocFull = M.lerp(4.5, 12, z) * (rh / 1080) * (cam.cinematic ? 1.25 : 1);
-      tilt[0] = 0.45; // focus band center (uv.y, 0 = bottom)
+      tilt[0] = 0.45; // focus band center (uv.y, 0 = bottom): slightly below the screen center
       tilt[1] = M.lerp(0.19, 0.1, z); // sharp half-width
       tilt[2] = M.lerp(0.5, 0.36, z); // falloff to full blur
       tilt[3] = maxCocFull * 0.5; // max CoC in half-res px
@@ -182,44 +206,59 @@ const PP = (VC.post = {
     }
     if (f.tilt && tilt[3] >= 0.75) {
       const pT = rt('dofp', hw, hh, fl), bT = rt('dofb', hw, hh, fl);
-      draw(P.dofprep, pT, { uSrc: hdr.color, uDepth: hdr.depth }, (u) => {
-        gl.uniform4fv(u.uTilt, tilt);
-        gl.uniform2fv(u.uFocusZ, focus);
-      });
-      draw(P.dof, bT, { uSrc: pT.tex, uDepth: hdr.depth }, (u) => {
-        gl.uniform2f(u.uTexel, 1 / hw, 1 / hh);
-        gl.uniform1f(u.uMaxCoc, tilt[3]);
-      });
+      u = pass(P.dofprep, pT);
+      tex(P.dofprep, 'uSrc', hdr.color);
+      tex(P.dofprep, 'uDepth', hdr.depth);
+      gl.uniform4fv(u.uTilt, tilt);
+      gl.uniform2fv(u.uFocusZ, focus);
+      G.fullscreen();
+      u = pass(P.dof, bT);
+      tex(P.dof, 'uSrc', pT.tex);
+      tex(P.dof, 'uDepth', hdr.depth);
+      gl.uniform2f(u.uTexel, 1 / hw, 1 / hh);
+      gl.uniform1f(u.uMaxCoc, tilt[3]);
+      G.fullscreen();
       dofTex = bT.tex;
     } else f.tilt = false;
 
     /* ---- 5. god rays ---- */
     let raysTex = PP.black;
-    const raysCol = PP._raysCol || (PP._raysCol = new Float32Array(3));
+    const raysCol = PP._raysCol;
     raysCol[0] = raysCol[1] = raysCol[2] = 0;
     if (f.rays) {
       const sun = env.sun, h = env.sunUp;
       let k = M.smoothstep(-0.06, 0.02, h) * (0.3 + 0.7 * M.smoothstep(0.45, 0.06, h)) * (1 - env.cloud * 0.85) * (1 - n);
+      // sun position on screen (a direction = point at infinity)
       const vp = cam.viewProj;
       const cx = vp[0] * sun[0] + vp[4] * sun[1] + vp[8] * sun[2];
       const cy = vp[1] * sun[0] + vp[5] * sun[1] + vp[9] * sun[2];
       const cwv = vp[3] * sun[0] + vp[7] * sun[1] + vp[11] * sun[2];
-      if (cwv > 0.05 && k > 0.01) {
-        const su = (cx / cwv) * 0.5 + 0.5, sv = (cy / cwv) * 0.5 + 0.5;
-        const off = Math.max(Math.abs(su - 0.5), Math.abs(sv - 0.5));
-        k *= M.smoothstep(2.2, 0.6, off);
-        if (k > 0.01) {
-          const qw = Math.max(1, (rw + 3) >> 2), qh = Math.max(1, (rh + 3) >> 2);
-          const m0 = rt('ray0', qw, qh, fl), m1 = rt('ray1', qw, qh, fl);
-          draw(P.raymask, m0, { uSrc: hdr.color, uDepth: hdr.depth }, (u) => gl.uniform3f(u.uSun, sun[0], sun[1], sun[2]));
-          draw(P.rays, m1, { uSrc: m0.tex }, (u) => { gl.uniform2f(u.uSunUv, su, sv); gl.uniform2f(u.uParam, 0.9, 0.955); });
-          draw(P.rays, m0, { uSrc: m1.tex }, (u) => { gl.uniform2f(u.uSunUv, su, sv); gl.uniform2f(u.uParam, 0.9 / 24, 0.985); });
-          raysTex = m0.tex;
-          const warm = M.smoothstep(0.35, 0.0, h);
-          raysCol[0] = k * 0.45;
-          raysCol[1] = k * 0.45 * M.lerp(0.92, 0.66, warm);
-          raysCol[2] = k * 0.45 * M.lerp(0.8, 0.4, warm);
-        } else f.rays = false;
+      const su = (cx / cwv) * 0.5 + 0.5, sv = (cy / cwv) * 0.5 + 0.5;
+      if (cwv > 0.05) k *= M.smoothstep(2.2, 0.6, Math.max(Math.abs(su - 0.5), Math.abs(sv - 0.5)));
+      else k = 0;
+      if (k > 0.01) {
+        const qw = Math.max(1, (rw + 3) >> 2), qh = Math.max(1, (rh + 3) >> 2);
+        const m0 = rt('ray0', qw, qh, fl), m1 = rt('ray1', qw, qh, fl);
+        u = pass(P.raymask, m0);
+        tex(P.raymask, 'uSrc', hdr.color);
+        tex(P.raymask, 'uDepth', hdr.depth);
+        gl.uniform3f(u.uSun, sun[0], sun[1], sun[2]);
+        G.fullscreen();
+        // two radial passes (coarse, then fine) = 24 x 24 effective samples
+        u = pass(P.rays, m1);
+        tex(P.rays, 'uSrc', m0.tex);
+        gl.uniform2f(u.uSunUv, su, sv);
+        gl.uniform2f(u.uParam, 0.9, 0.955);
+        G.fullscreen();
+        u = pass(P.rays, m0);
+        tex(P.rays, 'uSrc', m1.tex);
+        gl.uniform2f(u.uParam, 0.9 / 24, 0.985);
+        G.fullscreen();
+        raysTex = m0.tex;
+        const warm = M.smoothstep(0.35, 0.0, h);
+        raysCol[0] = k * 0.45;
+        raysCol[1] = k * 0.45 * M.lerp(0.92, 0.66, warm);
+        raysCol[2] = k * 0.45 * M.lerp(0.8, 0.4, warm);
       } else f.rays = false;
     }
 
@@ -228,42 +267,69 @@ const PP = (VC.post = {
     const toScreen = !f.fxaa;
     const ldr = toScreen ? null : rt('ldr', rw, rh, false);
     const grain = low ? 0 : 0.028;
-    draw(P.comp, ldr, { uSrc: hdr.color, uDepth: hdr.depth, uBloom: bloomTex, uDof: dofTex, uAO: aoTex, uRays: raysTex, uAdapt: PP.adaptTex }, (u) => {
-      gl.uniform4f(u.uOn, f.bloom ? 1 : 0, f.tilt ? 1 : 0, f.ssao ? 1 : 0, f.rays ? 1 : 0);
-      gl.uniform4fv(u.uExpo, expo);
-      gl.uniform2f(u.uBloomP, f.bloom ? bloomI * (PP._bloomNorm || 1) : 0, 0);
-      gl.uniform3fv(u.uRaysCol, raysCol);
-      gl.uniform3fv(u.uTint, gp.tint);
-      gl.uniform3fv(u.uLift, gp.lift);
-      gl.uniform3fv(u.uGamma, gp.gamma);
-      gl.uniform3fv(u.uGain, gp.gain);
-      gl.uniform4f(u.uGradeP, gp.sat, gp.contrast, gp.vignette, low ? 0 : 0.0025);
-      gl.uniform4f(u.uFx, grain, ctx.time % 100, M.sat(env.lightning || 0), toScreen ? 1 : 0);
-      gl.uniform4fv(u.uTilt, tilt);
-      gl.uniform2fv(u.uFocusZ, focus);
-      gl.uniform1f(u.uAoStr, 0.75);
-      gl.uniform1f(u.uScotopic, M.smoothstep(0.3, 1.0, n) * 0.65);
-      gl.uniform1f(u.uKeepHue, 0.3 + n * 0.25);
-    });
+    const Pc = P.comp;
+    u = pass(Pc, ldr);
+    tex(Pc, 'uSrc', hdr.color);
+    tex(Pc, 'uDepth', hdr.depth);
+    tex(Pc, 'uBloom', bloomTex);
+    tex(Pc, 'uDof', dofTex);
+    tex(Pc, 'uAO', aoTex);
+    tex(Pc, 'uRays', raysTex);
+    tex(Pc, 'uAdapt', PP.adaptTex);
+    gl.uniform4f(u.uOn, f.bloom ? 1 : 0, f.tilt ? 1 : 0, f.ssao ? 1 : 0, f.rays ? 1 : 0);
+    gl.uniform4fv(u.uExpo, expo);
+    gl.uniform2f(u.uBloomP, f.bloom ? bloomI * bloomNorm : 0, 0);
+    gl.uniform3fv(u.uRaysCol, raysCol);
+    gl.uniform3fv(u.uTint, gp.tint);
+    gl.uniform3fv(u.uLift, gp.lift);
+    gl.uniform3fv(u.uGamma, gp.gamma);
+    gl.uniform3fv(u.uGain, gp.gain);
+    gl.uniform4f(u.uGradeP, gp.sat, gp.contrast, gp.vignette, low ? 0 : 0.0025);
+    gl.uniform4f(u.uFx, grain, ctx.time % 100, M.sat(env.lightning || 0), toScreen ? 1 : 0);
+    gl.uniform4fv(u.uTilt, tilt);
+    gl.uniform2fv(u.uFocusZ, focus);
+    gl.uniform1f(u.uAoStr, 0.75);
+    gl.uniform1f(u.uAoBilateral, fl ? 1 : 0);
+    gl.uniform1f(u.uScotopic, M.smoothstep(0.3, 1.0, n) * 0.65);
+    gl.uniform1f(u.uKeepHue, 0.3 + n * 0.25);
+    G.fullscreen();
 
     /* ---- 7. FXAA + grain -> canvas ---- */
     if (!toScreen) {
-      draw(P.fxaa, null, { uSrc: ldr.tex }, (u) => {
-        gl.uniform2f(u.uRcp, 1 / rw, 1 / rh);
-        gl.uniform2f(u.uGrain, grain, ctx.time % 100);
-      });
+      u = pass(P.fxaa, null);
+      tex(P.fxaa, 'uSrc', ldr.tex);
+      gl.uniform2f(u.uRcp, 1 / rw, 1 / rh);
+      gl.uniform2f(u.uGrain, grain, ctx.time % 100);
+      G.fullscreen();
     }
 
     if (PP.debugView) debugShow(PP.debugView, { ao: aoTex, bloom: bloomTex, dof: dofTex, rays: raysTex, lum: lumT.tex });
 
+    // release targets of features that have been off for ~4 s (quality / settings changes)
+    PP.frame++;
+    if ((PP.frame & 63) === 0) {
+      for (const k in RT) {
+        const t = RT[k];
+        if (PP.frame - t.used > 240) {
+          gl.deleteFramebuffer(t.fbo);
+          gl.deleteTexture(t.tex);
+          delete RT[k];
+        }
+      }
+    }
+
     // Unbind our textures so no stale post texture (e.g. hdr color/depth) stays on a unit a layer may sample.
-    for (const unit of UNBIND) {
-      gl.activeTexture(gl.TEXTURE0 + unit);
+    for (let i = 0; i < UNBIND.length; i++) {
+      gl.activeTexture(gl.TEXTURE0 + UNBIND[i]);
       gl.bindTexture(gl.TEXTURE_2D, null);
     }
     gl.activeTexture(gl.TEXTURE0);
     gl.depthMask(true);
-    PP.stats.features = (f.ssao ? 'ssao ' : '') + (f.bloom ? 'bloom ' : '') + (f.tilt ? 'tilt ' : '') + (f.rays ? 'rays ' : '') + (f.fxaa ? 'fxaa' : '');
+    const mask = (f.ssao ? 1 : 0) | (f.bloom ? 2 : 0) | (f.tilt ? 4 : 0) | (f.rays ? 8 : 0) | (f.fxaa ? 16 : 0);
+    if (mask !== PP._mask) {
+      PP._mask = mask;
+      PP.stats.features = (f.ssao ? 'ssao ' : '') + (f.bloom ? 'bloom ' : '') + (f.tilt ? 'tilt ' : '') + (f.rays ? 'rays ' : '') + (f.fxaa ? 'fxaa' : '');
+    }
     PP.stats.ms = performance.now() - t0;
   },
 
@@ -285,6 +351,7 @@ const PP = (VC.post = {
 
 // Relative weights of the bloom levels (half res .. 1/64): tight glows + wide atmospheric halo.
 const LEVEL_W = [1.0, 0.95, 0.9, 0.85, 0.8, 0.75];
+const BD_NAMES = LEVEL_W.map((_, i) => 'bd' + i), BU_NAMES = LEVEL_W.map((_, i) => 'bu' + i);
 const SAMPLER_UNITS = { uSrc: 0, uDepth: 1, uBloom: 2, uDof: 3, uAO: 4, uRays: 8, uAdapt: 9, uPrev: 10, uLum: 11, uBase: 12 };
 const UNBIND = [0, 1, 2, 3, 4, 8, 9, 10, 11, 12];
 
@@ -297,7 +364,7 @@ function rt(name, w, h, hdr, nearest) {
   const G = VC.gfx, gl = G.gl;
   const float = !!(hdr && PP.float);
   let t = RT[name];
-  if (t && t.w === w && t.h === h && t.float === float) return t;
+  if (t && t.w === w && t.h === h && t.float === float) { t.used = PP.frame; return t; }
   if (t) {
     gl.deleteFramebuffer(t.fbo);
     gl.deleteTexture(t.tex);
@@ -305,25 +372,25 @@ function rt(name, w, h, hdr, nearest) {
   const tex = G.texture({ w, h, internal: float ? gl.RGBA16F : gl.RGBA8, format: gl.RGBA, type: float ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE, filter: nearest ? gl.NEAREST : gl.LINEAR });
   const fbo = G.framebuffer(tex);
   if (!fbo) throw new Error('post: render target ' + name + ' incomplete');
-  t = RT[name] = { tex, fbo, w, h, float };
+  t = RT[name] = { tex, fbo, w, h, float, used: PP.frame };
   return t;
 }
 
-/** Runs one fullscreen pass: binds target (null = canvas), samplers {name: texture}, then set(u). */
-function draw(P, target, samplers, set) {
+/** Starts a fullscreen pass of program P into target (null = canvas). Returns P's uniform table. */
+function pass(P, target) {
   const G = VC.gfx, gl = G.gl;
   gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
   if (target) gl.viewport(0, 0, target.w, target.h);
   else gl.viewport(0, 0, G.W, G.H);
   gl.useProgram(P.prog);
-  const u = P.u;
-  for (const s in samplers) {
-    if (!u[s]) continue;
-    gl.activeTexture(gl.TEXTURE0 + SAMPLER_UNITS[s]);
-    gl.bindTexture(gl.TEXTURE_2D, samplers[s]);
-  }
-  if (set) set(u);
-  G.fullscreen();
+  return P.u;
+}
+/** Binds texture t to P's sampler `name` (fixed unit, see SAMPLER_UNITS) if the program uses it. */
+function tex(P, name, t) {
+  if (!P.u[name]) return;
+  const gl = VC.gfx.gl;
+  gl.activeTexture(gl.TEXTURE0 + SAMPLER_UNITS[name]);
+  gl.bindTexture(gl.TEXTURE_2D, t);
 }
 
 function debugShow(view, texs) {
@@ -337,14 +404,18 @@ function debugShow(view, texs) {
     // raw depth is only readable unfiltered
     const mode = (m, f) => { gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, m); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f); };
     mode(gl.NONE, gl.NEAREST);
-    draw(P, null, { uSrc: t }, (u) => gl.uniform1i(u.uMode, 4));
+    gl.uniform1i(pass(P, null).uMode, 4);
+    tex(P, 'uSrc', t);
+    G.fullscreen();
     gl.bindTexture(gl.TEXTURE_2D, t);
     mode(gl.COMPARE_REF_TO_TEXTURE, gl.LINEAR);
     return;
   }
   const t = view === 'coc' ? RT.dofp && RT.dofp.tex : texs[view];
   if (!t) return;
-  draw(P, null, { uSrc: t }, (u) => gl.uniform1i(u.uMode, view === 'coc' ? 1 : view === 'lum' ? 2 : view === 'ao' ? 3 : 0));
+  gl.uniform1i(pass(P, null).uMode, view === 'coc' ? 1 : view === 'lum' ? 2 : view === 'ao' ? 3 : 0);
+  tex(P, 'uSrc', t);
+  G.fullscreen();
 }
 
 /* ------------------------------------------------------------------ */
@@ -529,7 +600,7 @@ void main(){
     s += texture(uSrc, uv).r * w;
     ws += w;
   }
-  fragColor = vec4(s / ws, 0.0, 0.0, 1.0);
+  fragColor = vec4(s / ws, zc, 0.0, 1.0);   // g = view depth, for the bilateral upsample (float targets)
 }`;
 
 const FS_DOFPREP = `
@@ -609,6 +680,7 @@ uniform vec3 uTint; uniform vec3 uLift; uniform vec3 uGamma; uniform vec3 uGain;
 uniform vec4 uGradeP;  // x saturation, y contrast, z vignette, w chromatic aberration
 uniform vec4 uFx;      // x grain, y time, z lightning flash, w writes to canvas (grain here)
 uniform float uAoStr;
+uniform float uAoBilateral;
 uniform float uScotopic;
 uniform float uKeepHue;
 const mat3 ACES_IN = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777);
@@ -624,6 +696,23 @@ vec3 tonemap(vec3 c, float keepHue){
   b /= max(1.0, max(b.r, max(b.g, b.b)));
   return mix(a, b, keepHue * smoothstep(0.2, 1.0, L));
 }
+// Depth-aware 2x upsample of the half-res AO: bilinear weights x depth similarity (no halos on silhouettes).
+float aoUpsample(vec2 uv, float z){
+  vec2 hs = vec2(textureSize(uAO, 0));
+  vec2 p = uv * hs - 0.5;
+  vec2 f = fract(p);
+  ivec2 i0 = ivec2(floor(p)), mx = ivec2(hs) - 1;
+  float s = 0.0, ws = 0.0;
+  for (int k = 0; k < 4; k++) {
+    ivec2 o = ivec2(k & 1, k >> 1);
+    vec2 t = texelFetch(uAO, clamp(i0 + o, ivec2(0), mx), 0).rg;
+    float wb = (o.x == 0 ? 1.0 - f.x : f.x) * (o.y == 0 ? 1.0 - f.y : f.y);
+    float w = wb / (1e-3 + abs(t.y - z) / z * 40.0) + 1e-5;
+    s += t.x * w;
+    ws += w;
+  }
+  return s / ws;
+}
 vec3 toSrgb(vec3 c){ return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 void main(){
   vec2 uv = vUv;
@@ -635,7 +724,7 @@ void main(){
   } else col = texture(uSrc, uv).rgb;
   float d = texture(uDepth, uv).r;
   if (uOn.z > 0.5) {
-    float ao = texture(uAO, uv).r;
+    float ao = uAoBilateral > 0.5 && d < 0.99999 ? aoUpsample(uv, linZ(d)) : texture(uAO, uv).r;
     col *= mix(1.0, ao, uAoStr * (1.0 - smoothstep(0.8, 3.0, libLuma(col))));
   }
   if (uOn.y > 0.5) {

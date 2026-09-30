@@ -46,6 +46,20 @@ const SH = (VC.shadows = {
     const gl = VC.gfx.gl;
     SH.clampExt = gl.getExtension('EXT_polygon_offset_clamp');
   },
+  /** Frees the shadow atlas after shadows have been off (quality 'low' / settings) for a few seconds. */
+  update(dt, rdt) {
+    const G = VC.gfx;
+    const on = VC.settings && VC.settings.shadows !== false && G.quality && G.quality().shadow > 0;
+    SH._offT = on ? 0 : (SH._offT || 0) + (rdt || 0);
+    if (SH._offT > 3 && SH.tex) {
+      const gl = G.gl;
+      if (SH.fbo) gl.deleteFramebuffer(SH.fbo);
+      gl.deleteTexture(SH.tex);
+      SH.tex = SH.fbo = null;
+      SH.size = SH.atlasW = SH.atlasH = 0;
+      SH.cache.valid = false;
+    }
+  },
   reset() {
     slot.near.half = slot.far.half = 0;
     grid.S = null;

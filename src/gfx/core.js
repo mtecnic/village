@@ -335,11 +335,11 @@ function createHDR() {
 
 /**
  * Dynamic resolution: adapts G.autoScale (0.5..1, steps of 0.05) to hold ~50+ fps. Called every frame.
- * Measures 1 s windows. Drops after 2 consecutive slow windows (> 24 ms); probes upward after 4 fast
- * windows (< 18.5 ms — works with 60 Hz vsync). A scale that proved too slow becomes a ceiling for
- * 30 s, and each change is followed by a 1.5 s settle period, so the resolution never oscillates.
+ * Measures 1 s windows. Drops (proportionally) after 2 consecutive slow windows (> 24 ms); probes upward
+ * by 0.05 after 4 fast windows (< 18.5 ms — works with 60 Hz vsync). A scale that proved too slow becomes
+ * a ceiling for 30 s, and each change is followed by a 1.5 s settle period, so it never oscillates.
  */
-const AQ = { t: 0, n: 0, slow: 0, fast: 0, settle: 0, ceiling: 1, ceilT: 0 };
+const AQ = { t: 0, n: 0, slow: 0, fast: 0, settle: 0, ceiling: Infinity, ceilT: 0 };
 function autoQuality(rdt) {
   if (!VC.settings || !VC.settings.autoQuality) {
     if (G.autoScale !== 1) { G.autoScale = 1; G.resize(); }
@@ -355,7 +355,7 @@ function autoQuality(rdt) {
   if (AQ.t < 1.0) return;
   const ms = (AQ.t / AQ.n) * 1000;
   AQ.t = AQ.n = 0;
-  if (AQ.ceilT <= 0) AQ.ceiling = 1;
+  if (AQ.ceilT <= 0) AQ.ceiling = Infinity;
   if (ms > 24) { AQ.slow++; AQ.fast = 0; }
   else if (ms < 18.5) { AQ.fast++; AQ.slow = 0; }
   else { AQ.slow = 0; AQ.fast = 0; }
@@ -363,7 +363,8 @@ function autoQuality(rdt) {
   if (AQ.slow >= 2) {
     AQ.ceiling = s;
     AQ.ceilT = 30;
-    s -= ms > 40 ? 0.15 : 0.05;
+    // proportional step (pixel cost ~ scale^2), conservative since not all GPU work scales with pixels
+    s = Math.min(s - 0.05, s * M.clamp(Math.sqrt(20 / ms), 0.8, 0.97));
     AQ.slow = 0;
   } else if (AQ.fast >= 4 && s < 1) {
     const next = s + 0.05;

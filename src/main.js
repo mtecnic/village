@@ -128,15 +128,46 @@ function frame(t) {
 }
 
 /* ---------------- boot ---------------- */
+/** Full-screen, human-readable boot failure (with copyable details). */
+function showBootError(msg, err) {
+  const el = document.getElementById('boot-error');
+  if (!el) return;
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const details = [
+    'VOXELPOLIS ' + VC.VERSION,
+    navigator.userAgent,
+    'GPU: ' + ((VC.gfx && VC.gfx.caps && VC.gfx.caps.renderer) || 'unknown'),
+    err ? String((err && err.message) || err).split('\n')[0] : '',
+  ].filter(Boolean).join('\n');
+  el.style.display = 'flex';
+  el.innerHTML = `<div style="max-width:560px;padding:24px"><h1>VOXELPOLIS</h1><p>${esc(msg)}</p>
+    <p style="opacity:.75">Please use a recent Chrome, Edge, Firefox or Safari, and make sure hardware acceleration is enabled.</p>
+    <pre style="text-align:left;white-space:pre-wrap;font-size:12px;opacity:.6;background:#0006;padding:10px;border-radius:8px">${esc(details)}</pre></div>`;
+  VC.bootFailed = true;
+}
+VC.showBootError = showBootError;
+
 function boot() {
   const canvas = document.getElementById('gl');
-  if (!VC.gfx.init(canvas)) {
-    const el = document.getElementById('boot-error');
-    el.style.display = 'flex';
-    el.innerHTML = '<div><h1>VOXELPOLIS</h1><p>Your browser does not support WebGL 2.</p><p>Please use a recent Chrome, Edge, Firefox or Safari.</p></div>';
+  let ok = false;
+  try {
+    ok = VC.gfx.init(canvas);
+  } catch (e) {
+    console.error('[main] graphics init failed', e);
+    showBootError('Graphics initialisation failed on this browser / GPU.', e);
+    return;
+  }
+  if (!ok) {
+    showBootError('Your browser does not support WebGL 2.');
     return;
   }
   each((m) => m.init && m.init());
+  // graphics modules that failed to initialise leave the game half-rendered: tell the player once
+  const gfxMods = ['shadows', 'post', 'sky', 'terrain', 'water', 'bldgfx', 'agents', 'particles', 'fx'];
+  const bad = gfxMods.filter((n) => failures[n]);
+  if (bad.length) {
+    setTimeout(() => VC.bus.emit('toast', { text: 'Some graphics features failed on this browser/GPU (' + bad.join(', ') + '). Try Settings → Graphics quality: Low.', type: 'warn', icon: '⚠️' }), 1500);
+  }
   VC.bus.emit('boot');
   const p = VC.params;
   if (p.has('autostart') || !VC.menu || !VC.menu.show) {
@@ -153,8 +184,16 @@ function boot() {
   }
   requestAnimationFrame(frame);
 }
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-else setTimeout(boot, 0);
+function safeBoot() {
+  try {
+    boot();
+  } catch (e) {
+    console.error('[main] boot failed', e);
+    showBootError('VOXELPOLIS could not start on this browser.', e);
+  }
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', safeBoot);
+else setTimeout(safeBoot, 0);
 
 /* ------------------------------------------------------------------ */
 /* Debug / test API (used by tools/shot.js and for development)         */

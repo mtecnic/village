@@ -12,6 +12,17 @@
 <canvas id="gl" tabindex="0"></canvas>
 <div id="ui"></div>
 <div id="boot-error" style="display:none"></div>
+<script>
+// Boot watchdog: if the game never starts (script parse error on an old browser, fatal init error), explain it.
+setTimeout(function () {
+  var V = window.VC;
+  if (V && (V.running || V.bootFailed || (V.menu && V.menu.active))) return;
+  var el = document.getElementById('boot-error');
+  if (!el || el.style.display === 'flex') return;
+  el.style.display = 'flex';
+  el.innerHTML = '<div style="max-width:560px;padding:24px"><h1>VOXELPOLIS</h1><p>The game did not start.</p><p style="opacity:.75">Please open this file in a recent Chrome, Edge, Firefox or Safari (2022 or newer) with hardware acceleration enabled.</p></div>';
+}, 20000);
+</script>
 <!--@JS@-->
 </body>
 </html>

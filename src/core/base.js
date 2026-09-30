@@ -4,6 +4,15 @@
  */
 const VC = (window.VC = window.VC || {});
 VC.VERSION = '1.0.0';
+
+/* requestIdleCallback polyfill (Safari lacks it): run soon with a small time budget. */
+if (typeof window.requestIdleCallback !== 'function') {
+  window.requestIdleCallback = function (cb, opts) {
+    const start = performance.now();
+    return setTimeout(() => cb({ didTimeout: false, timeRemaining: () => Math.max(0, 8 - (performance.now() - start)) }), (opts && opts.timeout ? Math.min(opts.timeout, 50) : 16));
+  };
+  window.cancelIdleCallback = function (id) { clearTimeout(id); };
+}
 VC.NAME = 'VOXELPOLIS';
 
 /* ------------------------------------------------------------------ */

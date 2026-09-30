@@ -277,7 +277,7 @@ void main(){
   vec3 refl = skyReflect(R, rough);
 #ifdef SSR
   // city reflections: objects mirror more strongly than the sky (stylized "wet mirror" look)
-  if (dist < 320.0) {
+  if (dist < 320.0 && R.y < 0.9) {                               // near-vertical reflections hit nothing: skip
     vec4 hit = ssrTrace(vWp, normalize(R + vec3(0.0, 0.03, 0.0)), dist);
     refl = mix(refl, hit.rgb, hit.a);
     fres = mix(fres, min(fres * 2.2 + 0.1, 0.75), hit.a * (1.0 - rough * 0.5));
@@ -302,7 +302,7 @@ void main(){
   float gT = mix(1800.0, 380.0, rough);
   float gB = mix(140.0, 26.0, rough) * mix(1.0, 0.45, night);        // moon path is long and soft
   float fresL = 0.3 + 0.7 * pow(1.0 - max(dot(H, v), 0.0), 5.0);
-  float spec = (pow(nh, gT) * 28.0 + pow(nh, gB) * mix(0.8, 1.6, night)) * fresL;
+  float spec = (pow(nh, gT) * 28.0 + pow(nh, gB) * mix(0.5, 1.6, night)) * fresL;
   // sparkles: sparse twinkling cells, only inside the glitter path around the glint
   vec2 sc = floor(p * 10.0);
   float hs = hash12(sc + floor(TIME * 0.5) * 7.0);

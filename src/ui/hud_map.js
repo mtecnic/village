@@ -305,6 +305,27 @@ function draw() {
   ctx.beginPath();
   ctx.arc(cam.tx * sx, cam.tz * sz, 2.6 * dpr, 0, Math.PI * 2);
   ctx.fill();
+  // active disasters: pulsing red beacons
+  const act = VC.disasters && VC.disasters.active;
+  if (act && act.length) {
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.008);
+    for (let i = 0; i < act.length; i++) {
+      const d = act[i];
+      if (!d || d.x == null || d.z == null) continue;
+      const px = d.x * sx, pz = d.z * sz;
+      ctx.beginPath();
+      ctx.arc(px, pz, (5 + pulse * 6) * dpr, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,90,106,${(0.45 * (1 - pulse)).toFixed(3)})`;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(px, pz, 3 * dpr, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff5a6a';
+      ctx.fill();
+      ctx.lineWidth = 1.2 * dpr;
+      ctx.strokeStyle = '#fff';
+      ctx.stroke();
+    }
+  }
   MM.drawn = true;
 }
 
@@ -372,7 +393,8 @@ VC.hud.register({
     if (!S || !MM.open || VC.hud.uiHidden) return;
     if (MM.W !== S.W || MM.H !== S.H || !MM.px) alloc(S);
     const changed = updateBase(false);
-    if (camChanged() || changed || MM.redraw || !MM.drawn) {
+    const dis = VC.disasters && VC.disasters.active && VC.disasters.active.length > 0; // beacons animate
+    if (camChanged() || changed || MM.redraw || !MM.drawn || dis) {
       MM.redraw = false;
       draw();
     }

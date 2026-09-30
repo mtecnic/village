@@ -134,8 +134,8 @@ const hud = (VC.hud = {
     netCache = { t: -1, net: 0, fc: null };
     moneyAcc = 0;
     cache.clear();
-    if (T.money) T.money.set(S.money);
-    if (T.pop) T.pop.set((S.stats && S.stats.pop) || 0);
+    if (T.money) T.money.jump(S.money);
+    if (T.pop) T.pop.jump((S.stats && S.stats.pop) || 0);
     ensureDock();
     for (const p of hud.parts) if (p.reset) safe(() => p.reset(S), p.name + '.reset');
     refreshTop(true);
@@ -145,10 +145,19 @@ const hud = (VC.hud = {
   update(dt, rdt) {
     const S = VC.state;
     if (!S || !hud.root) return;
-    for (const p of hud.parts) if (p.update && (hud.visible || p.always)) safe(() => p.update(dt, rdt), p.name + '.update');
+    const parts = hud.parts;
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (!p.update || !(hud.visible || p.always) || p._dead > 20) continue;
+      try { p.update(dt, rdt); } catch (e) {
+        // log the first failure, give up on a part that keeps throwing
+        if (!p._dead) { console.error('[hud] ' + p.name + '.update', e); VC.errors.push('hud ' + p.name + '.update: ' + (e && e.message)); }
+        p._dead = (p._dead || 0) + 1;
+      }
+    }
     if (!hud.visible) return;
     tAcc += rdt;
-    if (tAcc >= 0.2) { tAcc = 0; safe(() => refreshTop(false), 'refreshTop'); }
+    if (tAcc >= 0.2) { tAcc = 0; safe(refreshTop, 'refreshTop'); }
     slowAcc += rdt;
     if (slowAcc >= 1) {
       slowAcc = 0;
@@ -453,6 +462,8 @@ function refreshTop(force) {
   const season = SEASONS[month];
   setText(T.dsub, season.icon + ' ' + season.name + ' · ' + todIcon(S) + ' ' + clock(S));
   setText(T.wx, weatherIcon(S));
+  const mp = ((S.time.day % VC.C.DAYS_PER_MONTH) + 1) / VC.C.DAYS_PER_MONTH;
+  if (T.wx._mp !== mp) { T.wx._mp = mp; T.wx.style.setProperty('--mp', mp.toFixed(3)); }
   setCls(T.dateSeg, 'paused', S.time.speed === 0);
   // funds
   T.money.set(S.money);
@@ -539,6 +550,7 @@ function dateTip() {
   const month = Math.floor(S.time.day / VC.C.DAYS_PER_MONTH) % 12;
   const season = SEASONS[month];
   let s = `<div class="tt-head"><span class="tt-icon">${weatherIcon(S)}</span>${VC.fmt.fullDate(S.time.day)}</div><div class="tt-grid">`;
+  s += `<span>Month</span><b>day ${(S.time.day % VC.C.DAYS_PER_MONTH) + 1} of ${VC.C.DAYS_PER_MONTH}</b>`;
   s += `<span>Season</span><b>${season.icon} ${season.name}</b>`;
   s += `<span>Weather</span><b>${WEATHER_NAMES[w.type] || w.type || 'Clear'}</b>`;
   s += `<span>Time</span><b>${clock(S)}</b>`;

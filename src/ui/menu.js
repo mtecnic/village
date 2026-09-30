@@ -124,12 +124,14 @@ function saveInfo(s) {
     thumb: s.thumb || s.thumbnail || s.image || null,
     auto: !!(s.auto || s.autosave || /auto/i.test(String(slot))),
     milestone: s.milestone,
+    demo: !!s.demo,
   };
 }
 function saves() {
   let r;
   try { r = VC.save && VC.save.list ? VC.save.list() : []; } catch (e) { r = []; }
-  return Promise.resolve(r).then((list) => (Array.isArray(list) ? list.map(saveInfo).filter((x) => x && x.slot != null) : [])).catch(() => []);
+  // never offer the title-screen demo city, should a save module ever store it
+  return Promise.resolve(r).then((list) => (Array.isArray(list) ? list.map(saveInfo).filter((x) => x && x.slot != null && !x.demo) : [])).catch(() => []);
 }
 function ago(ms) {
   if (!ms) return '';
@@ -174,7 +176,7 @@ function renderButtons(list) {
   const add = (b, i) => { b.style.animationDelay = 0.35 + i * 0.06 + 's'; MN.btns.appendChild(b); };
   let i = 0;
   if (latest) {
-    const sub = [VC.hud.escapeHtml ? latest.name : latest.name, latest.pop != null ? VC.fmt.short(latest.pop) + ' citizens' : null, ago(latest.time)].filter(Boolean).join(' · ');
+    const sub = [latest.name, latest.pop != null ? VC.fmt.short(latest.pop) + ' citizens' : null, ago(latest.time)].filter(Boolean).join(' · ');
     add(menuBtn('▶️', 'Continue', sub, () => loadGame(latest.slot), 'primary'), i++);
   }
   add(menuBtn('🏗️', 'New City', 'Found a brand-new metropolis', () => menu.newCity && menu.newCity(), latest ? '' : 'primary'), i++);

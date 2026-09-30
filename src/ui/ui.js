@@ -25,7 +25,7 @@
  *   stat(label, value, {icon, tip, cls}) -> el.set(value, cls)
  *   chart({width, height, series:[{data, color, label, fill}], yFormat, min, max}) -> el.update(series)
  *   sparkline({data, width, height, color, fill=true, min, max}) -> el.update(data)
- *   counter({value, format, duration, cls}) -> <span> whose number tweens smoothly on el.set(v)
+ *   counter({value, format, duration, cls}) -> <span> whose number tweens on el.set(v); el.jump(v) sets instantly
  *   cards(items:[{value, icon, title, sub, desc, tip, disabled, badge, cls}], {value, columns, onSelect, render(item, card)})
  *       -> el.select(value), el.getValue(), el.cards (Map value -> card element)
  *   input({value, placeholder, maxLength, onInput, onEnter, cls, type}) -> <input class="input">
@@ -364,6 +364,12 @@ const ui = (VC.ui = {
         return k < 1;
       };
       animate(el);
+    };
+    /** Sets the value immediately (no tween), e.g. when a new city is loaded. */
+    el.jump = (v) => {
+      cur = from = target = +v || 0;
+      anims.delete(el);
+      show(cur);
     };
     el.value = () => target;
     return el;

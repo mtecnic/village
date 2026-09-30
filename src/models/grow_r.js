@@ -960,7 +960,7 @@ const R3_ARCH = [
       K.prism(g, t.x + 2, y + 1, t.z + 2, s - 4, 3, s - 4, wall, 'circle');
       K.prism(g, t.x + 3, y + 4, t.z + 3, Math.max(2, s - 6), 2, Math.max(2, s - 6), win, 'circle');
       const top = y + 6;
-      if (top > 60) K.antenna(g, t.x + (s >> 1), top, t.z + (s >> 1), Math.min(16, 148 - top), true);
+      if (top > 60) K.antenna(g, t.x + (s >> 1), top, t.z + (s >> 1), Math.min(16, c.cap - 1 - top), true);
     },
   },
   {
@@ -981,7 +981,7 @@ const R3_ARCH = [
       if (t.w >= 6 && t.d >= 6) K.waterTank(g, t.x + 1, y + 1, t.z + 1, P.WOOD_D);
       if (t.w >= 12) K.waterTank(g, t.x + t.w - 5, y + 1, t.z + 1, P.WOOD);
       K.penthouse(g, t.x + (t.w >> 1) - 1, y + 1, t.z + t.d - 4, 3, 3, 3);
-      if (y > 60) K.antenna(g, t.x + t.w - 2, y + 1, t.z + t.d - 2, Math.min(14, 148 - y), true, true);
+      if (y > 60) K.antenna(g, t.x + t.w - 2, y + 1, t.z + t.d - 2, Math.min(14, c.cap - 1 - y), true, true);
     },
   },
   {
@@ -1040,7 +1040,7 @@ const R3_ARCH = [
       y += F * 3;
       g.box(t.x, y, t.z, t.w, 1, t.d, P.GRASS);
       for (let k = 0; k < 4; k++) K.tree(g, t.x + 1 + (k & 1) * (t.w - 3), y + 1, t.z + 1 + (k >> 1) * (t.d - 3), 2, 'oak', leaves[k]);
-      if (y > 70) K.antenna(g, t.x + (t.w >> 1), y + 1, t.z + (t.d >> 1), Math.min(12, 148 - y), true);
+      if (y > 70) K.antenna(g, t.x + (t.w >> 1), y + 1, t.z + (t.d >> 1), Math.min(12, c.cap - 1 - y), true);
     },
   },
   {
@@ -1096,7 +1096,7 @@ const R3_ARCH = [
         y += 3;
       }
       g.light(t.x + t.w / 2, y, t.z + t.d / 2, [0.5, 0.9, 1], 1.5);
-      if (y > 60) K.antenna(g, t.x + (t.w >> 1), y, t.z + 2, Math.min(18, 148 - y), true);
+      if (y > 60) K.antenna(g, t.x + (t.w >> 1), y, t.z + 2, Math.min(18, c.cap - 1 - y), true);
     },
   },
   {
@@ -1166,7 +1166,7 @@ const R3_ARCH = [
         for (let x = t.x + 2; x < t.x + t.w - 2; x += 3) g.set(x, y + 1, t.z + t.d - 1, P.METAL_D);
       }
       for (let k = 0; k < 3; k++) g.box(t.x + 1 + k * 3, y + 1, t.z + 1, 1, 3, 1, P.METAL_D);
-      if (y > 70) K.antenna(g, t.x + 1, y + 1, t.z + 1, Math.min(12, 148 - y), true);
+      if (y > 70) K.antenna(g, t.x + 1, y + 1, t.z + 1, Math.min(12, c.cap - 1 - y), true);
     },
   },
 ];
@@ -1177,7 +1177,9 @@ VC.models.define('grow_R3', {
     const c = lotCtx('grow_R3', rng, v, p, 160);
     const A = R3_ARCH[v % R3_ARCH.length];
     c.door = c.pk(3, R1PAL.door);
+    const pod = A.name !== 'slab' && K.planPodium(c, 0.75);
     A.build(c);
+    if (pod) K.podium(c, c.podH, { wall: c.pk(11, [[P.CONCRETE, P.BRICK_D], [P.BRICK, P.SANDSTONE, P.CONCRETE_L], [P.MARBLE, P.SANDSTONE, P.WHITE]]), band: c.pk(12, [P.CONCRETE_D, P.STEEL_BLUE, P.WOOD_D]), deck: c.Wl ? P.WOOD_L : P.CONCRETE_D, awnings: true, rich: c.Wl === 2 });
     if (c.bit(8)) mirrorX(c.g);
     return K.finish(c.g, 'R3_' + A.name);
   },

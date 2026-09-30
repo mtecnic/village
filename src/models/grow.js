@@ -53,6 +53,20 @@ K.crop = function (g) {
 K.finish = function (g, style, extra) {
   g.meta.style = style;
   if (extra) Object.assign(g.meta, extra);
+  // aviation rule: everything taller than ~80 voxels carries a blinking beacon on its top
+  const top = g.maxHeight();
+  if (top > 80 && !g.lights.some((l) => l.always)) {
+    const y = top - 1;
+    let bx = 0, bz = 0, best = Infinity;
+    for (let z = 0; z < g.sz; z++)
+      for (let x = 0; x < g.sx; x++) {
+        if (!g.get(x, y, z)) continue;
+        const d = (x + 0.5 - g.sx / 2) ** 2 + (z + 0.5 - g.sz / 2) ** 2;
+        if (d < best) { best = d; bx = x; bz = z; }
+      }
+    if (y + 1 < g.sy) K.beacon(g, bx, y + 1, bz);
+    else g.light(bx + 0.5, y + 1, bz + 0.5, [1, 0.12, 0.08], 1.2, true);
+  }
   const o = K.crop(g);
   // keep glow sprites / emitters inside the model bounds (they may sit on a voxel's outer face)
   for (const l of o.lights.concat(o.emitters)) {
@@ -771,6 +785,57 @@ K.roofDress = function (g, x, y, z, w, d, seed, rich = false, tanks = true) {
       }
     }
 };
+/**
+ * Podium for big lots: lifts everything built above the slab by ph voxels, then fills the lot
+ * (minus the front sidewalk row) with a podium block of ph voxels — so any tower archetype
+ * becomes "podium + tower" and its plaza props end up on the podium roof terrace.
+ * o = { wall, shop (ground-floor glazing), band (color strip under the roof), deck (roof color),
+ *       awnings: bool, rich: bool }
+ */
+K.podium = function (c, ph, o) {
+  const g = c.g, L = g.sx * g.sz, W = g.sx, D = g.sz;
+  g.v.copyWithin((1 + ph) * L, L, (g.sy - ph) * L);
+  g.v.fill(0, L, (1 + ph) * L);
+  for (const e of g.lights.concat(g.emitters)) if (e.y >= 1) e.y += ph;
+  // the front row stays a sidewalk: drop anything lifted there (it would float)
+  for (let y = 1 + ph; y < g.sy; y++) for (let x = 0; x < W; x++) g.v[x + W * (D - 1 + D * y)] = 0;
+  g.lights = g.lights.filter((l) => l.z < D - 1 || l.y < 1);
+  g.emitters = g.emitters.filter((l) => l.z < D - 1 || l.y < 1);
+  const d = D - 1;
+  g.box(0, 1, 0, W, ph, d, o.wall);
+  // podium roof deck under the lifted tower / plaza
+  for (let z = 0; z < d; z++)
+    for (let x = 0; x < W; x++) {
+      const i = x + W * (z + D * ph);
+      if (g.v[i + L] === 0 || g.v[i + L] === P.MARBLE || g.v[i + L] === P.SIDEWALK || g.v[i + L] === P.CONCRETE) g.v[i] = o.deck || P.CONCRETE_D;
+    }
+  // lifted plaza slab colors become the deck: replace the first lifted layer's paving
+  for (let z = 0; z < d; z++)
+    for (let x = 0; x < W; x++) {
+      const i = x + W * (z + D * (ph + 1));
+      const v = g.v[i];
+      if (v === P.MARBLE || v === P.SIDEWALK || v === P.CONCRETE) g.v[i] = 0;
+    }
+  const fh = 4, floors = Math.max(1, Math.floor(ph / fh));
+  K.facade(g, 0, 1, 0, W, ph, d, (u, v, f, len) => {
+    const r = v % fh, fl = (v / fh) | 0;
+    if (v >= floors * fh) return o.band || 0;
+    if (u === 0 || u === len - 1) return 0;
+    if (fl === 0) return f === 0 || f === 1 || f === 3 ? (r < 3 ? (u % 6 === 0 ? 0 : o.shop || P.WIN_SHOP) : o.band || 0) : r === 1 && u % 3 === 1 ? P.WIN : 0;
+    return r >= 1 && r <= 2 && u % 4 !== 0 ? P.WIN_OFFICE : 0;
+  });
+  // parapet + glass rail, entrance canopy and awnings on the street front
+  K.ring(g, 0, 1 + ph, 0, W, d, o.rich ? P.GLASS_CYAN : o.wall);
+  const m = W >> 1;
+  g.box(m - 3, fh, d, 6, 1, 1, P.CONCRETE_DD);
+  g.box(m - 1, 1, d - 1, 2, 3, 1, P.GLASS_DARK);
+  if (o.awnings) for (let x = 2; x + 3 < m - 3; x += 5) K.awning(g, x, fh - 1, d, 3, 1, K.pickW(c.rng, [[P.AWNING_R, P.AWNING_B], [P.AWNING_G, P.AWNING_Y, P.AWNING_R], [P.AWNING_B, P.AWNING_G]], c.Wl), P.WHITE);
+  K.lamp(g, 1, 1, D - 1, 4, P.LAMP_WHITE, P.METAL_D, 0.7);
+  K.lamp(g, W - 2, 1, D - 1, 4, P.LAMP_WHITE, P.METAL_D, 0.7);
+  K.wallLight(g, m - 3, fh - 1, d, P.LAMP_WHITE, 0.5);
+  K.wallLight(g, m + 2, fh - 1, d, P.LAMP_WHITE, 0.5);
+  if (o.rich) g.light(W / 2, ph + 1.5, d / 2, [1, 0.85, 0.6], 1.6);
+};
 /** Mechanical penthouse with vents; returns top y. */
 K.penthouse = function (g, x, y, z, w, h, d, c = P.CONCRETE_D) {
   g.box(x, y, z, w, h, d, c);
@@ -815,6 +880,9 @@ function lotCtx(key, rng, v, p, H) {
   for (let i = 0; i < 16; i++) c.ids.push(id.int(0, 1 << 20));
   /** Height scale for tall industrial elements: 0.58 on 1-tile lots, 0.82 on 2, 1 on 3+. */
   c.hs = Math.min(1, Math.sqrt(Math.min(c.W, c.D) / 24));
+  /** Highest voxel row a generator may fill (towers subtract a planned podium via c.podH). */
+  c.cap = 149;
+  c.podH = 0;
   /** Scales a height by c.hs (rounded, at least 3). */
   c.sh = (h) => Math.max(3, Math.round(h * c.hs));
   c.occ = new Uint8Array(c.W * c.D);
@@ -930,8 +998,20 @@ function towerFloors(c, extra = 0) {
   let F = [0, 11, 20, 32][c.L] + (c.ids[9] % 5) - 2;
   if (Math.max(c.W, c.D) <= 8) F = Math.round(F * 0.75);
   if (Math.min(c.W, c.D) >= 24) F += 3;
+  F -= Math.ceil(c.podH / 3);
   return M.clamp(F, 6, 40 - extra);
 }
+/**
+ * Plans a podium for towers on big lots (3x3+): sets c.podH / c.cap so the tower is built
+ * shorter, returns true when K.podium must be applied after building.
+ */
+K.planPodium = function (c, chance = 0.7) {
+  if (c.W < 24 || c.D < 24) return false;
+  if ((c.ids[10] % 100) / 100 >= chance) return false;
+  c.podH = c.L >= 3 ? 12 : 8;
+  c.cap = 149 - c.podH;
+  return true;
+};
 K.towerFloors = towerFloors;
 /** Centered tower rect inside the lot with margin m (clamped to max w/d). */
 function towerRect(c, m, maxW = 99, maxD = 99) {
@@ -991,7 +1071,7 @@ function roofTop(c, x, y, z, w, d, opts = {}) {
     K.hvac(g, x + w - 3, y + 1, z + d - 3, 2, 2);
   }
   if (y > 70 || opts.mast) {
-    const mh = opts.mastH || Math.max(6, Math.min(18, 150 - y - 3));
+    const mh = opts.mastH || Math.max(6, Math.min(18, c.cap - 2 - y));
     K.antenna(g, x + (w >> 1), y + 1, z + (d >> 1), mh, true, opts.striped);
     top = y + 1 + mh;
   }

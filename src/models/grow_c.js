@@ -603,6 +603,7 @@ const C2_ARCH = [
 function c3Floors(c) {
   let F = [0, 20, 30, 40][c.L] + (c.ids[9] % 5) - 2;
   if (Math.max(c.W, c.D) <= 8) F = Math.round(F * 0.7);
+  F -= Math.ceil(c.podH / 3);
   return M.clamp(F, 12, 42);
 }
 /** Tower rect for skyscrapers: 1x1 -> 6x6, 2x2 -> up to 12x12, 3x3 -> up to 16x16. */
@@ -620,7 +621,7 @@ function grandLobby(c, t, frame, h = 6) {
 }
 /** Mast + beacon on top when the building is tall; returns top y. */
 function mast(c, x, y, z, maxH = 16) {
-  const h = Math.min(maxH, 149 - y);
+  const h = Math.min(maxH, c.cap - y);
   if (h < 4) return y;
   K.antenna(c.g, x, y, z, h, true);
   return y + h;
@@ -637,6 +638,8 @@ function rotSquare(g, cx, cz, s, a, y, h, col) {
     }
 }
 
+/** C3 archetypes that already bring their own base / podium. */
+const C3_OWN_BASE = new Set(['ledtower', 'petronas', 'empire']);
 const C3_ARCH = [
   {
     name: 'glassbox',
@@ -687,7 +690,7 @@ const C3_ARCH = [
       g.light(t.x + t.w / 2, y - 3, t.z + t.d / 2, [1, 0.95, 0.8], 2.2);
       // needle
       const nx = t.x + (t.w >> 1), nz = t.z + (t.d >> 1);
-      const nh = Math.min(16, 148 - y);
+      const nh = Math.min(16, c.cap - 1 - y);
       for (let k = 0; k < nh; k++) g.set(nx, y + k, nz, metal);
       if (nh > 2) K.beacon(g, nx, y + nh, nz);
     },
@@ -899,7 +902,7 @@ const C3_ARCH = [
         if (f > F * 0.6 && s >= 5) { g.box(x - 1, y, z + (s >> 1) - 1, 1, n * 3, 2, wall); g.box(x + s, y, z + (s >> 1) - 1, 1, n * 3, 2, wall); }
         y += n * 3;
       }
-      const top = K.spire(g, cx, y, cz, 1.5, c.Wl === 2 ? P.GOLD : wall, Math.min(14, 146 - y - 6));
+      const top = K.spire(g, cx, y, cz, 1.5, c.Wl === 2 ? P.GOLD : wall, Math.min(14, c.cap - 3 - y - 6));
       g.light(cx, y + 1, cz, [1, 0.9, 0.7], 1.2);
       g.meta.top = top;
     },
@@ -922,12 +925,12 @@ const C3_ARCH = [
       // splintered crown: shards rising to different heights
       const spikes = [[r.x, r.z, 2], [r.x + r.w - 2, r.z + 1, 2], [r.x + 1, r.z + r.d - 2, 2], [r.x + r.w - 3, r.z + r.d - 3, 2]];
       spikes.forEach(([x, z, w], i) => {
-        const h = Math.min(148 - y, 8 + ((c.ids[12] >> (i * 2)) & 3) * 4 + (F - Fb) * 2);
+        const h = Math.min(c.cap - 1 - y, 8 + ((c.ids[12] >> (i * 2)) & 3) * 4 + (F - Fb) * 2);
         g.box(x, y, z, w, h, w, glass);
         g.box(x, y, z, 1, h - 1, 1, P.LAMP_WHITE);
       });
       g.light(r.x + r.w / 2, y + 6, r.z + r.d / 2, [0.85, 0.95, 1], 1.8);
-      if (y > 70) K.beacon(g, spikes[0][0], Math.min(149, y + Math.min(148 - y, 8 + (c.ids[12] & 3) * 4 + (F - Fb) * 2)), spikes[0][1]);
+      if (y > 70) K.beacon(g, spikes[0][0], Math.min(c.cap, y + Math.min(c.cap - 1 - y, 8 + (c.ids[12] & 3) * 4 + (F - Fb) * 2)), spikes[0][1]);
     },
   },
 ];
@@ -938,7 +941,9 @@ VC.models.define('grow_C3', {
     const c = lotCtx('grow_C3', rng, v, p, 160);
     const A = C3_ARCH[v % C3_ARCH.length];
     K.slab(c.g, P.SIDEWALK);
+    const pod = !C3_OWN_BASE.has(A.name) && K.planPodium(c, 0.8);
     A.build(c);
+    if (pod) K.podium(c, c.podH, { wall: c.pk(11, [[P.CONCRETE_D, P.GLASS_DARK], [P.GLASS_DARK, P.CONCRETE_L, P.STONE], [P.GLASS_DARK, P.MARBLE, P.SANDSTONE]]), shop: P.WIN_SHOP, band: c.pk(12, [P.NEON_CYAN, P.NEON_PINK, P.SIGN_WHITE, P.NEON_BLUE]), deck: c.Wl === 2 ? P.WOOD_L : P.CONCRETE_D, rich: c.Wl > 0 });
     if (c.bit(8)) mirrorX(c.g);
     return K.finish(c.g, 'C3_' + A.name);
   },

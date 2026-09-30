@@ -1,0 +1,814 @@
+/*
+ * VOXELPOLIS — Mayor's Goals (VC.goals): 2-3 live objectives generated from the city's situation and
+ * progression (next population milestone, the biggest problem from VC.sim.issues(), a missing service
+ * from VC.sim.serviceStats(), an affordable landmark, a negative budget, low happiness, parks near
+ * homes, jobs, denser zones, tourism, clean power…). Each goal has a title, a "why", a live progress
+ * value 0..1 (+ a short progress text), a small reward (cash scaled to the city size, or a temporary
+ * modifier via VC.econ.addTempMod) and a "Show me" focus (camera / overlay / panel / palette / tool).
+ *
+ * FLOW  generate (one goal at a time, a few game days apart) -> live progress (evaluated at most twice a
+ *   second of real time, and only when a day passed or the city changed) -> complete (g.done, bus
+ *   'goalDone' {goal}; the HUD celebrates: toast + confetti + sfx) -> claim (reward granted, bus
+ *   'goalClaimed' {goal}; auto-claimed silently after AUTO_CLAIM_DAYS) -> a new goal after NEXT_DAYS.
+ *   Nothing happens in the title-screen demo (S.demo) or while the tutorial runs (VC.hud.tutorialStep()).
+ *
+ * STATE (plain JSON, saved with the game): S.goals = {
+ *   active: [{id, kind, cat, title, desc, icon, target, base, cur, progress 0..1, text, unit,
+ *             reward: {money?, mods?, days?, label?, text (short), long}, focus: {panel?|group?|tool?|overlay?|locate?|x,z},
+ *             day, done?, doneDay?, meta?}],
+ *   done: [ids] (capped), log: [{id, kind, title, icon, day}] (last 30), seq, next (day the next goal may
+ *   appear), cool: {kind: day} (per-kind cooldowns), count (goals completed), v }
+ *
+ * API  list() -> active goals (live objects, read-only for callers), claim(id) -> bool, refresh() (debug:
+ *   evaluate + fill every free slot now), swap(id) (replace a goal; its kind cools down), focusOf(id) ->
+ *   {x?, z?, dist?, panel?, group?, tool?, overlay?} (live location for "Show me"), add(kind) (debug),
+ *   rewardText(reward) / rewardLong(reward), KINDS. Bus: 'goalsChanged' (structure changed), 'goalDone' {goal},
+ *   'goalClaimed' {goal}.
+ *
+ * LIFECYCLE  init() (bus listeners, once), reset(S) (creates / migrates S.goals), update(dt, rdt) (cheap:
+ *   a timer check per frame). If main.js does not list 'goals' in VC.MODULE_ORDER, this module inserts
+ *   itself after 'advisors' when the game boots so main drives it like any other module.
+ */
+const M = VC.M, C = VC.C;
+const MAX_ACTIVE = 3;
+const EVAL_SEC = 0.5; // real seconds between progress evaluations
+const NEXT_DAYS = 4; // game days between a claim / swap and the next goal
+const FILL_DAYS = 1; // game days between goals while the card is filling up
+const FIRST_DAYS = 3; // a new city gets its first goal after this many days
+const AUTO_CLAIM_DAYS = 30; // unclaimed completed goals are claimed automatically after this
+const DONE_CAP = 100, LOG_CAP = 30;
+const ONCE = 1e9; // cooldown for one-time goals
+
+let rnd = M.rng(1);
+let acc = 0, lastEvalDay = -1, dirty = true, inited = false;
+
+const num = (v) => VC.fmt.num(v);
+const money = (v) => VC.fmt.money(v);
+const pct = (v) => Math.round((v || 0) * 100) + '%';
+const clamp01 = (v) => (v > 0 ? (v < 1 ? v : 1) : 0);
+/** Rounds to two significant digits (1,234 -> 1,200; 56,789 -> 57,000). */
+function nice(v) {
+  const a = Math.abs(v);
+  if (a < 100) return Math.round(v / 10) * 10;
+  const p = Math.pow(10, Math.floor(Math.log10(a)) - 1);
+  return Math.round(v / p) * p;
+}
+function niceUp(v) {
+  const a = Math.abs(v);
+  if (a < 100) return Math.ceil(v / 10) * 10;
+  const p = Math.pow(10, Math.floor(Math.log10(a)) - 1);
+  return Math.ceil(v / p) * p;
+}
+const S_ = () => VC.state;
+const tutorialOn = () => !!(VC.hud && VC.hud.tutorialStep && VC.hud.tutorialStep() >= 0);
+const unlocked = (key) => { try { return VC.world.isUnlocked(key); } catch (e) { return true; } };
+const bldName = (key) => (VC.BLD[key] ? VC.BLD[key].name : key);
+
+/* ------------------------------------------------------------------ */
+/* evaluation context: cheap fields up front, heavy ones lazily, once   */
+/* per evaluation (issues() / serviceStats() / one pass over buildings) */
+/* ------------------------------------------------------------------ */
+const cx = { S: null, day: 0, pop: 0, peak: 0, money: 0, net: 0, st: null, _iss: null, _svc: null, _cnt: false, _trees: -1, _roads: -1, _zones: -1, _clean: -1 };
+const cnt = {
+  grow: 0, den2: 0, den3: 0, lvl3: 0, parks: 0, power: 0, water: 0, abandoned: 0,
+  unpow: 0, unwat: 0, aband: 0, // ids of one unpowered / unwatered / abandoned building (for "Show me")
+  byKey: new Map(), built: new Map(),
+};
+function prep(S) {
+  cx.S = S;
+  cx.day = S.time.day;
+  cx.st = S.stats || {};
+  cx.pop = cx.st.pop || 0;
+  cx.peak = S.peakPop || 0;
+  cx.money = S.money || 0;
+  cx.net = cx.st.net || 0;
+  cx._iss = null;
+  cx._svc = null;
+  cx._cnt = false;
+  cx._trees = cx._roads = cx._zones = cx._clean = -1;
+  return cx;
+}
+function iss() {
+  if (!cx._iss) {
+    let o = null;
+    try { o = VC.sim && VC.sim.issues ? VC.sim.issues() : null; } catch (e) { o = null; }
+    cx._iss = o || {};
+  }
+  return cx._iss;
+}
+function svc() {
+  if (!cx._svc) {
+    let o = null;
+    try { o = VC.sim && VC.sim.serviceStats ? VC.sim.serviceStats() : null; } catch (e) { o = null; }
+    cx._svc = o || {};
+  }
+  return cx._svc;
+}
+function counts() {
+  if (cx._cnt) return cnt;
+  cx._cnt = true;
+  cnt.grow = cnt.den2 = cnt.den3 = cnt.lvl3 = cnt.parks = cnt.power = cnt.water = cnt.abandoned = 0;
+  cnt.unpow = cnt.unwat = cnt.aband = 0;
+  cnt.byKey.clear();
+  cnt.built.clear();
+  for (const b of cx.S.buildings.values()) {
+    if (b.key === 'rubble') continue;
+    const done = b.built >= 1;
+    if (done && b.simNeedP && !b.powered && !cnt.unpow) cnt.unpow = b.id;
+    if (done && b.simNeedW && !b.watered && !cnt.unwat) cnt.unwat = b.id;
+    if (b.key === 'grow') {
+      if (b.abandoned) {
+        cnt.abandoned++;
+        if (!cnt.aband) cnt.aband = b.id;
+        continue;
+      }
+      cnt.grow++;
+      if (b.den === 2) cnt.den2++;
+      else if (b.den === 3) cnt.den3++;
+      if (b.level >= 3) cnt.lvl3++;
+      continue;
+    }
+    const def = VC.BLD[b.key];
+    if (!def) continue;
+    cnt.byKey.set(b.key, (cnt.byKey.get(b.key) || 0) + 1);
+    if (done) cnt.built.set(b.key, (cnt.built.get(b.key) || 0) + 1);
+    if (def.power > 0 && b.key !== 'incinerator') cnt.power++;
+    if (def.water > 0) cnt.water++;
+    if (def.group === 'parks' && def.cover && def.cover.park) cnt.parks++;
+  }
+  return cnt;
+}
+/** Tiles with trees / roads / zones (O(N), only computed for goals that need them). */
+function tileCount(layer) {
+  const a = cx.S[layer];
+  let n = 0;
+  for (let i = 0; i < a.length; i++) if (a[i]) n++;
+  return n;
+}
+function trees() { if (cx._trees < 0) cx._trees = tileCount('trees'); return cx._trees; }
+function roads() { if (cx._roads < 0) cx._roads = tileCount('road'); return cx._roads; }
+function zones() { if (cx._zones < 0) cx._zones = tileCount('zone'); return cx._zones; }
+const CLEAN = { wind_turbine: 1, solar_farm: 1, nuclear_plant: 1, fusion_plant: 1 };
+/** Share of the power supply coming from clean plants (0..1). */
+function cleanShare() {
+  if (cx._clean >= 0) return cx._clean;
+  let tot = 0, clean = 0;
+  try {
+    const p = VC.sim.powerInfo();
+    for (const e of p.plants || []) {
+      const o = +e.output || 0;
+      tot += o;
+      if (e.b && CLEAN[e.b.key]) clean += o;
+    }
+  } catch (e) { /* no sim */ }
+  cx._clean = tot > 0 ? clean / tot : 0;
+  return cx._clean;
+}
+/** Cash reward scaled to the city size (x mul), two significant digits. */
+function cash(mul) {
+  return nice(M.clamp(600 + Math.max(cx.pop, cx.peak * 0.8) * 0.3, 750, 40000) * (mul || 1));
+}
+function nextMilestone() {
+  const L = VC.MILESTONES || [];
+  for (let i = 0; i < L.length; i++) if (L[i].pop > cx.peak) return L[i];
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* goal kinds                                                            */
+/* ------------------------------------------------------------------ */
+/*
+ * Each kind: cat ('grow' | 'fix' | 'build'), score(c) -> priority (0 = not now; >= 8 urgent),
+ * make(c) -> goal fields {title, desc, icon, target, base?, unit, focus, reward, meta?},
+ * cur(c, g) -> current value, prog(c, g, cur) -> 0..1, text(g, cur)? (default from unit),
+ * cool: days before the kind may come back after completion (ONCE = never).
+ */
+const KINDS = {};
+
+KINDS.first_roads = {
+  cat: 'fix', cool: ONCE,
+  score: (c) => (roads() < 10 ? 9 : 0),
+  make: (c) => ({ title: 'Lay down your first roads', desc: 'Every lot needs a street within 3 tiles. Open Roads and drag across the land.', icon: '🛣️', target: 30, base: 0, unit: 'num', focus: { group: 'roads', tool: 'road_street' }, reward: { money: cash(0.6) } }),
+  cur: () => roads(),
+  prog: (c, g, v) => v / g.target,
+};
+KINDS.first_zones = {
+  cat: 'fix', cool: ONCE,
+  score: (c) => (roads() >= 10 && zones() < 30 ? 8.5 : 0),
+  make: (c) => ({ title: 'Zone land for homes and jobs', desc: 'Paint residential, commercial and industrial zones along your roads — buildings grow there by themselves.', icon: '🏘️', target: 60, base: 0, unit: 'num', focus: { group: 'zones' }, reward: { money: cash(0.6) } }),
+  cur: () => zones(),
+  prog: (c, g, v) => v / g.target,
+};
+KINDS.first_power = {
+  cat: 'fix', cool: ONCE,
+  score: (c) => (counts().power === 0 && (cnt.grow > 0 || zones() >= 10) ? 10 : 0),
+  make: (c) => ({ title: 'Power up the town', desc: 'Nothing grows without electricity. Build a power plant next to a road — wind turbines are cheap and clean.', icon: '⚡', target: 1, base: 0, unit: 'flag', focus: { group: 'power', tool: 'bld:wind_turbine' }, reward: { money: cash(0.6) } }),
+  cur: () => counts().power,
+  prog: (c, g, v) => (v > 0 ? 1 : 0),
+};
+KINDS.first_water = {
+  cat: 'fix', cool: ONCE,
+  score: (c) => (counts().power > 0 && cnt.water === 0 && (c.pop >= 120 || c.peak >= 200) ? 7.5 : 0),
+  make: (c) => ({ title: 'Turn on the taps', desc: 'Medium and high density need running water. Place a water pump by a river or lake, or a water tower beside a road.', icon: '💧', target: 1, base: 0, unit: 'flag', focus: { group: 'water' }, reward: { money: cash(0.6) } }),
+  cur: () => counts().water,
+  prog: (c, g, v) => (v > 0 ? 1 : 0),
+};
+KINDS.pop = {
+  cat: 'grow', cool: 0,
+  score: (c) => (roads() >= 10 ? 3 : 0),
+  make(c) {
+    const m = nextMilestone();
+    const target = m ? m.pop : niceUp(Math.max(1000, c.peak * 1.4));
+    const why = m ? `Become a ${m.name}${m.reward ? ' and collect a ' + money(m.reward) + ' state grant' : ''}.` : 'The sky is the limit!';
+    return { title: `Grow to ${num(target)} citizens`, desc: why + ' Zone homes with jobs and shops nearby.', icon: '👥', target, base: 0, unit: 'num', focus: { panel: 'population' }, reward: { money: cash(1) } };
+  },
+  cur: (c) => c.pop,
+  prog: (c, g, v) => v / g.target,
+};
+KINDS.jobs = {
+  cat: 'grow', cool: 180,
+  score: (c) => (c.pop >= 300 && (c.st.unemployment || 0) > 0.1 ? 4 + (c.st.unemployment || 0) * 10 : 0),
+  make(c) {
+    const jobs = c.st.jobs || 0, workers = c.st.workers || c.pop * 0.5;
+    const target = niceUp(Math.max(jobs + 20, jobs + (workers - jobs) * 0.7));
+    return { title: `Reach ${num(target)} jobs`, desc: `${pct(c.st.unemployment)} of workers can't find a job. Zone commercial and industrial land near homes.`, icon: '💼', target, base: jobs, unit: 'num', focus: { group: 'zones' }, reward: { money: cash(1) } };
+  },
+  cur: (c) => c.st.jobs || 0,
+  prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
+};
+KINDS.density_mid = {
+  cat: 'grow', cool: 360,
+  score: (c) => ((c.S.sandbox || c.peak >= VC.DENSITY_UNLOCK[2]) && c.pop >= 600 && counts().den2 < 12 && cnt.water > 0 ? 2.5 : 0),
+  make: (c) => ({ title: 'Grow 6 medium-density buildings', desc: 'Paint medium-density zones where there is water. Denser lots house more people on the same land.', icon: '🏢', target: counts().den2 + 6, base: cnt.den2, unit: 'step', focus: { group: 'zones' }, reward: { mods: { demandR: 0.08, demandC: 0.05 }, days: 120, label: 'Developer interest' } }),
+  cur: () => counts().den2,
+  prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
+  text: (g, v) => `${Math.max(0, v - g.base)} / ${g.target - g.base}`,
+};
+KINDS.density_high = {
+  cat: 'grow', cool: 360,
+  score: (c) => ((c.S.sandbox || c.peak >= VC.DENSITY_UNLOCK[3]) && counts().den3 < 12 && cnt.water > 0 ? 2.5 : 0),
+  make: (c) => ({ title: 'Raise 4 high-rises', desc: 'High-density zones grow towers — they need water, power and plenty of demand.', icon: '🏙️', target: counts().den3 + 4, base: cnt.den3, unit: 'step', focus: { group: 'zones' }, reward: { money: cash(1.2) } }),
+  cur: () => counts().den3,
+  prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
+  text: (g, v) => `${Math.max(0, v - g.base)} / ${g.target - g.base}`,
+};
+KINDS.level3 = {
+  cat: 'grow', cool: 360,
+  score: (c) => (c.pop >= 2500 && counts().grow >= 40 ? 2 : 0),
+  make: (c) => ({ title: 'Grow 8 upscale buildings', desc: 'Buildings reach level 3 with high land value: parks, schools, landmarks and clean air nearby.', icon: '✨', target: counts().lvl3 + 8, base: cnt.lvl3, unit: 'step', focus: { overlay: 'landValue' }, reward: { money: cash(1.2) } }),
+  cur: () => counts().lvl3,
+  prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
+  text: (g, v) => `${Math.max(0, v - g.base)} / ${g.target - g.base}`,
+};
+KINDS.tourism = {
+  cat: 'grow', cool: 360,
+  score: (c) => (c.pop >= 4000 ? 2 : 0),
+  make(c) {
+    const t = c.st.tourism || 0;
+    return { title: `Attract ${num(niceUp(Math.max(60, t * 1.5 + 30)))} tourists`, desc: 'Landmarks, big parks and a tourism campaign bring visitors — and their wallets.', icon: '📸', target: niceUp(Math.max(60, t * 1.5 + 30)), base: t, unit: 'num', focus: { group: 'landmarks' }, reward: { money: cash(1.2) } };
+  },
+  cur: (c) => c.st.tourism || 0,
+  prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
+};
+KINDS.treasury = {
+  cat: 'grow', cool: 360,
+  score: (c) => (!c.S.sandbox && c.pop >= 500 && c.net > 0 && c.money < cash(12) ? 1.5 : 0),
+  make(c) {
+    const target = niceUp(c.money + Math.max(5000, c.net * 4));
+    return { title: `Save up ${money(target)}`, desc: 'A healthy reserve pays for the next big project — and for rainy days.', icon: '🏦', target, base: c.money, unit: 'money', focus: { panel: 'budget' }, reward: { mods: { happiness: 0.015 }, days: 120, label: 'Confident citizens' } };
+  },
+  cur: (c) => c.money,
+  prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
+};
+KINDS.fix_power = {
+  cat: 'fix', cool: 60,
+  score: (c) => (counts().power > 0 && (iss().unpowered || 0) >= 5 ? 8 : 0),
+  make(c) {
+    const n = iss().unpowered || 0;
+    const short = iss().powerShortage;
+    return { title: `Restore power to ${num(n)} buildings`, desc: short ? 'Demand exceeds supply — build another power plant.' : 'Some buildings are not connected — link them to the grid with roads or power lines.', icon: '🔌', target: 0, base: n, unit: 'left', focus: { overlay: 'power', locate: 'unpowered', group: 'power' }, reward: { money: cash(0.8) } };
+  },
+  cur: () => iss().unpowered || 0,
+  prog: (c, g, v) => 1 - v / Math.max(1, g.base),
+};
+KINDS.fix_water = {
+  cat: 'fix', cool: 60,
+  score: (c) => (counts().water > 0 && (iss().unwatered || 0) >= 5 ? 7 : 0),
+  make(c) {
+    const n = iss().unwatered || 0;
+    return { title: `Bring water to ${num(n)} buildings`, desc: iss().waterShortage ? 'The pumps can not keep up — add pumps or towers (and make sure they have power).' : 'Some buildings are cut off — connect them with roads to a pump or tower.', icon: '🚰', target: 0, base: n, unit: 'left', focus: { overlay: 'water', locate: 'unwatered', group: 'water' }, reward: { money: cash(0.8) } };
+  },
+  cur: () => iss().unwatered || 0,
+  prog: (c, g, v) => 1 - v / Math.max(1, g.base),
+};
+KINDS.fix_access = {
+  cat: 'fix', cool: 90,
+  score: (c) => ((iss().zonedNoAccess || 0) >= 12 ? 7 : 0),
+  make(c) {
+    const n = iss().zonedNoAccess || 0;
+    return { title: 'Connect zones to roads', desc: `${num(n)} zoned tiles are more than ${C.ROAD_ACCESS} tiles from a street, so nothing can grow there. Add roads (or dezone).`, icon: '🚧', target: Math.floor(n * 0.2), base: n, unit: 'left', focus: { group: 'roads', locate: 'noaccess', tool: 'road_street' }, reward: { money: cash(0.8) } };
+  },
+  cur: () => iss().zonedNoAccess || 0,
+  prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
+  text: (g, v) => `${num(Math.max(0, v - g.target))} tiles to go`,
+};
+KINDS.fix_abandoned = {
+  cat: 'fix', cool: 120,
+  score: (c) => ((c.st.abandoned || 0) >= 4 ? 6 : 0),
+  make(c) {
+    const n = c.st.abandoned || 0;
+    return { title: `Revive ${num(n - Math.floor(n / 3))} abandoned buildings`, desc: 'Empty buildings drag the whole street down. Check power, water, jobs, services, pollution and taxes around them.', icon: '🏚️', target: Math.floor(n / 3), base: n, unit: 'left', focus: { locate: 'abandoned', overlay: 'happiness' }, reward: { money: cash(1) } };
+  },
+  cur: (c) => c.st.abandoned || 0,
+  prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
+  text: (g, v) => `${num(Math.max(0, v - g.target))} to go`,
+};
+KINDS.fix_traffic = {
+  cat: 'fix', cool: 180,
+  score: (c) => ((iss().jammedRoads || 0) >= 12 ? 5 : 0),
+  make(c) {
+    const n = iss().jammedRoads || 0;
+    return { title: 'Unjam the streets', desc: `${num(n)} road tiles are jammed. Build avenues, alternative routes, bus depots — or try bike lanes.`, icon: '🚗', target: Math.floor(n / 3), base: n, unit: 'left', focus: { overlay: 'traffic' }, reward: { mods: { happiness: 0.02 }, days: 120, label: 'Smooth commutes' } };
+  },
+  cur: () => iss().jammedRoads || 0,
+  prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
+  text: (g, v) => `${num(Math.max(0, v - g.target))} jammed tiles to go`,
+};
+KINDS.budget = {
+  cat: 'fix', cool: 240,
+  score: (c) => (!c.S.sandbox && c.pop >= 100 && c.net < 0 && ((c.S.history && c.S.history.net && c.S.history.net.length) || 0) >= 2 ? 6 : 0),
+  make: (c) => ({ title: 'Balance the budget for 3 months', desc: 'The monthly balance is in the red. Trim department funding, drop pricey policies or raise taxes a little.', icon: '⚖️', target: 3, base: 0, unit: 'months', focus: { panel: 'budget' }, reward: { money: cash(1.5) }, meta: { streak: 0 } }),
+  cur: (c, g) => (g.meta && g.meta.streak) || 0,
+  prog: (c, g, v) => v / g.target,
+};
+KINDS.happiness = {
+  cat: 'fix', cool: 240,
+  score: (c) => (c.pop >= 300 && (c.st.happiness || 0) < 0.62 ? 4 + (0.62 - c.st.happiness) * 8 : 0),
+  make(c) {
+    const h = c.st.happiness || 0;
+    const target = M.clamp(Math.ceil((h + 0.08) * 20) / 20, 0.5, 0.8);
+    return { title: `Reach ${pct(target)} happiness`, desc: 'Parks, services, clean air, short commutes and fair taxes all make citizens smile.', icon: '😊', target, base: Math.min(h, target - 0.05), unit: 'pct', focus: { overlay: 'happiness', panel: 'stats' }, reward: { mods: { demandR: 0.08 }, days: 120, label: 'Happy-town buzz' } };
+  },
+  cur: (c) => c.st.happiness || 0,
+  prog: (c, g, v) => (v - g.base) / Math.max(0.01, g.target - g.base),
+};
+KINDS.pollution = {
+  cat: 'fix', cool: 360,
+  score: (c) => (c.pop >= 1000 && (c.st.pollution || 0) > 0.3 ? 4 : 0),
+  make(c) {
+    const p = c.st.pollution || 0;
+    const target = Math.floor(p * 0.7 * 20) / 20;
+    return { title: `Clear the air: pollution below ${pct(target)}`, desc: 'Smog is choking the city. Plant trees, move industry away from homes, go clean on power or try the Clean Air Act.', icon: '🌫️', target, base: p, unit: 'pctdown', focus: { overlay: 'pollution' }, reward: { mods: { landValue: 0.05 }, days: 180, label: 'Fresh-air premium' } };
+  },
+  cur: (c) => c.st.pollution || 0,
+  prog: (c, g, v) => (g.base - v) / Math.max(0.01, g.base - g.target),
+};
+KINDS.crime = {
+  cat: 'fix', cool: 360,
+  score: (c) => (c.pop >= 1000 && (c.st.crime || 0) > 0.3 ? 4 : 0),
+  make(c) {
+    const p = c.st.crime || 0;
+    const target = Math.floor(p * 0.7 * 20) / 20;
+    return { title: `Crack down on crime: below ${pct(target)}`, desc: 'Police stations near homes (and a Neighborhood Watch) keep the streets safe.', icon: '🦹', target, base: p, unit: 'pctdown', focus: { overlay: 'crime', group: 'safety' }, reward: { money: cash(1) } };
+  },
+  cur: (c) => c.st.crime || 0,
+  prog: (c, g, v) => (g.base - v) / Math.max(0.01, g.base - g.target),
+};
+/* service coverage goals (parks have their own count-based goal) */
+const SVC = [
+  { key: 'fire', name: 'Fire', group: 'safety', first: 'fire_station', pop: 250, max: 0.6, why: 'Without fire stations a single spark can take out a whole block.' },
+  { key: 'police', name: 'Police', group: 'safety', first: 'police_station', pop: 350, max: 0.6, why: 'Police keep crime — and the land-value slump it brings — away.' },
+  { key: 'health', name: 'Health', group: 'safety', first: 'clinic', pop: 350, max: 0.6, why: 'Clinics keep residents healthy, happy and at work.' },
+  { key: 'edu', name: 'School', group: 'education', first: 'school', pop: 450, max: 0.6, why: 'Schools raise land value and let industry level up.' },
+  { key: 'garbage', name: 'Trash pickup', group: 'waste', first: 'landfill', pop: 600, max: 0.7, why: 'Uncollected trash makes citizens miserable — and buildings get abandoned.' },
+  { key: 'transit', name: 'Transit', group: 'transit', first: 'bus_depot', pop: 3000, max: 0.45, why: 'Buses take cars off jammed streets.' },
+];
+for (const s of SVC) {
+  KINDS['svc_' + s.key] = {
+    cat: 'build', cool: 150, svc: s.key,
+    score(c) {
+      if (c.pop < s.pop || !unlocked(s.first)) return 0;
+      const r = svc()[s.key];
+      if (!r) return 0;
+      const cov = r.coverage || 0;
+      if (cov >= s.max * 0.6) return 0;
+      return 3 + (1 - cov / s.max) * 3 + Math.min(2, c.pop / 4000) + (r.buildings ? 0 : 1);
+    },
+    make(c) {
+      const r = svc()[s.key] || {};
+      const cov = r.coverage || 0;
+      const target = M.clamp(Math.round((cov + 0.4) * 20) / 20, 0.4, s.max);
+      const def = VC.BLD[s.first];
+      return {
+        title: `${s.name} coverage to ${pct(target)}`,
+        desc: `Only ${pct(cov)} of homes are covered. ` + (r.buildings ? `Build another ${def ? def.name : 'service building'} near homes. ` : `Build a ${def ? def.name : 'service building'} near homes. `) + s.why,
+        icon: (def && def.icon) || '🏛️', target, base: cov, unit: 'pct', focus: { group: s.group, tool: 'bld:' + s.first }, reward: { money: cash(1) },
+      };
+    },
+    cur: (c) => ((svc()[s.key] || {}).coverage || 0),
+    prog: (c, g, v) => v / Math.max(0.01, g.target),
+  };
+}
+KINDS.parks = {
+  cat: 'build', cool: 240,
+  score(c) {
+    if (c.pop < 150) return 0;
+    const r = svc().park;
+    const cov = r ? r.coverage || 0 : 0;
+    return cov < 0.5 ? 3.5 + (0.5 - cov) * 4 : 0;
+  },
+  make: (c) => ({ title: 'Build 3 parks near homes', desc: 'Parks and playgrounds raise land value and happiness for everyone nearby.', icon: '🌳', target: counts().parks + 3, base: cnt.parks, unit: 'step', focus: { group: 'parks', tool: 'bld:small_park' }, reward: { mods: { happiness: 0.02 }, days: 120, label: 'Green pride' } }),
+  cur: () => counts().parks,
+  prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
+  text: (g, v) => `${Math.max(0, Math.min(v - g.base, g.target - g.base))} / ${g.target - g.base}`,
+};
+KINDS.trees = {
+  cat: 'build', cool: ONCE,
+  score: (c) => (c.pop >= 80 ? 1.5 : 0),
+  make: (c) => ({ title: 'Plant 30 trees', desc: 'Trees soak up pollution and noise — and make every street prettier.', icon: '🌲', target: trees() + 30, base: trees(), unit: 'step', focus: { tool: 'trees', group: 'terrain' }, reward: { mods: { pollution: -0.06 }, days: 180, label: 'Fresh air' } }),
+  cur: () => trees(),
+  prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
+  text: (g, v) => `${Math.max(0, Math.min(v - g.base, g.target - g.base))} / ${g.target - g.base}`,
+};
+KINDS.policy = {
+  cat: 'build', cool: ONCE,
+  score(c) {
+    if (c.pop < 800) return 0;
+    const P = c.S.policies || {};
+    for (const k in P) if (P[k]) return 0;
+    return VC.POLICIES.some((p) => unlocked(p.key)) ? 2.5 : 0;
+  },
+  make: (c) => ({ title: 'Enact your first policy', desc: 'Open Policies and try one — each slider sets how strongly it applies (and what it costs).', icon: '📜', target: 1, base: 0, unit: 'flag', focus: { panel: 'policies' }, reward: { money: cash(0.6) } }),
+  cur(c) {
+    const P = c.S.policies || {};
+    let n = 0;
+    for (const k in P) if (P[k]) n++;
+    return n;
+  },
+  prog: (c, g, v) => (v > 0 ? 1 : 0),
+};
+KINDS.clean_power = {
+  cat: 'build', cool: 540,
+  score: (c) => (c.pop >= 3000 && counts().power > 0 && cleanShare() < 0.3 && unlocked('wind_turbine') ? 2 : 0),
+  make: (c) => ({ title: 'Go green: 50% clean power', desc: 'Wind, solar and nuclear power keep the lights on without the smog.', icon: '🌬️', target: 0.5, base: cleanShare(), unit: 'pct', focus: { group: 'power', overlay: 'pollution' }, reward: { mods: { happiness: 0.02, landValue: 0.03 }, days: 240, label: 'Green reputation' } }),
+  cur: () => cleanShare(),
+  prog: (c, g, v) => v / g.target,
+};
+/** Unique landmarks the city can afford now, cheapest first. */
+function landmarkPick(c) {
+  let best = null;
+  const mul = (() => { try { return VC.money.costMul(); } catch (e) { return 1; } })();
+  for (const d of VC.CATALOG) {
+    if (d.group !== 'landmarks' || !d.unique || !unlocked(d.key)) continue;
+    if (d.requiresPolicy && !(VC.econ && VC.econ.isPolicyOn && VC.econ.isPolicyOn(d.requiresPolicy))) continue;
+    if (counts().byKey.get(d.key)) continue;
+    const cost = d.cost * mul;
+    if (!c.S.sandbox && cost > c.money * 0.7) continue;
+    if (!best || d.cost < best.cost) best = d;
+  }
+  return best;
+}
+KINDS.landmark = {
+  cat: 'build', cool: 120,
+  score: (c) => (c.pop >= 200 && landmarkPick(c) ? 3 : 0),
+  make(c) {
+    const d = landmarkPick(c);
+    if (!d) return null;
+    return { title: `Build the ${d.name}`, desc: d.desc || 'A landmark your citizens will be proud of.', icon: d.icon || '🏛️', target: 1, base: 0, unit: 'flag', focus: { group: 'landmarks', tool: 'bld:' + d.key }, reward: { mods: { happiness: 0.02, tourism: 0.1 }, days: 180, label: 'Civic pride' }, meta: { key: d.key } };
+  },
+  cur: (c, g) => (counts().built.get(g.meta && g.meta.key) || 0) + (cnt.byKey.get(g.meta && g.meta.key) ? 0.5 : 0),
+  prog: (c, g, v) => (v >= 1 ? 1 : v > 0 ? 0.5 : 0),
+  text: (g, v) => (v >= 1 ? 'Built!' : v > 0 ? 'Under construction…' : 'Not built yet'),
+};
+for (const k in KINDS) KINDS[k].key = k;
+
+/* ------------------------------------------------------------------ */
+/* rewards                                                               */
+/* ------------------------------------------------------------------ */
+const MOD_TXT = {
+  happiness: ['😊', 'happiness', 1], demandR: ['🏠', 'housing demand', 1], demandC: ['🏬', 'shop demand', 1], demandI: ['🏭', 'industry demand', 1],
+  tourism: ['📸', 'tourism', 1], landValue: ['💎', 'land value', 1], pollution: ['🌿', 'pollution', -1], crime: ['🚓', 'crime', -1],
+  traffic: ['🚗', 'traffic', -1], health: ['🩺', 'health', 1], education: ['🎓', 'education', 1],
+};
+/** Short reward label for the HUD: "🎁 $1,200" or "🎁 +2% happiness" (first modifier only). */
+function rewardText(r) {
+  if (!r) return '';
+  const parts = [];
+  if (r.money) parts.push(money(r.money));
+  if (r.mods) {
+    const k = Object.keys(r.mods)[0];
+    const t = MOD_TXT[k] || ['✨', k, 1];
+    const v = r.mods[k];
+    parts.push(`${v > 0 ? '+' : '−'}${Math.round(Math.abs(v) * 100)}% ${t[1]}`); // how long: rewardLong (tooltip)
+  }
+  return parts.length ? '🎁 ' + parts.join(' + ') : '';
+}
+/** Full reward description (tooltips, toasts): "$1,200" / "+2% happiness, +10% tourism for 6 months". */
+function rewardLong(r) {
+  if (!r) return '';
+  const parts = [];
+  if (r.money) parts.push(money(r.money));
+  if (r.mods) {
+    const mods = [];
+    for (const k in r.mods) {
+      const t = MOD_TXT[k] || ['✨', k, 1];
+      const v = r.mods[k];
+      mods.push(`${t[0]} ${v > 0 ? '+' : '−'}${Math.round(Math.abs(v) * 100)}% ${t[1]}`);
+    }
+    parts.push(mods.join(', ') + (r.days ? ` for ${r.days >= 60 ? Math.round(r.days / 30) + ' months' : r.days + ' days'}` : '') + (r.label ? ` (“${r.label}”)` : ''));
+  }
+  return parts.join(' + ');
+}
+/** Temporary modifiers: VC.econ.addTempMod (contract), or the desk module's fallback on older economies. */
+function addTempMod(entry) {
+  const E = VC.econ;
+  if (E && typeof E.addTempMod === 'function') return E.addTempMod(entry);
+  if (VC.desk && typeof VC.desk.addTempMod === 'function') return VC.desk.addTempMod(entry);
+  return null;
+}
+function grant(S, g) {
+  const r = g.reward || {};
+  if (r.money > 0) VC.money.earn(r.money, 'reward');
+  if (r.mods) addTempMod({ id: 'goal:' + g.id, source: 'goal', label: r.label || g.title, mods: Object.assign({}, r.mods), until: S.time.day + (r.days || 90) });
+}
+
+/* ------------------------------------------------------------------ */
+/* state                                                                 */
+/* ------------------------------------------------------------------ */
+function ensure(S) {
+  let G = S.goals;
+  if (!G || typeof G !== 'object' || Array.isArray(G)) G = S.goals = {};
+  if (!Array.isArray(G.active)) G.active = [];
+  if (!Array.isArray(G.done)) G.done = [];
+  if (!Array.isArray(G.log)) G.log = [];
+  if (!G.cool || typeof G.cool !== 'object') G.cool = {};
+  if (!(G.seq >= 0)) G.seq = 0;
+  if (!(G.count >= 0)) G.count = 0;
+  if (!isFinite(G.next)) G.next = S.time.day + FIRST_DAYS;
+  G.v = 1;
+  // drop goals of unknown kinds (older / newer versions) and repair fields the HUD relies on
+  G.active = G.active.filter((g) => g && typeof g === 'object' && KINDS[g.kind]);
+  for (const g of G.active) {
+    if (!isFinite(g.progress)) g.progress = 0;
+    if (!g.reward || typeof g.reward !== 'object') g.reward = {};
+    if (!g.reward.text) g.reward.text = rewardText(g.reward);
+    if (!g.reward.long) g.reward.long = rewardLong(g.reward);
+    if (!g.focus || typeof g.focus !== 'object') g.focus = {};
+    if (!g.cat) g.cat = KINDS[g.kind].cat;
+  }
+  return G;
+}
+const live = (S) => !!(S && !S.demo && S.goals);
+
+function textOf(K, g, v) {
+  if (K.text) return K.text(g, v);
+  switch (g.unit) {
+    case 'num': return `${num(v)} / ${num(g.target)}`;
+    case 'money': return `${money(v)} / ${money(g.target)}`;
+    case 'pct': return `${pct(v)} / ${pct(g.target)}`;
+    case 'pctdown': return `${pct(v)} → ${pct(g.target)}`;
+    case 'left': return `${num(v)} left`;
+    case 'months': return `${v} / ${g.target} months`;
+    case 'step': return `${v} / ${g.target}`;
+    case 'flag': return v >= 1 ? 'Done!' : 'Not yet';
+    default: return '';
+  }
+}
+/** Recomputes progress of every open goal; completes the ones that reached 1. */
+function evaluate(S) {
+  const G = S.goals;
+  prep(S);
+  for (const g of G.active) {
+    if (g.done) continue;
+    const K = KINDS[g.kind];
+    let v = 0, p = 0;
+    try {
+      v = K.cur(cx, g);
+      p = K.prog(cx, g, v);
+    } catch (e) { continue; }
+    if (!isFinite(p)) p = 0;
+    g.cur = typeof v === 'number' && isFinite(v) ? Math.round(v * 1000) / 1000 : 0;
+    g.progress = clamp01(p);
+    try { g.text = textOf(K, g, v); } catch (e) { g.text = ''; }
+    if (p >= 1) complete(S, g);
+  }
+  lastEvalDay = S.time.day;
+  dirty = false;
+}
+function complete(S, g) {
+  g.done = true;
+  g.progress = 1;
+  g.doneDay = S.time.day;
+  const G = S.goals;
+  G.count++;
+  G.done.push(g.id);
+  if (G.done.length > DONE_CAP) G.done.splice(0, G.done.length - DONE_CAP);
+  G.log.unshift({ id: g.id, kind: g.kind, title: g.title, icon: g.icon, day: S.time.day });
+  if (G.log.length > LOG_CAP) G.log.length = LOG_CAP;
+  const K = KINDS[g.kind];
+  G.cool[g.kind] = S.time.day + ((K && K.cool) || 0);
+  VC.bus.emit('goalDone', { goal: g });
+  VC.bus.emit('goalsChanged', G.active);
+}
+/** Adds the most relevant new goal (or `forceKind`). Returns the goal or null. */
+function generate(S, forceKind) {
+  const G = S.goals;
+  if (G.active.length >= MAX_ACTIVE && !forceKind) return null;
+  prep(S);
+  const day = S.time.day;
+  rnd = M.rng((S.seed ^ Math.imul(day + 7, 2654435761) ^ (G.seq * 97)) >>> 0);
+  const cands = [];
+  if (forceKind) { if (KINDS[forceKind]) cands.push({ K: KINDS[forceKind], s: 1 }); }
+  else {
+    for (const key in KINDS) {
+      const K = KINDS[key];
+      if (G.active.some((g) => g.kind === key)) continue;
+      if ((G.cool[key] || 0) > day) continue;
+      let s = 0;
+      try { s = +K.score(cx) || 0; } catch (e) { s = 0; }
+      if (!(s > 0)) continue;
+      // variety: a second goal of the same category has to be urgent to win
+      if (s < 8 && G.active.some((g) => g.cat === K.cat)) s -= 2.5;
+      cands.push({ K, s: s + rnd() * 1.5 });
+    }
+    cands.sort((a, b) => b.s - a.s);
+  }
+  // best first; a goal that would already be complete is pointless: skip it (and rest that kind a while)
+  for (const { K } of cands) {
+    let f = null;
+    try { f = K.make(cx); } catch (e) { console.error('[goals] make ' + K.key, e); f = null; }
+    if (!f) continue;
+    const g = Object.assign({ id: 'g' + (G.seq + 1), kind: K.key, cat: K.cat, day, progress: 0, cur: 0, text: '', done: false }, f);
+    g.reward = Object.assign({}, g.reward || {});
+    g.reward.text = rewardText(g.reward);
+    g.reward.long = rewardLong(g.reward);
+    g.focus = g.focus || {};
+    try {
+      const v = K.cur(cx, g);
+      const p = K.prog(cx, g, v);
+      if (p >= 1 && !forceKind) { G.cool[K.key] = day + 30; continue; }
+      g.cur = typeof v === 'number' && isFinite(v) ? v : 0;
+      g.progress = clamp01(p);
+      g.text = textOf(K, g, v);
+    } catch (e) { /* keep defaults */ }
+    G.seq++;
+    G.active.push(g);
+    VC.bus.emit('goalsChanged', G.active);
+    return g;
+  }
+  return null;
+}
+function onDay() {
+  const S = S_();
+  if (!live(S) || tutorialOn()) return;
+  const G = S.goals, day = S.time.day;
+  // auto-claim forgotten rewards so the slot frees up
+  for (let i = G.active.length - 1; i >= 0; i--) {
+    const g = G.active[i];
+    if (g.done && day - (g.doneDay || day) >= AUTO_CLAIM_DAYS) claim(g.id, true);
+  }
+  if (G.active.length < MAX_ACTIVE && day >= G.next) {
+    const g = generate(S);
+    G.next = day + (g ? (G.active.length < MAX_ACTIVE ? FILL_DAYS : NEXT_DAYS) : 7);
+  }
+}
+function onMonth() {
+  const S = S_();
+  if (!live(S)) return;
+  for (const g of S.goals.active) {
+    if (g.kind !== 'budget' || g.done) continue;
+    g.meta = g.meta || {};
+    g.meta.streak = (S.stats.net || 0) >= 0 ? (g.meta.streak || 0) + 1 : 0;
+  }
+  dirty = true;
+}
+
+/* ------------------------------------------------------------------ */
+/* API                                                                   */
+/* ------------------------------------------------------------------ */
+function list() {
+  const S = S_();
+  return S && S.goals && Array.isArray(S.goals.active) ? S.goals.active : [];
+}
+/** Grants a completed goal's reward and removes it. silent: no 'goalClaimed' celebration hint. */
+function claim(id, silent) {
+  const S = S_();
+  if (!live(S)) return false;
+  const G = S.goals;
+  const i = G.active.findIndex((g) => g.id === id);
+  if (i < 0 || !G.active[i].done) return false;
+  const g = G.active[i];
+  G.active.splice(i, 1);
+  try { grant(S, g); } catch (e) { console.error('[goals] reward', e); }
+  G.next = Math.max(G.next, S.time.day + NEXT_DAYS);
+  VC.bus.emit('goalClaimed', { goal: g, auto: !!silent });
+  VC.bus.emit('goalsChanged', G.active);
+  return true;
+}
+/** Replaces an open goal with another (its kind cools down for a while). */
+function swap(id) {
+  const S = S_();
+  if (!live(S)) return false;
+  const G = S.goals;
+  const i = G.active.findIndex((g) => g.id === id);
+  if (i < 0 || G.active[i].done) return false;
+  const g = G.active.splice(i, 1)[0];
+  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + 120);
+  const n = generate(S);
+  G.next = S.time.day + (n ? NEXT_DAYS : 2);
+  if (!n) VC.bus.emit('goalsChanged', G.active);
+  return true;
+}
+/** Live "Show me" target: stored focus + a located building / tile for problem goals. */
+function focusOf(id) {
+  const S = S_();
+  const g = list().find((x) => x.id === id);
+  if (!S || !g) return null;
+  const f = Object.assign({}, g.focus || {});
+  const loc = f.locate;
+  delete f.locate;
+  if (loc) {
+    prep(S);
+    let b = null;
+    if (loc === 'unpowered') b = VC.world.get(counts().unpow);
+    else if (loc === 'unwatered') b = VC.world.get(counts().unwat);
+    else if (loc === 'abandoned') b = VC.world.get(counts().aband);
+    if (b) { f.x = b.x + b.w / 2; f.z = b.z + b.d / 2; }
+    else if (loc === 'noaccess') {
+      const F = VC.F;
+      for (let i = 0; i < S.N; i++) {
+        if (S.zone[i] && !S.bld[i] && !(S.flags[i] & F.ACCESS)) { f.x = (i % S.W) + 0.5; f.z = Math.floor(i / S.W) + 0.5; break; }
+      }
+    }
+  }
+  if (g.kind === 'landmark' && g.meta && g.meta.key) {
+    for (const b of S.buildings.values()) if (b.key === g.meta.key) { f.x = b.x + b.w / 2; f.z = b.z + b.d / 2; delete f.tool; break; }
+  }
+  return f;
+}
+
+const Goals = (VC.goals = {
+  KINDS,
+  MAX_ACTIVE,
+  init() {
+    if (inited) return;
+    inited = true;
+    const bus = VC.bus;
+    bus.on('day', () => { try { onDay(); } catch (e) { console.error('[goals] day', e); } });
+    bus.on('month', () => { try { onMonth(); } catch (e) { console.error('[goals] month', e); } });
+    const mark = () => { dirty = true; };
+    for (const ev of ['bldAdd', 'bldRemove', 'built', 'policyChanged', 'budgetChanged', 'flagsUpdated', 'mapsUpdated']) bus.on(ev, mark);
+  },
+  reset(S) {
+    acc = 0;
+    lastEvalDay = -1;
+    dirty = true;
+    if (!S || S.demo) return;
+    ensure(S);
+  },
+  update(dt, rdt) {
+    acc += rdt || 0;
+    if (acc < EVAL_SEC) return;
+    acc = 0;
+    const S = S_();
+    if (!live(S) || tutorialOn()) return;
+    if (!dirty && lastEvalDay === S.time.day) return;
+    if (!S.goals.active.length) { lastEvalDay = S.time.day; dirty = false; return; }
+    evaluate(S);
+  },
+  list,
+  claim: (id) => claim(id, false),
+  swap,
+  focusOf,
+  rewardText,
+  rewardLong,
+  /** Debug: evaluate now and fill every free slot immediately. Returns the active goals. */
+  refresh() {
+    const S = S_();
+    if (!live(S)) return [];
+    evaluate(S);
+    for (let n = 0; n < MAX_ACTIVE && S.goals.active.length < MAX_ACTIVE; n++) if (!generate(S)) break;
+    S.goals.next = S.time.day + NEXT_DAYS;
+    return S.goals.active;
+  },
+  /** Debug: adds a goal of a given kind now (replacing the oldest open goal when full). */
+  add(kind) {
+    const S = S_();
+    if (!live(S) || !KINDS[kind]) return null;
+    const G = S.goals;
+    if (G.active.length >= MAX_ACTIVE) {
+      const i = G.active.findIndex((g) => !g.done);
+      if (i >= 0) G.active.splice(i, 1);
+    }
+    return generate(S, kind);
+  },
+});
+
+/* Lifecycle fallback: join main's module loop when main.js does not list this module. */
+VC.bus.on('boot', () => {
+  const order = VC.MODULE_ORDER;
+  if (!order || order.indexOf('goals') >= 0) return;
+  const at = order.indexOf('advisors');
+  order.splice(at >= 0 ? at + 1 : order.length, 0, 'goals');
+  try { Goals.init(); } catch (e) { console.error('[goals] init', e); }
+});

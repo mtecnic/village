@@ -208,6 +208,32 @@ function modelProgram() {
   return modelProg;
 }
 
+/*
+ * Private VAOs per model mesh (full / LOD): the mesh VBO on locations 0-1 + the shared quad index buffer.
+ * The model's own VAO belongs to the building renderer; never touching it keeps both renderers independent.
+ */
+const vaoMemo = new WeakMap();
+function privateVao(gl, g) {
+  let v = vaoMemo.get(g);
+  if (v) return v;
+  const ib = VC.gfx.quadIndexBuffer(g.quads); // (unbinds any VAO: call before binding ours)
+  v = gl.createVertexArray();
+  gl.bindVertexArray(v);
+  gl.bindBuffer(gl.ARRAY_BUFFER, g.vbo);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.SHORT, false, 8, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribIPointer(1, 2, gl.UNSIGNED_BYTE, 8, 6);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  for (let k = 2; k < 6; k++) {
+    gl.enableVertexAttribArray(k);
+    gl.vertexAttribDivisor(k, 1);
+  }
+  gl.bindVertexArray(null);
+  vaoMemo.set(g, v);
+  return v;
+}
+
 class ModelBatch {
   constructor(cap) {
     this.cap = cap;
@@ -313,21 +339,12 @@ class ModelBatch {
       if (!sl.count) continue;
       const m = sl.model;
       const g = sl.lod ? m.lod : m;
-      if (!g || !g.vao || !g.quads) continue;
-      gl.bindVertexArray(g.vao);
+      if (!g || !g.vbo || !g.quads) continue;
+      gl.bindVertexArray(privateVao(gl, g));
       gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
       const base = sl.offset * 64;
-      for (let k = 0; k < 4; k++) {
-        gl.enableVertexAttribArray(2 + k);
-        gl.vertexAttribPointer(2 + k, 4, gl.FLOAT, false, 64, base + k * 16);
-        gl.vertexAttribDivisor(2 + k, 1);
-      }
+      for (let k = 0; k < 4; k++) gl.vertexAttribPointer(2 + k, 4, gl.FLOAT, false, 64, base + k * 16);
       gl.drawElementsInstanced(gl.TRIANGLES, g.quads * 6, gl.UNSIGNED_INT, 0, sl.count);
-      // leave shared model VAOs clean for other renderers (they only use locations 0-3)
-      gl.disableVertexAttribArray(4);
-      gl.disableVertexAttribArray(5);
-      gl.vertexAttribDivisor(4, 0);
-      gl.vertexAttribDivisor(5, 0);
     }
     gl.bindVertexArray(null);
   }

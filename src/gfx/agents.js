@@ -35,22 +35,25 @@ const DX = [1, -1, 0, 0], DZ = [0, 0, 1, -1], OPP = [1, 0, 3, 2];
 const RX = [0, 0, -1, 1], RZ = [1, -1, 0, 0]; // right-hand side of travel direction d
 const RIGHT_OF = [2, 3, 1, 0], LEFT_OF = [3, 2, 0, 1];
 const POP = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
-const LANE = [[0.18, 0.18], [0.18, 0.18], [0.125, 0.31], [0.14, 0.34]]; // [road type][lane 0 inner, 1 outer]
+// lane centre offsets from the tile centre line [road type][lane 0 inner, 1 outer]; streets have one lane
+// per direction between the sidewalks, avenues two beside a thin median, highways two between barriers
+const LANE = [[0.18, 0.18], [0.18, 0.18], [0.12, 0.32], [0.13, 0.33]];
 const ROAD_SPEED = [1, 1, 1.3, 2.1];
 const GAME_SPEED = [0, 1, 1.5, 2.2]; // vehicle speed multiplier per sim speed setting (visual, not 1:1)
 const CYCLE = 11, GREEN = 4.8, YELLOW = 0.7; // signal timing (agent seconds)
 
-/* vehicle kinds */
+/* vehicle kinds: v = speed factor, w = rendered width in world units (models are scaled to it so any
+   authored vehicle fits the lanes; 0.2 = lane spacing on avenues) */
 const KIND = [
-  { key: 'car', v: 1.0, w: 0.25 },
-  { key: 'taxi', v: 1.05, w: 0.25 },
-  { key: 'bus', v: 0.8, w: 0.3 },
-  { key: 'truck', v: 0.8, w: 0.3 },
-  { key: 'police_car', v: 1.05, w: 0.25 },
-  { key: 'firetruck', v: 0.95, w: 0.3 },
-  { key: 'ambulance', v: 1.0, w: 0.28 },
-  { key: 'garbage_truck', v: 0.7, w: 0.3 },
-  { key: 'tanker', v: 0.8, w: 0.3 },
+  { key: 'car', v: 1.0, w: 0.2 },
+  { key: 'taxi', v: 1.05, w: 0.2 },
+  { key: 'bus', v: 0.8, w: 0.24 },
+  { key: 'truck', v: 0.8, w: 0.24 },
+  { key: 'police_car', v: 1.05, w: 0.2 },
+  { key: 'firetruck', v: 0.95, w: 0.24 },
+  { key: 'ambulance', v: 1.0, w: 0.22 },
+  { key: 'garbage_truck', v: 0.7, w: 0.24 },
+  { key: 'tanker', v: 0.8, w: 0.24 },
 ];
 const K = { car: 0, taxi: 1, bus: 2, truck: 3, police: 4, fire: 5, ambulance: 6, garbage: 7, tanker: 8 };
 const SERVICE = {

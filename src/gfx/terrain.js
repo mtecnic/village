@@ -739,17 +739,16 @@ function buildPlinth(st) {
 /* ------------------------------------------------------------------ */
 const PL = new Float32Array(24);
 const visible = [];
+/** Frustum planes (a, b, c, d) x 6 from a column-major view-projection matrix (Gribb-Hartmann). */
 function extractPlanes(m) {
-  const r = [
-    m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12],
-    m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12],
-    m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13],
-    m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13],
-    m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14],
-    m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14],
-  ];
-  for (let i = 0; i < 24; i++) PL[i] = r[i];
+  for (let r = 0, o = 0; r < 3; r++, o += 8) {
+    for (let k = 0; k < 4; k++) {
+      PL[o + k] = m[3 + k * 4] + m[r + k * 4];
+      PL[o + 4 + k] = m[3 + k * 4] - m[r + k * 4];
+    }
+  }
 }
+const byDist = (a, b) => a.dist - b.dist;
 function boxVisible(x0, y0, z0, x1, y1, z1) {
   for (let p = 0; p < 24; p += 4) {
     const a = PL[p], b = PL[p + 1], c = PL[p + 2], d = PL[p + 3];
@@ -780,7 +779,9 @@ function draw(ctx, shadow) {
     gl.bindVertexArray(null);
     return;
   }
-  visible.sort((a, b) => a.dist - b.dist); // front to back for early-z
+  visible.sort(byDist); // front to back for early-z
+  // tiny structures (railings, barriers, piers) are sub-pixel far away: skip them beyond this distance²
+  const far2 = Math.pow(Math.max(90, VC.gfx.quality().lodDist * 2.2), 2);
   const f = features(ctx.env);
   if (T._feat !== f) {
     T._feat = f;
@@ -791,7 +792,7 @@ function draw(ctx, shadow) {
     T.progs[g].use();
     for (const c of visible) {
       const n = c.q[g];
-      if (!n) continue;
+      if (!n || (g === 2 && c.dist > far2)) continue;
       let q0 = 0;
       for (let k = 0; k < g; k++) q0 += c.q[k];
       gl.bindVertexArray(c.vao);

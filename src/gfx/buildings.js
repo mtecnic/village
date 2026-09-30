@@ -1654,7 +1654,11 @@ void main(){
   }
 #endif
   vA = vec4(t1.y, t1.z, t1.w, t2.x);
+#if KIND == 1
   vB = vec4(t2.y, t3.w, cut, t2.w);
+#else
+  vB = vec4(t2.y, t3.w, cut, pt); // buildings / props: seconds since the last pop
+#endif
 #endif
   vWp = wp;
   vVox = v - nl * 0.5;
@@ -1713,6 +1717,7 @@ void main(){
       alb = mix(vec3(0.3, 0.3, 0.29), vec3(0.42, 0.2, 0.08), grid);
       em += vec3(1.0, 0.5, 0.15) * grid * (0.35 + 0.25 * sin(TIME * 4.0 + seed * 30.0));
       win = false; glass = false; metal = false;
+      mat &= ~(4u | 32u | 64u); // unbuilt neon / beacons / pools collapsed onto the cap do not glow
     } else {
       float below = cut - vVox.y;
       if (abs(vNl.y) < 0.5 && below < 6.0) {
@@ -1799,7 +1804,7 @@ void main(){
   // ---------------- abandoned ----------------
   if (aband) {
     float l = dot(alb, vec3(0.3, 0.59, 0.11));
-    alb = mix(alb, vec3(l) * vec3(1.0, 0.93, 0.8), 0.72) * 0.6;
+    alb = mix(alb, vec3(l) * vec3(1.0, 0.93, 0.8), 0.72) * 0.72;
     float streak = hash12(vec2(floor(vVox.x + vVox.z * 0.73), seed * 17.0));
     alb *= 1.0 - 0.4 * streak * smoothstep(0.3, 1.0, fract(vVox.y * 0.13 + streak));
   }
@@ -1808,11 +1813,21 @@ void main(){
     float fire = clamp(vB.x, 0.0, 1.0);
     float chH = vB.y * (1.0 - fire * 0.92);
     float ch = smoothstep(chH - 3.0, chH + 1.0, vVox.y);
-    alb = mix(alb, vec3(0.025, 0.02, 0.018), ch);
+    alb = mix(alb, vec3(0.045, 0.036, 0.03) * (0.7 + 0.6 * hash13(vc * 0.5 + seed)), ch);
     refl *= 1.0 - ch;
     float flick = 0.55 + 0.45 * sin(TIME * 11.0 + vVox.y * 0.8 + seed * 40.0) * sin(TIME * 6.7 + vVox.x * 0.6 + vVox.z * 0.4);
     vec3 fc = vec3(1.0, 0.36, 0.06);
-    if (win) em = fc * (2.2 + 2.6 * flick) * (0.4 + fire) * (1.0 - ch * 0.6);
+    if (win) {
+      // every window burns on its own: flickering at its own rate, some black with smoke
+      vec3 fcell = vec3(floor(vVox.x * 0.5), floor(vVox.y / 3.0), floor(vVox.z * 0.5));
+      float hw = hash13(fcell + seed * 71.0);
+      float fl2 = 0.55 + 0.45 * sin(TIME * (6.0 + hw * 7.0) + hw * 40.0);
+      vec2 fu = abs(vNl.x) > 0.5 ? vVox.zy : vVox.xy;
+      vec2 fm = abs(fract(fu) - 0.5);
+      float frame = 0.4 + 0.6 * (1.0 - smoothstep(0.36, 0.47, max(fm.x, fm.y)));
+      em = fc * (0.5 + 1.3 * fl2) * step(0.22, hw) * (0.45 + fire) * frame * (1.0 - ch * 0.65);
+      alb *= 0.4;
+    }
     else em += fc * (0.12 + 0.22 * flick) * fire * (1.0 - ch);
     em += fc * step(0.9, hash13(vc + floor(TIME * 3.0 + seed * 10.0))) * ch * 1.6;
   }
@@ -1821,6 +1836,14 @@ void main(){
   if ((mat & 4u) != 0u) em += srgb2lin(pe.rgb) * (aband ? 0.0 : unpow ? 0.25 : mix(1.1, 2.4, night));
   if ((mat & 64u) != 0u) em += srgb2lin(pe.rgb) * 3.4 * night * (aband || unpow ? 0.0 : 1.0);
   if ((fl & 2048u) != 0u) { alb *= vec3(0.85, 1.0, 0.9); em += vec3(0.2, 1.0, 0.6) * 0.25 * pow(1.0 - ndv, 2.0); }
+#if KIND == 0
+  // "ding!": a bright sweep runs up the building when it pops (completed / levelled up)
+  if (vB.w < 1.4) {
+    float k = vB.w / 1.4;
+    float band = exp(-pow((vVox.y / max(vB.y, 1.0) - k * 1.3) * 7.0, 2.0));
+    em += vec3(1.0, 0.92, 0.7) * band * (1.0 - k) * (0.45 + 0.6 * pow(1.0 - ndv, 2.0));
+  }
+#endif
   // ---------------- selection / hover ----------------
   float sel = id > 0.5 && abs(id - uBG.y) < 0.5 ? 1.0 : 0.0;
   float hov = id > 0.5 && abs(id - uBG.z) < 0.5 ? 1.0 : 0.0;

@@ -171,19 +171,18 @@ VC.models.define('wind_turbine_rotor', {
           if (t < 1 || t > ROTOR_R) continue;
           // chord: wide near the root, tapering to the tip, slight airfoil offset
           const hw = t < 6 ? 0.75 + t * 0.09 : 1.3 - ((t - 6) / (ROTOR_R - 6)) * 0.75;
-          if (q <= hw) g.set(x, y, 0, t > ROTOR_R - 2.5 ? P.RED : P.WHITE);
+          if (q <= hw) g.set(x, y, 1, t > ROTOR_R - 2.5 ? P.RED : P.WHITE);
         }
     }
-    g.box(c - 1, c - 1, 0, 2, 2, 2, P.WHITE);
-    g.box(c - 2, c - 1, 0, 1, 2, 1, P.WHITE); g.box(c + 1, c - 1, 0, 1, 2, 1, P.WHITE);
-    g.box(c - 1, c - 2, 0, 2, 1, 1, P.WHITE); g.box(c - 1, c + 1, 0, 2, 1, 1, P.WHITE);
+    // hub: z = 0 faces the nacelle, blades at z = 1, nose cone at z = 2 (front)
+    g.box(c - 2, c - 2, 0, 4, 4, 2, P.WHITE);
     g.box(c - 1, c - 1, 2, 2, 2, 1, P.CONCRETE_L);
     return g;
   },
 });
 VC.models.define('wind_turbine', {
   variants: 2,
-  parts: [{ model: 'wind_turbine_rotor', pivot: [4, HUB_Y, 7], partPivot: [ROTOR_R + 1, ROTOR_R + 1, 0], axis: 'z', speed: 1.8, anim: 'wind' }],
+  parts: [{ model: 'wind_turbine_rotor', pivot: [4, HUB_Y, 5], partPivot: [ROTOR_R + 1, ROTOR_R + 1, 0], axis: 'z', speed: 1.8, anim: 'wind' }],
   gen(rng, v) {
     const g = new VC.VoxelGrid(8, HUB_Y + 6, 8);
     g.cyl(4, 0, 4, 3.6, 1, P.CONCRETE_L);
@@ -198,12 +197,12 @@ VC.models.define('wind_turbine', {
       g.cyl(4, y, 4, r, 1, col);
     }
     K.door(g, 's', 3, 1, 5, 2, 2, P.GREY);
-    // nacelle: 4x4 box from the tower top toward the rotor (+Z)
-    g.box(2, HUB_Y - 2, 1, 4, 4, 6, P.WHITE);
-    g.box(2, HUB_Y + 1, 1, 4, 1, 2, P.CONCRETE_L);
-    g.box(3, HUB_Y + 2, 1, 1, 1, 1, P.METAL_D);
-    g.box(2, HUB_Y - 2, 1, 4, 1, 1, P.CONCRETE);
-    K.beacon(g, 4, HUB_Y + 2, 2);
+    // nacelle: 4x4 box on the tower top, the rotor (a part) mounts on its front face (z = 5)
+    g.box(2, HUB_Y - 2, 0, 4, 4, 5, P.WHITE);
+    g.box(2, HUB_Y + 1, 0, 4, 1, 2, P.CONCRETE_L);
+    g.box(3, HUB_Y + 2, 0, 1, 1, 1, P.METAL_D);
+    g.box(2, HUB_Y - 2, 0, 4, 1, 1, P.CONCRETE);
+    K.beacon(g, 4, HUB_Y + 2, 1);
     return g;
   },
 });

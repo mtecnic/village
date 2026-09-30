@@ -29,8 +29,24 @@
  * per sim day / building version, the final numbers per frame + settings change), so dragging a
  * slider costs microseconds.
  *
+ * POLICY LEVELS: S.policies[key] is a NUMBER level in (0, 1] (absent = off; old saves stored true,
+ * migrated to 1 in reset()). VC.POLICY defs with `levels: false` are binary (level 0 or 1); all
+ * others are sliders. Effects (computeMods) and the monthly cost (policyCost) scale linearly with
+ * the level; billing accumulates the level per day, so a month at 50% is billed half. Readers
+ * use isPolicyOn(key) (level > 0), policyLevel(key) (0..1) and setPolicy(key, level|bool). Plain
+ * truthiness (`if (S.policies.gambling)`) still works because a level > 0 is truthy.
+ * Bus 'policyChanged' {key, level, prev}; the payload's toString() returns the key so listeners
+ * written for the old string payload (VC.POLICY[ev], 'pol_' + ev) keep working.
+ *
+ * TEMPORARY MODIFIERS: S.tempMods = [{id, source, label, icon?, mods:{modKey: additive}, until: day,
+ * since}] — Mayor's Desk decisions, goal rewards, …  computeMods() adds every active entry
+ * (day < until) on top of the policy modifiers and prunes expired ones; a daily check recomputes
+ * S.mods (+ 'budgetChanged') the day one runs out. API: addTempMod({id?, source, label, icon?, mods,
+ * until | days}) -> entry | null (same id replaces), removeTempMod(id) -> bool, tempMods() -> active list.
+ *
  * Persistent bookkeeping is kept in S.econ (plain JSON, saved with the state).
- * Extra API: upkeepOf(key|building) (actual $/month of one building), wageMul(), taxBilled().
+ * Extra API: upkeepOf(key|building) (actual $/month of one building), wageMul(), taxBilled(),
+ * policyEffects(key, level?) -> {modKey: value at that level}, policyCost(key, level?).
  */
 const M = VC.M, C = VC.C;
 
@@ -69,6 +85,7 @@ const BANKRUPT_MONTHS = 6;
 const STRIKE_FUNDING = 0.5; // funding below this for STRIKE_MONTHS -> department strikes
 const STRIKE_MONTHS = 3;
 const STRIKE_MUL = 0.7; // effectiveness multiplier while on strike
+const TEMP_MAX = 32; // cap on simultaneous temporary modifiers (oldest dropped)
 
 /** Ledger categories that make up the operating budget (shown as monthly income / expenses). */
 const OPER_IN = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income', 'grant'];
@@ -137,8 +154,9 @@ function costMul(S) {
 }
 function population(S) {
   if (S.stats.pop > 0) return S.stats.pop;
-  const b = agg.S === S ? agg.base.R : null;
-  return b ? b[0] + b[1] + b[2] : 0;
+  // before the sim's first census: count residents directly (scan is cached per day / change)
+  const b = scan(S).base.R;
+  return b[0] + b[1] + b[2];
 }
 /** City wage level for service departments (1 in small towns, rising toward 1 + WAGE_MAX). */
 function wageMul(S) {
@@ -154,6 +172,53 @@ function grantOf(S) {
   const mul = d && typeof d.grantMul === 'number' ? d.grantMul : 1;
   const g = GRANT_MAX * mul * p * Math.exp(1 - p);
   return g >= 5 ? g : 0;
+}
+
+/* ---------------- policy levels ---------------- */
+/** Stored policy value -> level 0..1 (true from old saves = 1; junk = 0). */
+function lvlOf(v) {
+  if (v === true) return 1;
+  const n = +v;
+  return n > 0 ? (n < 1 ? n : 1) : 0;
+}
+/** Requested level (bool / number) -> stored level for a policy def: 1 % steps, binary defs 0 or 1. */
+function normLevel(def, v) {
+  const n = v === true ? 1 : typeof v === 'number' ? v : +v || 0;
+  if (!(n > 0)) return 0;
+  if (def && def.levels === false) return 1;
+  return Math.round(Math.min(1, n) * 100) / 100;
+}
+function levelOf(S, key) {
+  return S && S.policies ? lvlOf(S.policies[key]) : 0;
+}
+/** Monthly $ of a policy at 100 % (flat + per capita, × difficulty), unrounded. */
+function fullCost(S, key) {
+  const def = VC.POLICY[key];
+  if (!def) return 0;
+  return ((def.cost || 0) + (def.costPerCap || 0) * population(S)) * costMul(S);
+}
+/** One 'policyChanged' per change: {key, level, prev}; toString() -> key for legacy listeners. */
+function emitPolicy(key, level, prev) {
+  const ev = { key, level, prev };
+  Object.defineProperty(ev, 'toString', { value: () => key });
+  VC.bus.emit('policyChanged', ev);
+}
+
+/* ---------------- temporary modifiers ---------------- */
+function tempList(S) {
+  if (!Array.isArray(S.tempMods)) S.tempMods = [];
+  return S.tempMods;
+}
+/** An entry is active until its `until` day (no finite `until` = until removed). */
+const tempActive = (t, day) => !!(t && t.mods && typeof t.mods === 'object' && !(day >= t.until));
+/** Drops expired / malformed entries in place. Returns true when something was removed. */
+function pruneTemp(S) {
+  const a = tempList(S), day = S.time.day;
+  let j = 0;
+  for (let i = 0; i < a.length; i++) if (tempActive(a[i], day)) a[j++] = a[i];
+  const removed = j < a.length;
+  a.length = j;
+  return removed;
 }
 
 /** Rescans buildings (at most once per sim day / building change / half second). */
@@ -203,7 +268,7 @@ function scan(S, force) {
 function tourismPoints(S, a) {
   if (S.stats.tourism > 0) return S.stats.tourism;
   let pts = a.tourism;
-  for (const t of a.tourismReq) if (S.policies[t.policy]) pts += t.pts;
+  for (const t of a.tourismReq) pts += t.pts * levelOf(S, t.policy);
   return pts * Math.max(0, 1 + (S.mods.tourism || 0));
 }
 
@@ -225,7 +290,20 @@ function accumulate() {
     if (t) for (let w = 0; w < 3; w++) at[w] += +t[w] || 0;
   }
   for (const d of VC.DEPARTMENTS) a.fund[d.key] = (a.fund[d.key] || 0) + funding(d.key);
-  for (const k in S.policies) if (S.policies[k]) a.pol[k] = (a.pol[k] || 0) + 1;
+  // level-days: a month at 60 % bills 60 % of the policy's cost
+  for (const k in S.policies) {
+    const l = lvlOf(S.policies[k]);
+    if (l > 0) a.pol[k] = (a.pol[k] || 0) + l;
+  }
+}
+/** Daily: a temporary modifier ran out -> rebuild S.mods once. */
+function tempTick() {
+  const S = S_();
+  if (!S || !S.tempMods || !S.tempMods.length) return;
+  if (!pruneTemp(S)) return;
+  VC.econ.computeMods();
+  rev++;
+  VC.bus.emit('budgetChanged');
 }
 
 /**
@@ -240,7 +318,8 @@ function compute(S, force, billing) {
   const wage = wageMul(S);
   const acc = billing && S.econ && S.econ.acc && S.econ.acc.days > 0 ? S.econ.acc : null;
   const fundOf = (d) => (acc && acc.fund[d] != null ? acc.fund[d] / acc.days : funding(d));
-  const polShare = (k) => (acc ? Math.min(1, (acc.pol[k] || 0) / acc.days) : S.policies[k] ? 1 : 0);
+  // average policy level over the billed days (billing) or the current level (forecast)
+  const polShare = (k) => (acc ? Math.min(1, (acc.pol[k] || 0) / acc.days) : levelOf(S, k));
   const income = {}, expenses = {};
   const taxDetail = { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] };
   const taxRates = { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] };
@@ -291,7 +370,7 @@ function compute(S, force, billing) {
   for (const k of polKeys) {
     const share = polShare(k);
     if (!(share > 0) || !VC.POLICY[k]) continue;
-    const v = VC.econ.policyCost(k) * share;
+    const v = fullCost(S, k) * share; // same rounding as policyCost(key, level)
     policies[k] = Math.round(v);
     pc += v;
   }
@@ -448,7 +527,7 @@ function monthly() {
     e.lowFund[d.key] = funding(d.key) < STRIKE_FUNDING ? was + 1 : 0;
     if (e.lowFund[d.key] === STRIKE_MONTHS) {
       // the advisors post the strike card (rule strike_<dept>); toast only when they are missing
-      if (!advisorsOn()) toast(`<b>${d.name}</b> workers are on strike over budget cuts!`, 'bad', '🪧');
+      if (!advisorsOn()) toast(`<b>${d.name}</b> workers are on strike over budget cuts!`, 'bad', '📢');
       VC.bus.emit('econ', { type: 'strike', dept: d.key, name: d.name });
       rev++;
     } else if (was >= STRIKE_MONTHS && !e.lowFund[d.key]) {
@@ -533,7 +612,7 @@ function takeover(S, e) {
   for (const d of VC.DEPARTMENTS) if (funding(d.key) > TAKEOVER_FUNDING) S.budget[d.key] = TAKEOVER_FUNDING;
   const repealed = [];
   for (const k of Object.keys(S.policies)) {
-    if (S.policies[k] && VC.econ.policyCost(k) > 0) { delete S.policies[k]; repealed.push(k); }
+    if (levelOf(S, k) > 0 && fullCost(S, k) > 0) { delete S.policies[k]; repealed.push(k); }
   }
   VC.econ.computeMods();
   rev++;
@@ -552,14 +631,15 @@ function takeover(S, e) {
 VC.econ = {
   TAX_K, WEALTH_MUL, TOURISM_K, CATEGORIES, HISTORY_KEYS, LOAN_TIERS,
   WEALTH_NAMES: ['Low', 'Mid', 'High'],
-  STRIKE_FUNDING, STRIKE_MONTHS,
+  STRIKE_FUNDING, STRIKE_MONTHS, STRIKE_MUL,
+  WAGE_DEPTS, // departments that pay city wages (wageMul)
 
   init() {
     VC.bus.on('month', () => {
       try { monthly(); } catch (err) { console.error('[econ] monthly failed', err); VC.errors && VC.errors.push('econ: ' + err.message); }
     });
     VC.bus.on('day', () => {
-      try { accumulate(); } catch (err) { console.error('[econ] day failed', err); }
+      try { accumulate(); tempTick(); } catch (err) { console.error('[econ] day failed', err); }
     });
     VC.bus.on('roadChange', () => { agg.roadsDirty = true; });
     VC.bus.on('policyChanged', () => { rev++; });
@@ -574,8 +654,21 @@ VC.econ = {
     if (!e.acc || !e.acc.tax || !e.acc.fund || !e.acc.pol || !(e.acc.days >= 0)) e.acc = newAcc();
     for (const d of VC.DEPARTMENTS) if (S.budget[d.key] == null) S.budget[d.key] = 1;
     for (const z of ZONES) if (!S.tax[z]) S.tax[z] = [9, 9, 9];
-    // drop policies that no longer exist (old saves), then rebuild modifiers
-    for (const k in S.policies) if (!VC.POLICY[k] || !S.policies[k]) delete S.policies[k];
+    // policies: drop ones that no longer exist, migrate old boolean saves (true -> level 1),
+    // normalize levels (binary policies 0/1); then temp modifiers; then rebuild S.mods
+    if (!S.policies || typeof S.policies !== 'object' || Array.isArray(S.policies)) S.policies = {};
+    for (const k of Object.keys(S.policies)) {
+      const def = VC.POLICY[k];
+      const l = def ? normLevel(def, lvlOf(S.policies[k])) : 0;
+      if (l > 0) S.policies[k] = l;
+      else delete S.policies[k];
+    }
+    const tm = tempList(S);
+    for (let i = tm.length - 1; i >= 0; i--) {
+      const t = tm[i];
+      if (!t || typeof t !== 'object' || !t.mods || typeof t.mods !== 'object') tm.splice(i, 1);
+      else if (t.id == null) t.id = 'tm' + (e.tempSeq = (e.tempSeq || 0) + 1);
+    }
     VC.econ.computeMods();
     if (!S.history.pop || !S.history.pop.length) sampleHistory(S); // first point so charts aren't empty
   },
@@ -665,56 +758,155 @@ VC.econ = {
   },
 
   /* ---------------- policies ---------------- */
-  /** Enables/disables a policy. Returns true on success (or if already in that state). */
-  setPolicy(key, on) {
+  /**
+   * Sets a policy's level: true / 1 = full, false / 0 = repeal, a number in (0,1) = partial (binary
+   * `levels:false` policies round any level > 0 up to 1). Raising the level needs the policy
+   * unlocked and one month's cost at the new level in the bank (VC.money.spend raises the single
+   * 'noMoney' notification); lowering / repealing always works. Returns true on success (or when
+   * already at that level). Emits 'policyChanged' {key, level, prev} once per actual change.
+   */
+  setPolicy(key, level) {
     const S = S_();
     const def = VC.POLICY[key];
     if (!S || !def) return false;
-    on = !!on;
-    if (!!S.policies[key] === on) return true;
-    if (on) {
+    const want = normLevel(def, level);
+    const cur = levelOf(S, key);
+    if (want === cur) {
+      if (want > 0 && S.policies[key] !== want) S.policies[key] = want; // legacy `true` -> number, silently
+      return true;
+    }
+    if (want > cur) {
       if (!VC.world.isUnlocked(key)) {
         toast(`${def.name} unlocks at ${VC.fmt.num(def.unlock)} citizens.`, 'warn', '🔒');
         return false;
       }
-      const cost = VC.econ.policyCost(key);
+      const cost = Math.round(fullCost(S, key) * want);
       if (!S.sandbox && cost > 0 && !VC.money.canAfford(cost)) {
-        // need at least one month's cost in the bank. VC.money.spend owns the one 'noMoney'
-        // notification: it fails here (unaffordable, not forced) and charges nothing.
+        // need at least one month's cost (at the new level) in the bank. VC.money.spend owns the
+        // one 'noMoney' notification: it fails here (unaffordable, not forced) and charges nothing.
         VC.money.spend(cost, 'policy');
         return false;
       }
-      S.policies[key] = true;
-    } else delete S.policies[key];
+    }
+    if (want > 0) S.policies[key] = want;
+    else delete S.policies[key];
     VC.econ.computeMods();
     rev++;
-    VC.bus.emit('policyChanged', key);
+    emitPolicy(key, want, cur);
     return true;
   },
+  /** True when the policy is active at any level. */
   isPolicyOn(key) {
-    const S = S_();
-    return !!(S && S.policies[key]);
+    return levelOf(S_(), key) > 0;
   },
-  /** Monthly $ cost of a policy at the current population (flat + per capita, × difficulty). */
-  policyCost(key) {
+  /** Current level of a policy, 0 (off) .. 1 (full). */
+  policyLevel(key) {
+    return levelOf(S_(), key);
+  },
+  /** True for policies with an intensity slider (false for binary `levels:false` ones). */
+  policyHasLevels(key) {
+    const def = VC.POLICY[key];
+    return !!def && def.levels !== false;
+  },
+  /**
+   * Monthly $ cost of a policy at the current population (flat + per capita, × difficulty) at
+   * `level` (0..1). level omitted: the policy's current level, or 100 % when it is off.
+   */
+  policyCost(key, level) {
     const S = S_();
     const def = VC.POLICY[key];
     if (!S || !def) return 0;
-    return Math.round(((def.cost || 0) + (def.costPerCap || 0) * population(S)) * costMul(S));
+    const l = level == null ? levelOf(S, key) || 1 : normLevel(def, level);
+    return Math.round(fullCost(S, key) * l);
   },
-  /** Recomputes S.mods from active policies (additive, clamped). */
+  /** Modifier effects of a policy at `level` (omitted: current level, or 100 % when off): {modKey: value}. */
+  policyEffects(key, level) {
+    const S = S_();
+    const def = VC.POLICY[key];
+    const out = {};
+    if (!def) return out;
+    const l = level == null ? levelOf(S, key) || 1 : normLevel(def, level);
+    for (const e in def.effects || {}) out[e] = Math.round(def.effects[e] * l * 1000) / 1000;
+    return out;
+  },
+  /** Recomputes S.mods: Σ policy effects × level + Σ active temporary modifiers (additive, clamped). */
   computeMods() {
     const S = S_();
     if (!S) return;
     const m = S.mods || (S.mods = {});
+    for (const k in m) m[k] = 0; // also clears keys only an expired temp modifier used
     for (const k of VC.MODS) m[k] = 0;
     for (const k in S.policies) {
       const def = VC.POLICY[k];
-      if (!def || !S.policies[k]) continue;
-      for (const e in def.effects) m[e] = (m[e] || 0) + def.effects[e];
+      const l = lvlOf(S.policies[k]);
+      if (!def || !(l > 0)) continue;
+      for (const e in def.effects) m[e] = (m[e] || 0) + def.effects[e] * l;
+    }
+    if (S.time) pruneTemp(S);
+    for (const t of tempList(S)) {
+      for (const e in t.mods) {
+        const v = +t.mods[e];
+        if (isFinite(v)) m[e] = (m[e] || 0) + v;
+      }
     }
     for (const k in m) m[k] = Math.round(M.clamp(m[k], -0.95, 2) * 1000) / 1000;
     return m;
+  },
+
+  /* ---------------- temporary modifiers ---------------- */
+  /**
+   * Adds (or replaces, same id) a temporary modifier: {id?, source, label, icon?, mods:{modKey: v},
+   * until (day index) | days}. Returns the stored entry, or null when it has no effect / is already over.
+   */
+  addTempMod(entry) {
+    const S = S_();
+    if (!S || !entry || typeof entry !== 'object') return null;
+    const e = ensureEcon(S);
+    const mods = {};
+    let any = false;
+    for (const k in entry.mods || {}) {
+      const v = +entry.mods[k];
+      if (isFinite(v) && v !== 0) { mods[k] = Math.round(v * 1000) / 1000; any = true; }
+    }
+    const day = S.time.day;
+    let until = +entry.until;
+    if (!isFinite(until)) until = +entry.days > 0 ? day + Math.round(+entry.days) : NaN;
+    if (!any || !(until > day)) return null;
+    const t = {
+      id: entry.id != null ? String(entry.id) : 'tm' + (e.tempSeq = (e.tempSeq || 0) + 1),
+      source: String(entry.source || ''), label: String(entry.label || ''),
+      mods, until: Math.round(until), since: day,
+    };
+    if (entry.icon) t.icon = String(entry.icon);
+    const a = tempList(S);
+    const i = a.findIndex((x) => x && x.id === t.id);
+    if (i >= 0) a[i] = t;
+    else a.push(t);
+    if (a.length > TEMP_MAX) a.splice(0, a.length - TEMP_MAX);
+    VC.econ.computeMods();
+    rev++;
+    VC.bus.emit('budgetChanged');
+    return t;
+  },
+  /** Removes a temporary modifier by id. Returns true when one was removed. */
+  removeTempMod(id) {
+    const S = S_();
+    if (!S || !Array.isArray(S.tempMods)) return false;
+    const a = S.tempMods;
+    const i = a.findIndex((x) => x && x.id === String(id));
+    if (i < 0) return false;
+    a.splice(i, 1);
+    VC.econ.computeMods();
+    rev++;
+    VC.bus.emit('budgetChanged');
+    return true;
+  },
+  /** Active temporary modifiers (a new array; entries are the stored objects — do not mutate). */
+  tempMods() {
+    const S = S_();
+    if (!S || !Array.isArray(S.tempMods)) return [];
+    const day = S.time.day;
+    return S.tempMods.filter((t) => tempActive(t, day));
   },
 
   /* ---------------- loans ---------------- */

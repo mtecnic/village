@@ -231,7 +231,7 @@ VC.CATALOG = [
 
   // ---- Parks & Leisure ----
   { key: 'small_park', name: 'Small Park', group: 'parks', dept: 'parks', icon: '🌳', size: [1, 1], cost: 250, upkeep: 10, unlock: 0, cover: { park: 5 }, lv: 12, lvR: 4, desc: 'A patch of green. Neighbours love it.' },
-  { key: 'playground', name: 'Playground', group: 'parks', dept: 'parks', icon: '🛝', size: [1, 1], cost: 400, upkeep: 15, unlock: 0, cover: { park: 5 }, lv: 10, lvR: 4, desc: 'Swings, slides and happy kids.' },
+  { key: 'playground', name: 'Playground', group: 'parks', dept: 'parks', icon: '🎠', size: [1, 1], cost: 400, upkeep: 15, unlock: 0, cover: { park: 5 }, lv: 10, lvR: 4, desc: 'Swings, slides and happy kids.' },
   { key: 'plaza', name: 'Fountain Plaza', group: 'parks', dept: 'parks', icon: '⛲', size: [2, 2], cost: 1200, upkeep: 40, unlock: 500, cover: { park: 7 }, lv: 18, lvR: 6, desc: 'A paved plaza with a sparkling fountain.' },
   { key: 'sports_field', name: 'Sports Field', group: 'parks', dept: 'parks', icon: '⚽', size: [3, 2], cost: 2500, upkeep: 80, unlock: 1500, jobs: 4, cover: { park: 9 }, lv: 10, lvR: 6, noise: 30, noiseR: 3, desc: 'Weekend league games under the lights.' },
   { key: 'big_park', name: 'Central Park', group: 'parks', dept: 'parks', icon: '🏞️', size: [3, 3], cost: 5000, upkeep: 150, unlock: 2000, jobs: 5, cover: { park: 13 }, lv: 30, lvR: 10, desc: 'Lakes, trees and winding paths.' },
@@ -307,28 +307,33 @@ VC.MAP_KEYS = ['landValue', 'pollution', 'crime', 'noise', 'traffic', 'happiness
 /* cost: flat $/month; costPerCap: $/month per resident                  */
 /* visitors: flat tourism points added by the sim (not a modifier)       */
 /* Costs are billed per day active (econ), so toggling does not dodge them.*/
+/* LEVELS: S.policies[key] is a level 0..1 (VC.econ.policyLevel); effects,*/
+/*   visitors and costs scale linearly with it. levels: false = binary   */
+/*   on/off policy (no intensity slider).                                */
+/* cat: policies-window category (safety|health|env|economy|society).    */
+/* unit: what the intensity slider controls (e.g. 'Patrol hours').       */
 /* ------------------------------------------------------------------ */
 VC.MODS = ['crime', 'fire', 'pollution', 'health', 'education', 'landValue', 'happiness', 'traffic', 'powerUse', 'waterUse', 'garbage', 'demandR', 'demandC', 'demandI', 'taxR', 'taxC', 'taxI', 'tourism', 'noise', 'growth'];
 VC.POLICIES = [
-  { key: 'smoke_detectors', name: 'Smoke Detector Program', icon: '🔥', costPerCap: 0.02, unlock: 0, effects: { fire: -0.3 }, desc: 'Free smoke detectors for every home. Fewer fires.' },
-  { key: 'neighborhood_watch', name: 'Neighborhood Watch', icon: '👀', costPerCap: 0.02, unlock: 0, effects: { crime: -0.15 }, desc: 'Nosy neighbours become crime fighters.' },
-  { key: 'free_clinics', name: 'Free Clinics', icon: '🩺', costPerCap: 0.05, unlock: 500, effects: { health: 0.2, happiness: 0.02 }, desc: 'Walk-in care for all. Healthier, happier citizens.' },
-  { key: 'tutoring', name: 'Free Tutoring', icon: '📚', costPerCap: 0.04, unlock: 1000, effects: { education: 0.2 }, desc: 'After-school tutoring boosts education.' },
-  { key: 'recycling_law', name: 'Mandatory Recycling', icon: '♻️', costPerCap: 0.03, unlock: 1000, effects: { garbage: -0.3, pollution: -0.05, happiness: -0.01 }, desc: 'Sort your trash! Less garbage, grumpier citizens.' },
-  { key: 'clean_air', name: 'Clean Air Act', icon: '🌬️', cost: 0, unlock: 2000, effects: { pollution: -0.3, demandI: -0.15 }, desc: 'Strict emission limits. Industry hates it.' },
-  { key: 'green_energy', name: 'Green Energy Subsidy', icon: '🌱', costPerCap: 0.015, unlock: 2000, effects: { powerUse: -0.15, pollution: -0.08, happiness: 0.005 }, desc: 'Efficient appliances cut power demand and smog.' },
-  { key: 'water_saving', name: 'Water Conservation', icon: '🚿', costPerCap: 0.01, unlock: 500, effects: { waterUse: -0.2, happiness: -0.01 }, desc: 'Short showers for everyone.' },
-  { key: 'tourism_promo', name: 'Tourism Campaign', icon: '📸', cost: 500, unlock: 5000, visitors: 12, effects: { tourism: 0.35, demandC: 0.06 }, desc: '"Visit Voxelpolis!" ads worldwide. Brings some visitors on its own; landmarks multiply it.' },
-  { key: 'pro_business', name: 'Business Tax Breaks', icon: '💼', cost: 0, unlock: 1000, effects: { demandC: 0.12, demandI: 0.12, taxC: -0.35, taxI: -0.35 }, desc: 'Businesses pay 35% less tax. More shops and factories, much less revenue.' },
-  { key: 'gambling', name: 'Legalize Gambling', icon: '🎲', cost: 0, unlock: 10000, effects: { crime: 0.12, tourism: 0.2, taxC: 0.05 }, desc: 'Allows the Casino. Brings money… and crime.' },
-  { key: 'nightlife', name: 'Night Life District', icon: '🌃', cost: 300, unlock: 3000, effects: { demandC: 0.1, noise: 0.15, happiness: 0.02, crime: 0.05 }, desc: 'Clubs open till dawn. Neon everywhere.' },
-  { key: 'rent_control', name: 'Rent Control', icon: '🏘️', cost: 0, unlock: 5000, effects: { demandR: 0.15, landValue: -0.15, taxR: -0.1 }, desc: 'Affordable homes, lower property values and property taxes.' },
-  { key: 'bike_lanes', name: 'Bike Lane Initiative', icon: '🚲', costPerCap: 0.02, unlock: 2000, effects: { traffic: -0.12, health: 0.05, pollution: -0.03 }, desc: 'Paint the town in bike lanes.' },
-  { key: 'free_transit', name: 'Free Public Transit', icon: '🎫', costPerCap: 0.08, unlock: 8000, effects: { traffic: -0.2, happiness: 0.03 }, desc: 'Ride for free. Cars stay home.' },
-  { key: 'four_day_week', name: 'Four-Day Work Week', icon: '🏖️', cost: 0, unlock: 12000, effects: { happiness: 0.05, demandC: -0.1, demandI: -0.2, taxC: -0.15, taxI: -0.15 }, desc: 'Long weekends forever. Businesses produce (and pay) less.' },
-  { key: 'curfew', name: 'Youth Curfew', icon: '🌙', cost: 50, unlock: 3000, effects: { crime: -0.1, happiness: -0.03 }, desc: 'Kids home by 10pm. Less crime, less fun.' },
-  { key: 'pets', name: 'Pets Welcome Everywhere', icon: '🐕', cost: 0, unlock: 0, effects: { happiness: 0.02, garbage: 0.2, noise: 0.08 }, desc: 'Dogs in offices. Cats in libraries. Barking and more trash.' },
-  { key: 'ubi', name: 'Universal Basic Income', icon: '💸', costPerCap: 0.6, unlock: 50000, effects: { happiness: 0.1, crime: -0.12, demandR: 0.1 }, desc: 'Monthly cheques for every citizen. Very popular. Very expensive.' },
+  { key: 'smoke_detectors', name: 'Smoke Detector Program', cat: 'safety', unit: 'Homes equipped', icon: '🔥', costPerCap: 0.02, unlock: 0, effects: { fire: -0.3 }, desc: 'Free smoke detectors for every home. Fewer fires.' },
+  { key: 'neighborhood_watch', name: 'Neighborhood Watch', cat: 'safety', unit: 'Patrol hours', icon: '👀', costPerCap: 0.02, unlock: 0, effects: { crime: -0.15 }, desc: 'Nosy neighbours become crime fighters.' },
+  { key: 'free_clinics', name: 'Free Clinics', cat: 'health', unit: 'Clinic hours', icon: '🩺', costPerCap: 0.05, unlock: 500, effects: { health: 0.2, happiness: 0.02 }, desc: 'Walk-in care for all. Healthier, happier citizens.' },
+  { key: 'tutoring', name: 'Free Tutoring', cat: 'health', unit: 'Tutoring hours', icon: '📚', costPerCap: 0.04, unlock: 1000, effects: { education: 0.2 }, desc: 'After-school tutoring boosts education.' },
+  { key: 'recycling_law', name: 'Mandatory Recycling', cat: 'env', unit: 'Enforcement', icon: '♻️', costPerCap: 0.03, unlock: 1000, effects: { garbage: -0.3, pollution: -0.05, happiness: -0.01 }, desc: 'Sort your trash! Less garbage, grumpier citizens.' },
+  { key: 'clean_air', name: 'Clean Air Act', cat: 'env', unit: 'Emission limits', icon: '🌬️', cost: 0, unlock: 2000, effects: { pollution: -0.3, demandI: -0.15 }, desc: 'Strict emission limits. Industry hates it.' },
+  { key: 'green_energy', name: 'Green Energy Subsidy', cat: 'env', unit: 'Subsidy size', icon: '🌱', costPerCap: 0.015, unlock: 2000, effects: { powerUse: -0.15, pollution: -0.08, happiness: 0.005 }, desc: 'Efficient appliances cut power demand and smog.' },
+  { key: 'water_saving', name: 'Water Conservation', cat: 'env', unit: 'Restrictions', icon: '🚿', costPerCap: 0.01, unlock: 500, effects: { waterUse: -0.2, happiness: -0.01 }, desc: 'Short showers for everyone.' },
+  { key: 'tourism_promo', name: 'Tourism Campaign', cat: 'economy', unit: 'Ad budget', icon: '📸', cost: 500, unlock: 5000, visitors: 12, effects: { tourism: 0.35, demandC: 0.06 }, desc: '"Visit Voxelpolis!" ads worldwide. Brings some visitors on its own; landmarks multiply it.' },
+  { key: 'pro_business', name: 'Business Tax Breaks', cat: 'economy', unit: 'Tax break size', icon: '💼', cost: 0, unlock: 1000, effects: { demandC: 0.12, demandI: 0.12, taxC: -0.35, taxI: -0.35 }, desc: 'Businesses pay 35% less tax. More shops and factories, much less revenue.' },
+  { key: 'gambling', name: 'Legalize Gambling', cat: 'economy', levels: false, icon: '🎲', cost: 0, unlock: 10000, effects: { crime: 0.12, tourism: 0.2, taxC: 0.05 }, desc: 'Allows the Casino. Brings money… and crime.' },
+  { key: 'nightlife', name: 'Night Life District', cat: 'society', unit: 'Late licences', icon: '🌃', cost: 300, unlock: 3000, effects: { demandC: 0.1, noise: 0.15, happiness: 0.02, crime: 0.05 }, desc: 'Clubs open till dawn. Neon everywhere.' },
+  { key: 'rent_control', name: 'Rent Control', cat: 'economy', unit: 'Rent cap', icon: '🏘️', cost: 0, unlock: 5000, effects: { demandR: 0.15, landValue: -0.15, taxR: -0.1 }, desc: 'Affordable homes, lower property values and property taxes.' },
+  { key: 'bike_lanes', name: 'Bike Lane Initiative', cat: 'env', unit: 'Lane network', icon: '🚲', costPerCap: 0.02, unlock: 2000, effects: { traffic: -0.12, health: 0.05, pollution: -0.03 }, desc: 'Paint the town in bike lanes.' },
+  { key: 'free_transit', name: 'Free Public Transit', cat: 'society', unit: 'Fare subsidy', icon: '🎫', costPerCap: 0.08, unlock: 8000, effects: { traffic: -0.2, happiness: 0.03 }, desc: 'Ride for free. Cars stay home.' },
+  { key: 'four_day_week', name: 'Four-Day Work Week', cat: 'society', levels: false, icon: '🏖️', cost: 0, unlock: 12000, effects: { happiness: 0.05, demandC: -0.1, demandI: -0.2, taxC: -0.15, taxI: -0.15 }, desc: 'Long weekends forever. Businesses produce (and pay) less.' },
+  { key: 'curfew', name: 'Youth Curfew', cat: 'safety', unit: 'Enforcement', icon: '🌙', cost: 50, unlock: 3000, effects: { crime: -0.1, happiness: -0.03 }, desc: 'Kids home by 10pm. Less crime, less fun.' },
+  { key: 'pets', name: 'Pets Welcome Everywhere', cat: 'society', unit: 'Pet-friendly places', icon: '🐕', cost: 0, unlock: 0, effects: { happiness: 0.02, garbage: 0.2, noise: 0.08 }, desc: 'Dogs in offices. Cats in libraries. Barking and more trash.' },
+  { key: 'ubi', name: 'Universal Basic Income', cat: 'society', unit: 'Cheque size', icon: '💸', costPerCap: 0.6, unlock: 50000, effects: { happiness: 0.1, crime: -0.12, demandR: 0.1 }, desc: 'Monthly cheques for every citizen. Very popular. Very expensive.' },
 ];
 VC.POLICY = {};
 for (const p of VC.POLICIES) VC.POLICY[p.key] = p;
@@ -364,12 +369,15 @@ VC.ADVISORS = {
 
 /* ------------------------------------------------------------------ */
 /* Graphics quality presets                                              */
+/* maxPx: absolute budget for the internal render size (pixels) — on     */
+/*   4K/5K displays the render targets shrink to fit it (gfx core), the  */
+/*   canvas itself keeps full DPR for crisp compositing.                 */
 /* ------------------------------------------------------------------ */
 VC.QUALITY = {
-  low: { name: 'Low', scale: 0.6, maxDpr: 1, shadow: 0, bloom: false, tilt: false, fxaa: false, ssao: false, godrays: false, particles: 400, cars: 80, lodDist: 40, drawDist: 160 },
-  medium: { name: 'Medium', scale: 0.85, maxDpr: 1, shadow: 1024, bloom: true, tilt: false, fxaa: true, ssao: false, godrays: false, particles: 1500, cars: 250, lodDist: 60, drawDist: 220 },
-  high: { name: 'High', scale: 1.0, maxDpr: 1.5, shadow: 2048, bloom: true, tilt: true, fxaa: true, ssao: true, godrays: true, particles: 3000, cars: 500, lodDist: 90, drawDist: 300 },
-  ultra: { name: 'Ultra', scale: 1.0, maxDpr: 2, shadow: 4096, bloom: true, tilt: true, fxaa: true, ssao: true, godrays: true, particles: 6000, cars: 900, lodDist: 140, drawDist: 400 },
+  low: { name: 'Low', scale: 0.6, maxDpr: 1, maxPx: 1.0e6, shadow: 0, bloom: false, tilt: false, fxaa: false, ssao: false, godrays: false, particles: 400, cars: 80, lodDist: 40, drawDist: 160 },
+  medium: { name: 'Medium', scale: 0.85, maxDpr: 1, maxPx: 2.1e6, shadow: 1024, bloom: true, tilt: false, fxaa: true, ssao: false, godrays: false, particles: 1500, cars: 250, lodDist: 60, drawDist: 220 },
+  high: { name: 'High', scale: 1.0, maxDpr: 1.5, maxPx: 3.7e6, shadow: 2048, bloom: true, tilt: true, fxaa: true, ssao: true, godrays: true, particles: 3000, cars: 500, lodDist: 90, drawDist: 300 },
+  ultra: { name: 'Ultra', scale: 1.0, maxDpr: 2, maxPx: 8.3e6, shadow: 4096, bloom: true, tilt: true, fxaa: true, ssao: true, godrays: true, particles: 6000, cars: 900, lodDist: 140, drawDist: 400 },
 };
 
 /* ------------------------------------------------------------------ */

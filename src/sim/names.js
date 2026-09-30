@@ -40,6 +40,12 @@ const IND_HI = ['VoxelSoft Labs', 'Quantum Circuits', 'Photon Dynamics', 'NeuroC
   'Nanoblock Fabrication', 'Qubit Foundry', 'Stellar Robotics', 'Hologrid Systems', 'Aether Aerospace', 'Lumen Optics'];
 
 const pick = (arr, h) => arr[h % arr.length];
+/**
+ * The player-chosen city name as it may appear inside other names. Names are plain text, but
+ * several modules put them into toast HTML: strip markup characters as a second line of defence
+ * (emitters must still escape).
+ */
+const cityName = () => String((VC.state && VC.state.name) || VC.NAME || 'Voxelpolis').replace(/[<>&"'`]/g, '').slice(0, 60);
 /** English possessive plural of a family name: Henderson -> "Hendersons'". */
 const plural = (n) => (/(s|x|z|ch|sh)$/.test(n) ? n + "es'" : n + "s'");
 
@@ -113,7 +119,7 @@ Object.assign(SIM, {
     if (b.key === 'rubble') return b.simCause === 'fire' ? 'Charred Ruins' : 'Rubble';
     const def = VC.BLD[b.key];
     if (!def) return String(b.key);
-    if (def.unique) return b.key === 'city_hall' && VC.state ? VC.state.name + ' City Hall' : def.name;
+    if (def.unique) return b.key === 'city_hall' && VC.state ? cityName() + ' City Hall' : def.name;
     switch (b.key) {
       case 'small_park': return `${pick(TREE, h >>> 5)} Park`;
       case 'playground': return `${pick(FLOWER, h >>> 5)} Playground`;
@@ -144,6 +150,6 @@ Object.assign(SIM, {
     if (!S) return VC.NAME;
     let m = VC.MILESTONES[0];
     for (const x of VC.MILESTONES) if (S.peakPop >= x.pop) m = x;
-    return `${m.name} of ${S.name}`;
+    return `${m.name} of ${cityName()}`;
   },
 });

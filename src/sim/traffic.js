@@ -12,8 +12,12 @@
  * 1/speed of the road type, inflated by last run's congestion, so traffic spreads onto alternatives.
  * Each residential building sends pop * 0.5 (workers) * car share * peak factor along the parent
  * pointers; volumes are accumulated in reverse settle order (O(road tiles), not O(paths)).
- * Transit coverage and mods.traffic reduce the car share. Result -> S.maps.traffic (0..255).
- * Residential buildings with no road path to any job get b.simCommute = -1 (a happiness problem).
+ * Transit coverage and mods.traffic reduce the car share. Result -> S.maps.traffic (0..255,
+ * 170 = at capacity). Road funding scales capacity (50% at 0% funding .. 110%).
+ * Residential buildings with no road path to any job get b.simCommute = -1 (a happiness problem);
+ * otherwise b.simCommute is the congestion-inflated travel time, so jams lengthen commutes
+ * (sim.js turns long commutes and jammed home streets into unhappiness, lower job fill and
+ * lower shop desirability).
  */
 const SIM = (VC.sim = VC.sim || {});
 const X = (SIM._ = SIM._ || {});
@@ -82,8 +86,9 @@ SIM.computeTraffic = function () {
   const ROADS = VC.ROADS;
   // edge costs per road type
   const cost = [0, 1 / ROADS[1].speed, 1 / ROADS[2].speed, 1 / ROADS[3].speed];
-  // road maintenance funding: neglected roads (potholes, lane closures) carry less traffic
-  const rf = M.clamp(0.75 + 0.25 * (X.eff ? X.eff('roads') : 1), 0.75, 1.1);
+  // road maintenance funding: neglected roads (potholes, lane closures) carry less traffic —
+  // half the capacity at zero funding (sim.js also charges a road-condition happiness penalty)
+  const rf = M.clamp(0.5 + 0.5 * (X.eff ? X.eff('roads') : 1), 0.5, 1.1);
   const capOf = [1, ROADS[1].capacity * rf, ROADS[2].capacity * rf, ROADS[3].capacity * rf];
 
   dist.fill(INF);
@@ -213,4 +218,12 @@ SIM.trafficAt = function (x, z) {
 SIM.trafficStats = function () {
   return X.trStats || { avgCongestion: 0, jammedTiles: 0, roadTiles: 0, noPath: 0, trips: 0 };
 };
-X.ensureTraffic = ensure;
+/**
+ * New game / load: congestion memory comes from the (saved) traffic map, never from the previous
+ * city, so a loaded game continues exactly as it was saved.
+ */
+X.ensureTraffic = function (S) {
+  ensure(S);
+  const cong = X.trCong, t = S.maps.traffic, road = S.road;
+  for (let i = 0; i < S.N; i++) cong[i] = road[i] ? t[i] / 170 : 0;
+};

@@ -3,26 +3,51 @@
  *
  * MONTHLY CYCLE (bus 'month'; the sim emits it after its own monthly work):
  *   1. compute(): taxes per zone & wealth, tourism, special income (casino, stadium), upkeep per
- *      department (x funding x difficulty cost multiplier), road upkeep, policy costs, loan payments.
+ *      department (x funding x difficulty upkeep multiplier x city wage level), road upkeep, policy
+ *      costs, loan payments.
  *   2. book everything through VC.money (upkeep is forced, so money may go negative). Sandbox only
  *      records the ledger and leaves the treasury alone.
  *   3. roll S.ledger.month -> S.ledger.last, set S.stats.income/expenses/net (operating cash flow),
  *      push S.history samples (capped), bankruptcy + low-funding (strike) bookkeeping.
+ *
+ * DAY-WEIGHTED BILLING (anti-exploit): every sim 'day' the current tax rates, department funding
+ * levels and active policies are accumulated in S.econ.acc {days, tax, fund, pol}. The month bills
+ * the AVERAGE tax rate and funding, and each policy (and a policy-gated venue's income) pro rata to
+ * the days it was active — so raising taxes only on the last day, or cutting funding just before
+ * the tick, gains nothing. forecast() shows the current settings (a full month at these rates).
+ *
+ * WAGES: service departments (police, fire, health, education, transit, parks, waste) pay city
+ * wages that rise with population (wageMul: 1 at 4k residents, ~1.8 at 25k, ~2.3 at 100k), while
+ * service buildings serve a limited number of residents (def.capacity) — big cities need
+ * proportionally more of them. Utilities and roads are not affected.
+ *
+ * BANKRUPTCY: 6 months below -$10k -> one emergency loan (counts toward MAX_LOANS, capped at twice
+ * the credit limit). Bankrupt again while it is outstanding -> STATE TAKEOVER: taxes raised to at
+ * least 12%, department funding capped at 80%, paid policies repealed; bus 'econ' {type:'takeover'}.
  *
  * forecast() evaluates the same model live for the budget window (per-building sums are cached
  * per sim day / building version, the final numbers per frame + settings change), so dragging a
  * slider costs microseconds.
  *
  * Persistent bookkeeping is kept in S.econ (plain JSON, saved with the state).
+ * Extra API: upkeepOf(key|building) (actual $/month of one building), wageMul(), taxBilled().
  */
 const M = VC.M, C = VC.C;
 
 /* ---------------- tuning ---------------- */
 // $ per month per resident (R) or filled job (C, I) at a 100% tax rate, before the wealth multiplier.
-// A well-run 10k city at 9% earns ~$8k/month against ~$6k of sensible services.
 const TAX_K = { R: 5.5, C: 7.0, I: 6.5 };
-const WEALTH_MUL = [0.7, 1.0, 1.6];
+const WEALTH_MUL = [0.75, 1.0, 1.3];
 const TOURISM_K = 6; // $ per tourism point per month
+// city wage level for service departments: 1 + WAGE_MAX * (1 - exp(-(pop - WAGE_POP0) / WAGE_SCALE))
+const WAGE_MAX = 1.35, WAGE_POP0 = 4000, WAGE_SCALE = 25000;
+// state grant for young towns: GRANT_MAX * (pop / GRANT_POP) * exp(1 - pop / GRANT_POP) — peaks at
+// GRANT_POP residents, fades out by ~8k (x difficulty grantMul). Bridges the gap between the
+// first round of services and the tax base that pays for them.
+const GRANT_MAX = 450, GRANT_POP = 1500;
+const WAGE_DEPTS = { police: 1, fire: 1, health: 1, education: 1, transit: 1, parks: 1, waste: 1 };
+const TAKEOVER_TAX = 12; // % minimum tax rate imposed by a state takeover
+const TAKEOVER_FUNDING = 0.8; // department funding cap during a takeover
 const HISTORY_CAP = 600;
 const HISTORY_KEYS = [
   'pop', 'money', 'happiness', 'income', 'expenses', 'net', 'demandR', 'demandC', 'demandI',
@@ -46,7 +71,7 @@ const STRIKE_MONTHS = 3;
 const STRIKE_MUL = 0.7; // effectiveness multiplier while on strike
 
 /** Ledger categories that make up the operating budget (shown as monthly income / expenses). */
-const OPER_IN = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income'];
+const OPER_IN = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income', 'grant'];
 const OPER_OUT_PREFIX = 'upkeep:';
 const OPER_OUT = ['roadUpkeep', 'policy', 'loanPayment'];
 /** Display names for ledger categories (budget window, charts). */
@@ -55,6 +80,7 @@ const CATEGORIES = {
   'tax:C': { name: 'Commercial taxes', icon: '🏬' },
   'tax:I': { name: 'Industrial taxes', icon: '🏭' },
   tourism: { name: 'Tourism', icon: '📸' },
+  grant: { name: 'State grant (young towns)', icon: '🏛️' },
   income: { name: 'Venues (casino, stadium)', icon: '🎟️' },
   reward: { name: 'Milestone rewards', icon: '🏆' },
   loan: { name: 'Loans received', icon: '🏦' },
@@ -89,19 +115,44 @@ let rev = 0; // bumped on any tax/funding/policy/loan change (invalidates the fo
 let fcCache = null, fcKey = '';
 
 function S_() { return VC.state; }
+/** User-facing toast (silent in the title-screen demo city). */
+function toast(text, type, icon) {
+  const S = S_();
+  if (S && S.demo) return;
+  VC.bus.emit('toast', { text, type, icon });
+}
 function funding(dept) {
   const S = S_();
   const f = S && S.budget ? S.budget[dept] : 1;
   return f == null ? 1 : f;
 }
+/** Difficulty multiplier for recurring costs (upkeep, road maintenance, policies). */
 function costMul(S) {
   // Sandbox has costMul 0 but we still want a meaningful ledger / forecast.
-  return S.sandbox ? 1 : VC.money.costMul();
+  if (S.sandbox) return 1;
+  const d = VC.DIFFICULTY[S.difficulty];
+  if (d && typeof d.upkeepMul === 'number') return d.upkeepMul;
+  return VC.money.costMul();
 }
 function population(S) {
   if (S.stats.pop > 0) return S.stats.pop;
   const b = agg.S === S ? agg.base.R : null;
   return b ? b[0] + b[1] + b[2] : 0;
+}
+/** City wage level for service departments (1 in small towns, rising toward 1 + WAGE_MAX). */
+function wageMul(S) {
+  const p = Math.max(0, population(S) - WAGE_POP0);
+  return 1 + WAGE_MAX * (1 - Math.exp(-p / WAGE_SCALE));
+}
+/** Monthly state grant for young towns ($, see GRANT_MAX). */
+function grantOf(S) {
+  if (S.sandbox) return 0;
+  const p = Math.max(0, population(S)) / GRANT_POP;
+  if (!(p > 0)) return 0;
+  const d = VC.DIFFICULTY[S.difficulty];
+  const mul = d && typeof d.grantMul === 'number' ? d.grantMul : 1;
+  const g = GRANT_MAX * mul * p * Math.exp(1 - p);
+  return g >= 5 ? g : 0;
 }
 
 /** Rescans buildings (at most once per sim day / building change / half second). */
@@ -155,32 +206,66 @@ function tourismPoints(S, a) {
   return pts * Math.max(0, 1 + (S.mods.tourism || 0));
 }
 
-/** Full monthly model. Returns {income:{cat}, expenses:{cat}, totals, detail}. Values are $ (positive). */
-function compute(S, force) {
+/** Fresh day-weighted accumulators (see header). */
+function newAcc() {
+  const fund = {};
+  for (const d of VC.DEPARTMENTS) fund[d.key] = 0;
+  return { days: 0, tax: { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] }, fund, pol: {} };
+}
+/** Adds today's tax rates, funding levels and active policies (bus 'day'). */
+function accumulate() {
+  const S = S_();
+  if (!S || !S.tax || !S.budget) return;
+  const e = ensureEcon(S);
+  const a = e.acc && e.acc.tax && e.acc.fund && e.acc.pol ? e.acc : (e.acc = newAcc());
+  a.days++;
+  for (const z of ZONES) {
+    const t = S.tax[z], at = a.tax[z] || (a.tax[z] = [0, 0, 0]);
+    if (t) for (let w = 0; w < 3; w++) at[w] += +t[w] || 0;
+  }
+  for (const d of VC.DEPARTMENTS) a.fund[d.key] = (a.fund[d.key] || 0) + funding(d.key);
+  for (const k in S.policies) if (S.policies[k]) a.pol[k] = (a.pol[k] || 0) + 1;
+}
+
+/**
+ * Full monthly model. Returns {income:{cat}, expenses:{cat}, totals, detail}. Values are $ (positive).
+ * billing = true: use this month's day-weighted averages (tax rates, funding, policy days) — the
+ * figures actually booked by monthly(). Otherwise the current settings (forecast).
+ */
+function compute(S, force, billing) {
   const a = scan(S, force);
   const mods = S.mods || {};
   const cm = costMul(S);
+  const wage = wageMul(S);
+  const acc = billing && S.econ && S.econ.acc && S.econ.acc.days > 0 ? S.econ.acc : null;
+  const fundOf = (d) => (acc && acc.fund[d] != null ? acc.fund[d] / acc.days : funding(d));
+  const polShare = (k) => (acc ? Math.min(1, (acc.pol[k] || 0) / acc.days) : S.policies[k] ? 1 : 0);
   const income = {}, expenses = {};
   const taxDetail = { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] };
+  const taxRates = { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] };
   for (const z of ZONES) {
-    const rates = S.tax[z], base = a.base[z];
+    const base = a.base[z];
     const k = TAX_K[z] * Math.max(0, 1 + (mods['tax' + z] || 0));
     let sum = 0;
     for (let w = 0; w < 3; w++) {
-      const v = base[w] * (rates[w] / 100) * WEALTH_MUL[w] * k;
+      const rate = acc && acc.tax[z] ? acc.tax[z][w] / acc.days : S.tax[z][w];
+      taxRates[z][w] = Math.round(rate * 100) / 100;
+      const v = base[w] * (rate / 100) * WEALTH_MUL[w] * k;
       taxDetail[z][w] = Math.round(v);
       sum += v;
     }
     income['tax:' + z] = Math.round(sum);
   }
   income.tourism = Math.round(tourismPoints(S, a) * TOURISM_K);
+  income.grant = Math.round(grantOf(S));
   const happy = M.clamp(S.stats.happiness == null ? 0.6 : S.stats.happiness, 0, 1);
   let special = 0;
   const venues = [];
   for (const b of a.special) {
     const def = VC.BLD[b.key];
-    const open = !def.requiresPolicy || !!S.policies[def.requiresPolicy];
-    const v = open ? def.income * (0.75 + 0.5 * happy) * Math.min(1.1, VC.econ.effectiveness(def.dept)) : 0;
+    const share = def.requiresPolicy ? polShare(def.requiresPolicy) : 1;
+    const open = share > 0;
+    const v = open ? def.income * share * (0.75 + 0.5 * happy) * Math.min(1.1, VC.econ.effectiveness(def.dept)) : 0;
     venues.push({ key: b.key, id: b.id, income: Math.round(v), open });
     special += v;
   }
@@ -189,21 +274,24 @@ function compute(S, force) {
   const dept = {};
   for (const d of VC.DEPARTMENTS) {
     if (d.key === 'roads') continue;
-    const v = Math.round((a.upkeep[d.key] || 0) * funding(d.key) * cm);
+    const v = Math.round((a.upkeep[d.key] || 0) * fundOf(d.key) * cm * (WAGE_DEPTS[d.key] ? wage : 1));
     expenses['upkeep:' + d.key] = v;
     dept[d.key] = v;
   }
   let ru = 0;
   for (let t = 1; t <= 3; t++) ru += a.roads[t] * (VC.ROADS[t] ? VC.ROADS[t].upkeep : 0);
-  expenses.roadUpkeep = Math.round((ru + (a.upkeep.roads || 0)) * funding('roads') * cm);
+  expenses.roadUpkeep = Math.round((ru + (a.upkeep.roads || 0)) * fundOf('roads') * cm);
   dept.roads = expenses.roadUpkeep;
 
   const policies = {};
   let pc = 0;
-  for (const k in S.policies) {
-    if (!S.policies[k]) continue;
-    const v = VC.econ.policyCost(k);
-    policies[k] = v;
+  const polKeys = new Set(Object.keys(S.policies));
+  if (acc) for (const k in acc.pol) polKeys.add(k);
+  for (const k of polKeys) {
+    const share = polShare(k);
+    if (!(share > 0) || !VC.POLICY[k]) continue;
+    const v = VC.econ.policyCost(k) * share;
+    policies[k] = Math.round(v);
     pc += v;
   }
   expenses.policy = Math.round(pc);
@@ -216,10 +304,11 @@ function compute(S, force) {
   for (const k in expenses) te += expenses[k];
   return {
     income, expenses, totalIncome: ti, totalExpenses: te, net: ti - te,
-    taxDetail, dept, policies, venues,
+    taxDetail, taxRates, dept, policies, venues,
     taxBase: { R: a.base.R.slice(), C: a.base.C.slice(), I: a.base.I.slice() },
     roadTiles: a.roads.slice(),
     tourismPoints: Math.round(tourismPoints(S, a)),
+    wageMul: Math.round(wage * 100) / 100, upkeepMul: cm, billedDays: acc ? acc.days : 0,
   };
 }
 
@@ -264,7 +353,7 @@ function addLoan(S, amount, rate, months, extra) {
   VC.money.earn(amount, 'loan');
   rev++;
   VC.bus.emit('loanChanged', l);
-  VC.bus.emit('sfx', { name: 'cash' });
+  if (!l.emergency && !S.demo) VC.bus.emit('sfx', { name: 'cash' }); // emergency loans: the advisor card is the one cue
   return l;
 }
 
@@ -304,7 +393,9 @@ function monthly() {
   const S = S_();
   if (!S) return;
   const e = ensureEcon(S);
-  const f = compute(S, true);
+  const f = compute(S, true, true);
+  e.lastBilled = { taxRates: f.taxRates, days: f.billedDays };
+  e.acc = newAcc();
 
   // income first so a month's taxes can cover its bills
   for (const k in f.income) book(S, k, f.income[k]);
@@ -324,8 +415,9 @@ function monthly() {
   book(S, 'loanPayment', -paid);
   if (done.length) {
     S.loans = S.loans.filter((l) => done.indexOf(l) < 0);
-    for (const l of done) {
-      VC.bus.emit('toast', { text: `Loan of <b>${VC.fmt.money(l.amount)}</b> paid off!`, type: 'good', icon: '🏦' });
+    if (!S.demo) {
+      const sum = done.reduce((s, l) => s + l.amount, 0);
+      toast(done.length > 1 ? `${done.length} loans (<b>${VC.fmt.money(sum)}</b>) paid off!` : `Loan of <b>${VC.fmt.money(sum)}</b> paid off!`, 'good', '🏦');
     }
     if (!S.loans.length) e.debtFreeDay = S.time.day;
     rev++;
@@ -354,11 +446,12 @@ function monthly() {
     const was = e.lowFund[d.key] || 0;
     e.lowFund[d.key] = funding(d.key) < STRIKE_FUNDING ? was + 1 : 0;
     if (e.lowFund[d.key] === STRIKE_MONTHS) {
-      VC.bus.emit('toast', { text: `<b>${d.name}</b> workers are on strike over budget cuts!`, type: 'bad', icon: '🪧' });
+      // the advisors post the strike card (rule strike_<dept>); toast only when they are missing
+      if (!advisorsOn()) toast(`<b>${d.name}</b> workers are on strike over budget cuts!`, 'bad', '🪧');
       VC.bus.emit('econ', { type: 'strike', dept: d.key, name: d.name });
       rev++;
     } else if (was >= STRIKE_MONTHS && !e.lowFund[d.key]) {
-      VC.bus.emit('toast', { text: `<b>${d.name}</b> strike is over — funding restored.`, type: 'good', icon: d.icon });
+      toast(`<b>${d.name}</b> strike is over — funding restored.`, 'good', d.icon);
       rev++;
     }
   }
@@ -385,29 +478,71 @@ function sampleHistory(S) {
   }
 }
 
+const advisorsOn = () => !!(VC.advisors && VC.advisors.post);
+/** One user-facing message: an advisor card when advisors exist, else a toast. */
+function notify(S, card, toastText) {
+  if (S.demo) return;
+  if (advisorsOn()) {
+    try { VC.advisors.post('finance', card); return; } catch (err) { /* fall back to a toast */ }
+  }
+  toast(toastText, 'bad', '🏦');
+}
+
 function bankruptcyCheck(S, e) {
   if (S.sandbox) { e.bankruptMonths = 0; return; }
   e.bankruptMonths = S.money < BANKRUPT_LIMIT ? e.bankruptMonths + 1 : 0;
+  const hasEmergency = S.loans.some((l) => l.emergency);
   if (e.emergency && S.money >= 25000) {
     e.emergency = false;
     e.recovered = S.time.day; // "comeback kid"
   }
   if (e.bankruptMonths < BANKRUPT_MONTHS) return;
-  // Emergency bail-out: enough to get back to +$15k, at the worst rate, no credit check.
-  const amount = Math.max(25000, Math.ceil((15000 - S.money) / 5000) * 5000);
-  addLoan(S, amount, 0.08, 120, { emergency: true });
   e.bankruptMonths = 0;
   e.bankruptcies++;
-  e.emergency = true;
-  VC.bus.emit('toast', { text: `Bankrupt! The Bank of Blocks forced an <b>emergency loan of ${VC.fmt.money(amount)}</b> at 8%.`, type: 'bad', icon: '🏦' });
-  if (VC.advisors && VC.advisors.post) {
-    VC.advisors.post('finance', {
-      key: 'emergency_loan', severity: 'bad', panel: 'loans',
-      title: 'Emergency loan!',
-      text: `We've been deep in the red for half a year, so the bank bailed us out with ${VC.fmt.money(amount)} at 8%. Mayor, I'm begging you: raise taxes or cut spending before they repossess the fountains.`,
-    });
+  if (hasEmergency || S.loans.length >= MAX_LOANS) {
+    takeover(S, e);
+    return;
   }
+  // Emergency bail-out: enough to get back to +$15k, at the worst rate, no credit check —
+  // but never more than twice the credit limit, and only one at a time.
+  const want = Math.max(25000, Math.ceil((15000 - S.money) / 5000) * 5000);
+  const amount = Math.min(want, Math.max(25000, Math.floor((2 * creditLimit(S)) / 5000) * 5000));
+  addLoan(S, amount, 0.08, 120, { emergency: true });
+  e.emergency = true;
+  notify(S, {
+    key: 'emergency_loan', severity: 'bad', panel: 'loans',
+    title: 'Emergency loan!',
+    text: `We've been deep in the red for half a year, so the bank bailed us out with ${VC.fmt.money(amount)} at 8%. Mayor, I'm begging you: raise taxes or cut spending — if we go bankrupt again while this loan is open, the state takes over our budget.`,
+  }, `Bankrupt! The Bank of Blocks forced an <b>emergency loan of ${VC.fmt.money(amount)}</b> at 8%.`);
   VC.bus.emit('econ', { type: 'emergencyLoan', amount });
+}
+
+/**
+ * Second bankruptcy while an emergency loan is still open (or no loan slot left): the state
+ * takes over the budget. Taxes go up to TAKEOVER_TAX, funding is capped, paid policies end.
+ * The city keeps running; the mayor can undo the measures once the books are healthy.
+ */
+function takeover(S, e) {
+  e.takeovers = (e.takeovers || 0) + 1;
+  e.takeoverDay = S.time.day;
+  for (const z of ZONES) {
+    const t = S.tax[z];
+    if (t) for (let w = 0; w < 3; w++) t[w] = Math.max(t[w], TAKEOVER_TAX);
+  }
+  for (const d of VC.DEPARTMENTS) if (funding(d.key) > TAKEOVER_FUNDING) S.budget[d.key] = TAKEOVER_FUNDING;
+  const repealed = [];
+  for (const k of Object.keys(S.policies)) {
+    if (S.policies[k] && VC.econ.policyCost(k) > 0) { delete S.policies[k]; repealed.push(k); }
+  }
+  VC.econ.computeMods();
+  rev++;
+  notify(S, {
+    key: 'takeover', severity: 'bad', panel: 'budget',
+    title: 'State takeover!',
+    text: `Bankrupt again with the emergency loan still open — the state has taken over our budget: taxes raised to at least ${TAKEOVER_TAX}%, department funding capped at ${Math.round(TAKEOVER_FUNDING * 100)}%` + (repealed.length ? ', and paid policies repealed.' : '.') + ' Cut costs and get back in the black, Mayor.',
+  }, `Bankrupt again! The state took over the budget: taxes ≥ ${TAKEOVER_TAX}%, funding ≤ ${Math.round(TAKEOVER_FUNDING * 100)}%.`);
+  VC.bus.emit('econ', { type: 'takeover', repealed, tax: TAKEOVER_TAX, funding: TAKEOVER_FUNDING, count: e.takeovers });
+  VC.bus.emit('budgetChanged'); // (no 'policyChanged': it would add a second sound to this one event)
 }
 
 /* ------------------------------------------------------------------ */
@@ -422,6 +557,9 @@ VC.econ = {
     VC.bus.on('month', () => {
       try { monthly(); } catch (err) { console.error('[econ] monthly failed', err); VC.errors && VC.errors.push('econ: ' + err.message); }
     });
+    VC.bus.on('day', () => {
+      try { accumulate(); } catch (err) { console.error('[econ] day failed', err); }
+    });
     VC.bus.on('roadChange', () => { agg.roadsDirty = true; });
     VC.bus.on('policyChanged', () => { rev++; });
   },
@@ -431,7 +569,8 @@ VC.econ = {
     agg.roadsDirty = true;
     fcCache = null;
     rev++;
-    ensureEcon(S);
+    const e = ensureEcon(S);
+    if (!e.acc || !e.acc.tax || !e.acc.fund || !e.acc.pol || !(e.acc.days >= 0)) e.acc = newAcc();
     for (const d of VC.DEPARTMENTS) if (S.budget[d.key] == null) S.budget[d.key] = 1;
     for (const z of ZONES) if (!S.tax[z]) S.tax[z] = [9, 9, 9];
     // drop policies that no longer exist (old saves), then rebuild modifiers
@@ -534,13 +673,14 @@ VC.econ = {
     if (!!S.policies[key] === on) return true;
     if (on) {
       if (!VC.world.isUnlocked(key)) {
-        VC.bus.emit('toast', { text: `${def.name} unlocks at ${VC.fmt.num(def.unlock)} citizens.`, type: 'warn', icon: '🔒' });
+        toast(`${def.name} unlocks at ${VC.fmt.num(def.unlock)} citizens.`, 'warn', '🔒');
         return false;
       }
       const cost = VC.econ.policyCost(key);
-      if (!S.sandbox && cost > 0 && S.money < cost) {
-        VC.bus.emit('noMoney', { amount: cost, cat: 'policy' });
-        VC.bus.emit('toast', { text: `Can't afford ${def.name} (${VC.fmt.money(cost)}/month).`, type: 'warn', icon: '💸' });
+      if (!S.sandbox && cost > 0 && !VC.money.canAfford(cost)) {
+        // need at least one month's cost in the bank. VC.money.spend owns the one 'noMoney'
+        // notification: it fails here (unaffordable, not forced) and charges nothing.
+        VC.money.spend(cost, 'policy');
         return false;
       }
       S.policies[key] = true;
@@ -601,7 +741,7 @@ VC.econ = {
     const opt = VC.econ.loanOptions().find((o) => o.amount === amount && (!months || o.months === months));
     if (!opt) return false;
     if (!opt.available) {
-      VC.bus.emit('toast', { text: 'Loan denied: ' + opt.reason + '.', type: 'warn', icon: '🏦' });
+      toast('Loan denied: ' + opt.reason + '.', 'warn', '🏦');
       return false;
     }
     return addLoan(S, opt.amount, opt.rate, opt.months);
@@ -656,5 +796,28 @@ VC.econ = {
   /** Display name/icon for a ledger category. */
   category(cat) {
     return CATEGORIES[cat] || { name: cat, icon: '•' };
+  },
+  /** Current city wage level for service departments (1 = small town). */
+  wageMul() {
+    const S = S_();
+    return S ? wageMul(S) : 1;
+  },
+  /**
+   * Actual monthly upkeep ($) of ONE building (catalog key or building) at the current funding,
+   * difficulty and city wage level — what the budget really pays for it. Tooltips should show this
+   * instead of def.upkeep.
+   */
+  upkeepOf(keyOrB) {
+    const S = S_();
+    const key = keyOrB && typeof keyOrB === 'object' ? keyOrB.key : keyOrB;
+    const def = VC.BLD[key];
+    if (!S || !def || !def.upkeep) return 0;
+    const dept = def.dept || 'parks';
+    return Math.round(def.upkeep * funding(dept) * costMul(S) * (WAGE_DEPTS[dept] ? wageMul(S) : 1));
+  },
+  /** Tax rates (%) actually billed last month (day-weighted averages): {taxRates:{R:[..]…}, days}. */
+  taxBilled() {
+    const S = S_();
+    return (S && S.econ && S.econ.lastBilled) || null;
   },
 };

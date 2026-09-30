@@ -16,12 +16,28 @@
  *   buildings and level-ups; lot sizes are capped by the zone's unmet need.
  * MONTHLY: wealth drift, rubble clearing (6 months), abandonment summary -> then 'month' / 'year'.
  * RESPONSIVENESS: bldAdd/bldRemove/roadChange/power-line edits schedule recalcNetworks() (throttled to
- *   ~150 ms, also while paused); service placement/budget/policy changes schedule computeMaps().
+ *   max(150 ms, 4x its last duration), also while paused); service placement/budget/policy changes
+ *   schedule computeMaps(). Topology edits set X.topoDirty (full network rebuild); new growables
+ *   are queued in X.joinQ and joined incrementally (sim_net.js).
+ * REDEVELOPMENT: repainting a developed lot with another density of the same zone type (up- or
+ *   downzoning) makes the building redevelop to that density over the next weeks (upzoning needs
+ *   demand and growth budget; the lot replays its construction).
+ * TRAFFIC: long congested commutes and jammed home streets cost happiness; jammed access roads
+ *   lower shop/factory job fill; road funding below 60% adds a 'Road condition' penalty.
+ * WEATHER: the sim keeps its own deterministic weather X.wx (VC.sim.weather()), derived from the
+ *   seed and the day — never from the visual weather, so graphics settings can't change results.
+ * FIRES: ordinary fires are announced in one aggregated, rate-limited toast (<= 1 per 8 s real
+ *   time); fires started by a disaster (ignite(b, {disaster:true}) or b.fireCause === 'disaster')
+ *   and anything in the title-screen demo (S.demo) stay silent.
+ * PERSISTENCE: growth accumulators and occupancy appeal live in S.simState (saved), so loading a
+ *   game continues exactly where it was saved (reset recomputes demand factors, not demand).
  *
  * Building runtime fields added here (prefix sim): simI (center tile), simRoad (access road tile),
  *   simPo/simPw/simWo/simWu (power/water out/use), simJobs (filled jobs of catalog buildings),
  *   simCommute (-1 = no path to work), simGarbage 0..1, simUnhappy/simGood/simAband/simDown (day
- *   counters), simWealthCnt, simCause (rubble: 'fire'), simDispatched (fire truck sent).
+ *   counters), simWealthCnt, simCause (rubble: 'fire'), simDispatched (fire truck sent),
+ *   simLoad / simCapF (service buildings: residents served, capacity factor), simFireD (the fire
+ *   was started by a disaster).
  */
 const SIM = (VC.sim = VC.sim || {});
 const X = (SIM._ = SIM._ || {});
@@ -29,7 +45,7 @@ const C = VC.C, M = VC.M, F = VC.F;
 const ZK = [null, 'R', 'C', 'I'];
 
 const LABOR = 0.5; // share of residents who work
-const LV_REQ = { 1: [0, 0, 85, 135], 2: [0, 0, 80, 125] }; // land value needed for level 2 / 3
+const LV_REQ = { 1: [0, 0, 80, 120], 2: [0, 0, 75, 110] }; // land value needed for level 2 / 3
 const EDU_REQ = [0, 0, 70, 140]; // industry: education coverage needed for level 2 / 3
 const GROW_DAYS = 5; // growables take 5..10 days to build
 const PLACE_DAYS = 3; // placed catalog buildings
@@ -70,9 +86,23 @@ function burst(type, b, n, dy) {
     VC.particles.burst(type, b.x + b.w / 2, VC.world.topY(b.x, b.z) + (dy != null ? dy : b.hgt || 1), b.z + b.d / 2, n);
   } catch (e) { /* fx are optional */ }
 }
+/** User-facing toast; silent in the title-screen demo. Text is HTML: escape user strings with esc(). */
 function toast(text, type, icon) {
+  const S = VC.state;
+  if (S && S.demo) return;
   VC.bus.emit('toast', { text, type, icon });
 }
+function sfx(o) {
+  const S = VC.state;
+  if (S && S.demo) return;
+  VC.bus.emit('sfx', o);
+}
+const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const esc = (s) => (VC.esc ? VC.esc(s) : String(s).replace(/[&<>"']/g, (c) => ESC[c]));
+/** Level-up needs a nearly full building; floor() so small lots (cap 6 -> 5) are reachable. */
+const fullEnough = (b) => b.pop >= Math.max(1, Math.floor(b.cap * 0.85));
+/** Is this catalog venue closed because its required policy is off (e.g. the casino)? */
+const closedVenue = (S, def) => !!(def && def.requiresPolicy && !(S.policies && S.policies[def.requiresPolicy]));
 
 /**
  * Defines every sim runtime field up front, always in the same order, so that all building
@@ -101,6 +131,9 @@ function initBuilding(S, b) {
   if (b.simReplay == null) b.simReplay = false;
   if (b.simDispatched == null) b.simDispatched = false;
   if (b.simCause == null) b.simCause = '';
+  if (b.simLoad == null) b.simLoad = 0;
+  if (b.simCapF == null) b.simCapF = 1;
+  if (b.simFireD == null) b.simFireD = false;
   // static per-building facts (the catalog never changes)
   b.simNeedP = X.needsPower(b);
   b.simNeedW = X.needsWater(b);
@@ -165,7 +198,10 @@ function evalHappy(S, b, out) {
     h += fac(out, 'Parks', (pk - 0.12) * 0.14);
     h += fac(out, 'Land value', (lv - 0.3) * 0.25);
     h += fac(out, 'Taxes', tax * 0.35);
-    h += fac(out, 'Commute', b.simCommute < 0 ? -0.12 : -Math.min(0.1, Math.max(0, (b.simCommute - 30) / 300)) - rt * 0.06);
+    // congestion-inflated travel time (street tiles) beyond a 12-tile commute, and jams at the door
+    h += fac(out, 'Commute', b.simCommute < 0 ? -0.12 : -Math.min(0.12, Math.max(0, (b.simCommute - 12) / 100)));
+    h += fac(out, 'Street traffic', -rt * 0.15);
+    if (X.roadPen) h += fac(out, 'Road condition', -X.roadPen);
     h += fac(out, 'Jobs', X.unemp > 0.08 ? -Math.min(0.18, (X.unemp - 0.08) * 0.6) : 0.03);
     if (b.simGarbage > 0.05) h += fac(out, 'Garbage', -b.simGarbage * 0.08);
     h += fac(out, 'Policies & landmarks', X.happyMod);
@@ -179,7 +215,8 @@ function evalHappy(S, b, out) {
     h += fac(out, 'Customers', clamp(S.demand.C, -1, 1) * 0.12 + (lv - 0.3) * 0.2);
     h += fac(out, 'Taxes', tax * 0.4);
     h += fac(out, 'Workers', -(1 - X.fill) * 0.35);
-    h += fac(out, 'Traffic', -rt * 0.06);
+    h += fac(out, 'Traffic', -rt * 0.1);
+    if (X.roadPen) h += fac(out, 'Road condition', -X.roadPen * 0.5);
     if (b.simGarbage > 0.05) h += fac(out, 'Garbage', -b.simGarbage * 0.06);
     h += fac(out, 'Policies & landmarks', X.happyMod * 0.5);
   } else {
@@ -192,7 +229,8 @@ function evalHappy(S, b, out) {
     h += fac(out, 'Taxes', tax * 0.4);
     h += fac(out, 'Workers', -(1 - X.fill) * 0.4);
     if (b.level >= 2) h += fac(out, 'Skilled workforce', ((ec + X.cityEdu) * 0.5 - 0.3) * 0.2);
-    h += fac(out, 'Freight traffic', -rt * 0.08);
+    h += fac(out, 'Freight traffic', -rt * 0.12);
+    if (X.roadPen) h += fac(out, 'Road condition', -X.roadPen * 0.5);
     if (b.simGarbage > 0.05) h += fac(out, 'Garbage', -b.simGarbage * 0.06);
     h += fac(out, 'Policies & landmarks', X.happyMod * 0.4);
   }
@@ -214,7 +252,7 @@ function newTot() {
 
 function fireRisk(S, b, def) {
   const fc = S.maps.fire[b.simI] / 255;
-  const wet = S.weather ? S.weather.wet || 0 : 0;
+  const wet = X.wx ? X.wx.wet : 0;
   let r = 1.1e-5 * (1 - fc * 0.85) * Math.max(0, 1 + (S.mods.fire || 0)) * (1 - 0.6 * wet) * X.seasonFire;
   if (def) {
     if (def.group === 'parks' && !def.jobs) return 0;
@@ -230,7 +268,7 @@ function fireRisk(S, b, def) {
  * zone's growth budget has room. Checked in the building's 4-day slice (~35% chance a month).
  */
 function tryLevelUp(S, b) {
-  if (b.level >= 3 || b.pop < b.cap * 0.85 || b.happy <= 0.65 || !b.powered || !b.watered) return;
+  if (b.level >= 3 || b.built < 1 || !fullEnough(b) || b.happy <= 0.65 || !b.powered || !b.watered) return;
   const zt = b.zt;
   if (S.demand[ZK[zt]] <= 0 || X.growAcc[zt] <= 0 || X.rnd() >= 0.055) return;
   const next = b.level + 1, i = b.simI, m = S.maps;
@@ -248,8 +286,44 @@ function tryLevelUp(S, b) {
   VC.world.changed(b);
   if (++X.levelUps <= 3) {
     burst('sparkle', b, 14);
-    VC.bus.emit('sfx', { name: 'levelup', x: b.x + b.w / 2, z: b.z + b.d / 2, vol: 0.4 });
+    sfx({ name: 'levelup', x: b.x + b.w / 2, z: b.z + b.d / 2, vol: 0.4 });
   }
+}
+
+/**
+ * Up- / downzoning: the player repainted this developed lot with another density of the same zone
+ * type (the zone code under the building's centre tile). Upzoning waits for demand and growth budget,
+ * then rebuilds the lot at the new density (level 1, construction replay); downzoning rebuilds
+ * it smaller at the same level. Checked in the building's 4-day slice. Returns true if it changed.
+ */
+function tryRedevelop(S, b) {
+  const code = S.zone[b.simI];
+  if (!code || code >> 2 !== b.zt) return false;
+  const zd = code & 3;
+  if (zd === b.den || b.built < 1 || b.fire > 0) return false;
+  const zt = b.zt;
+  if (zd > b.den) {
+    if (S.demand[ZK[zt]] <= 0.02 || X.growAcc[zt] <= 0 || !b.powered || (zd >= 2 && !b.watered)) return false;
+    if (X.rnd() >= 0.25) return false; // ~2 weeks on average once conditions hold
+  } else if (X.rnd() >= 0.15) return false;
+  const old = b.cap;
+  if (zd > b.den) b.level = 1; // a new, denser building starts over at level 1
+  b.den = zd;
+  return redevelopTo(S, b, old);
+}
+function redevelopTo(S, b, oldCap) {
+  b.cap = capOf(b);
+  b.simCapL = b.level;
+  if (b.cap > oldCap) X.growAcc[b.zt] -= b.cap - oldCap;
+  if (b.pop > b.cap) b.pop = b.cap;
+  b.wealth = wealthFor(S, b.zt, b.simI);
+  b.simWealthCnt = 0;
+  b.built = 0.3;
+  b.simReplay = true;
+  X.constructing.add(b.id);
+  VC.world.changed(b);
+  X.redevelopedMonth++;
+  return true;
 }
 
 /**
@@ -285,20 +359,32 @@ function dailyBuildings(S, sim) {
       if (!def) continue;
       tot.catalog++;
       if (b.built < 1) { tot.constructing++; continue; }
-      const jobs = def.jobs || 0;
+      // a venue whose policy is off (casino without Legalized Gambling) is closed: no staff,
+      // no visitors, no happiness bonus
+      const closed = closedVenue(S, def);
+      const jobs = closed ? 0 : def.jobs || 0;
       if (key === 'seaport') tot.seaports++;
       else if (key === 'airport') tot.airports++;
       if (def.group === 'parks' && !def.unique) tot.parks++;
-      tot.tourismRaw += def.tourism || 0;
-      tot.happyMod += def.happy || 0;
+      if (!closed) {
+        // amenities need their budget (and power, if they use any) to draw crowds
+        const run = Math.min(1, X.effC[def.dept || 'parks'] != null ? X.effC[def.dept || 'parks'] : 1) * (b.powered ? 1 : 0.5);
+        tot.tourismRaw += (def.tourism || 0) * run;
+        tot.happyMod += (def.happy || 0) * run;
+      }
       if (jobs) {
         tot.jobsSvc += jobs;
-        b.simJobs = Math.round(jobs * fill * (b.powered ? 1 : 0.5));
+        // staff can't commute to a building without a street at the door
+        b.simJobs = Math.round(jobs * fill * (b.powered ? 1 : 0.5) * (b.simRoad >= 0 || !X.needsAccess(def) ? 1 : 0.3));
         tot.jobsFilled += b.simJobs;
         if (!def.housing) {
           b.pop = b.simJobs;
           b.cap = jobs;
         }
+      } else if (closed && def.jobs) {
+        b.simJobs = 0;
+        b.pop = 0;
+        b.cap = def.jobs;
       }
       if (def.housing) {
         // arcology: residents move in like a giant residential building
@@ -371,6 +457,8 @@ function dailyBuildings(S, sim) {
       } else {
         let f = fill * (b.powered ? 1 : 0.25) * (b.simRoad < 0 ? 0.3 : 1);
         if (!b.watered && (b.den >= 2 || b.level >= 2)) f *= 0.6;
+        // a jammed access road (over capacity) keeps staff and customers away
+        if (b.simRoad >= 0 && m.traffic[b.simRoad] > 180) f *= 0.85;
         const target = Math.floor(b.cap * (f < 1 ? f : 1));
         const dp = target - b.pop;
         if (dp) b.pop += dp > 0 ? Math.ceil(dp * 0.15) : -Math.ceil(-dp * 0.15);
@@ -411,7 +499,7 @@ function dailyBuildings(S, sim) {
         }
       }
       if (b.fire <= 0 && rnd() < fireRisk(S, b, null) * 4) SIM.ignite(b);
-      tryLevelUp(S, b);
+      if (!tryRedevelop(S, b)) tryLevelUp(S, b);
     }
     /* totals (exact, daily) */
     if (!b.powered) tot.unpowered++;
@@ -475,7 +563,7 @@ function updateStats(S) {
   st.unemployment = X.unemp;
   st.capR = t.capRBuilt;
   const hw = t.happyW;
-  st.happiness = hw > 0 ? t.happyS / hw : 0.6;
+  st.happiness = hw > 0 ? t.happyS / hw : 0.65; // no residents yet: a hopeful, neutral mood
   X.happyAvg = st.happiness;
   st.education = hw > 0 ? clamp((t.eduS / hw / 255) * (1 + (mods.education || 0)), 0, 1) : 0;
   st.health = hw > 0 ? clamp((t.healthS / hw / 255) * (1 + (mods.health || 0)), 0, 1) : 0;
@@ -487,7 +575,10 @@ function updateStats(S) {
   X.cityEdu = st.education;
   const tr = SIM.trafficStats ? SIM.trafficStats() : null;
   st.traffic = tr ? tr.avgCongestion : 0;
-  st.tourism = Math.round(t.tourismRaw * Math.max(0, 1 + (mods.tourism || 0)) + t.parks * 1.5);
+  // landmarks + parks + policy visitors (Tourism Campaign), all scaled by the tourism modifier
+  let visitors = 0;
+  for (const k in S.policies) if (S.policies[k] && VC.POLICY[k] && VC.POLICY[k].visitors) visitors += VC.POLICY[k].visitors;
+  st.tourism = Math.round((t.tourismRaw + t.parks * 1.5 + visitors) * Math.max(0, 1 + (mods.tourism || 0)));
   st.buildings = t.growables + t.catalog;
   st.abandoned = t.abandoned;
   st.rubble = t.rubble;
@@ -498,9 +589,32 @@ function updateStats(S) {
   st.noCommute = t.noCommute;
   st.garbage = t.growables ? t.garbage / t.growables : 0;
   const taxAvg = (X.taxZ[1] + X.taxZ[2] + X.taxZ[3]) / 3;
-  st.approval = clamp(0.55 * st.happiness + 0.25 * (0.5 + taxAvg * 0.5) + 0.2 * Math.min(1, svc * 1.4), 0, 1);
+  // services only weigh in once people live here (an empty new city reads neutral-positive, ~60%)
+  const svcW = Math.min(1, pop / 1000);
+  const svcTerm = 0.65 * (1 - svcW) + Math.min(1, svc * 1.4) * svcW;
+  st.approval = clamp(0.55 * st.happiness + 0.25 * (0.5 + taxAvg * 0.5) + 0.2 * svcTerm, 0, 1);
   if (pop > S.peakPop) S.peakPop = pop;
   X.happyMod = (mods.happiness || 0) + t.happyMod;
+}
+
+/**
+ * Map pass: synchronous when cheap (or outside a frame, e.g. VC.debug.run), otherwise staged over
+ * the next frames (sim_maps.js X.startMaps) so a big city never stalls a frame.
+ */
+function mapsNow(live) {
+  if (live && (X.mapsMs || 0) > 8 && X.startMaps) {
+    if (!X.mapsJob) X.startMaps();
+    X.stepMaps(3);
+  } else SIM.computeMaps();
+}
+
+/** Growth state that must survive save/load (S.simState is saved with the city). */
+function saveState(S) {
+  const ss = S.simState && typeof S.simState === 'object' ? S.simState : (S.simState = {});
+  ss.v = 1;
+  ss.growAcc = X.growAcc;
+  ss.rAppeal = X.rAppeal;
+  ss.permPos = X.permPos;
 }
 
 /** Per-day city-level caches used by happiness/demand. */
@@ -519,6 +633,59 @@ function refreshCity(S) {
   }
   const mo = Math.floor(S.time.day / C.DAYS_PER_MONTH) % 12;
   X.seasonFire = mo >= 5 && mo <= 7 ? 1.4 : mo === 11 || mo <= 1 ? 0.7 : 1;
+  // department effectiveness (funding, strikes) cached for the day
+  const effC = X.effC || (X.effC = {});
+  for (const d of VC.DEPARTMENTS) effC[d.key] = X.eff(d.key);
+  // potholes: road funding below 60% effectiveness costs happiness (up to -0.09 at 0%)
+  X.roadPen = Math.max(0, 0.6 - effC.roads) * 0.15;
+  X.wx = simWeather(S);
+}
+
+/* ------------------------------------------------------------------ */
+/* sim weather (deterministic; independent of the visual weather)      */
+/* ------------------------------------------------------------------ */
+// per season (0 spring, 1 summer, 2 autumn, 3 winter): chance of storm, rain/snow, clouds
+const WX_P = [[0.05, 0.3, 0.3], [0.1, 0.15, 0.25], [0.05, 0.3, 0.35], [0.03, 0.25, 0.35]];
+const WX_T = {
+  clear: { cloud: 0.15, wind: 0.3, precip: 0 }, cloudy: { cloud: 0.6, wind: 0.45, precip: 0 },
+  rain: { cloud: 0.8, wind: 0.5, precip: 0.6 }, storm: { cloud: 0.95, wind: 0.9, precip: 1 },
+  snow: { cloud: 0.8, wind: 0.4, precip: 0.5 },
+};
+function wxType(S, day) {
+  const mo = Math.floor(day / C.DAYS_PER_MONTH) % 12;
+  const season = mo >= 2 && mo <= 4 ? 0 : mo >= 5 && mo <= 7 ? 1 : mo >= 8 && mo <= 10 ? 2 : 3;
+  // weather spells of 4 days, each with its own draw
+  const r = M.hash(Math.floor(day / 4), 71, S.seed | 0);
+  const p = WX_P[season];
+  if (r < p[0]) return season === 3 ? 'snow' : 'storm';
+  if (r < p[0] + p[1]) return season === 3 ? 'snow' : 'rain';
+  if (r < p[0] + p[1] + p[2]) return 'cloudy';
+  return 'clear';
+}
+/** Weather for the current sim day: {type, cloud, wind, wet, windDir} — a pure function of seed + day. */
+function simWeather(S) {
+  const day = S.time.day, seed = S.seed | 0;
+  const type = wxType(S, day), T = WX_T[type];
+  // ground wetness: rain today and the last three days (snow counts half)
+  let wet = 0;
+  const wts = [0.45, 0.25, 0.15, 0.1];
+  for (let k = 0; k < 4; k++) {
+    const t = k ? wxType(S, day - k) : type;
+    wet += wts[k] * WX_T[t].precip * (t === 'snow' ? 0.5 : 1);
+  }
+  const o = X._wx || (X._wx = { type: '', cloud: 0, wind: 0, wet: 0, windDir: 0 });
+  o.type = type;
+  o.cloud = T.cloud;
+  o.wind = clamp(T.wind + (M.hash(day, 72, seed) - 0.5) * 0.2, 0, 1);
+  o.wet = clamp(wet, 0, 1);
+  // prevailing wind direction drifts slowly (smooth between 4-day spells)
+  const s = day / 4, s0 = Math.floor(s), u = s - s0;
+  const a0 = M.hash(s0, 73, seed) * M.PI2, a1 = M.hash(s0 + 1, 73, seed) * M.PI2;
+  let d = a1 - a0;
+  if (d > Math.PI) d -= M.PI2;
+  else if (d < -Math.PI) d += M.PI2;
+  o.windDir = a0 + d * u;
+  return o;
 }
 
 /* ------------------------------------------------------------------ */
@@ -552,7 +719,7 @@ function updateDemand(S, instant) {
 
   // ---- commercial ----
   const tour = st.tourism * 3;
-  const needC = pop * 0.15 + tour + 15;
+  const needC = pop * 0.18 + tour + 15;
   const scale = Math.max(40, needC * 0.5);
   const shop = clamp((needC - t.capC) / scale, -1, 1) * 0.7;
   const tourPart = shop > 0 ? Math.min(shop, (tour / scale) * 0.7) : 0;
@@ -584,11 +751,14 @@ function updateDemand(S, instant) {
   const fin = (v) => clamp(v > 0 ? v * mul : v / mul, -1, 1);
   // occupancy uses the city's appeal without the vacancy terms (else vacancy -> low demand -> more vacancy)
   const appeal = fin(R - vac - (fR.find((f) => f.label === 'Homes under construction') || { value: 0 }).value);
-  X.rAppeal += (appeal - X.rAppeal) * (instant ? 1 : 0.25);
-  const k = instant ? 1 : 0.25;
-  S.demand.R += (fin(R) - S.demand.R) * k;
-  S.demand.C += (fin(Cd) - S.demand.C) * k;
-  S.demand.I += (fin(I) - S.demand.I) * k;
+  // instant === 'factors': explain the demand (after a load) without moving it
+  if (instant !== 'factors') {
+    X.rAppeal += (appeal - X.rAppeal) * (instant ? 1 : 0.25);
+    const k = instant ? 1 : 0.25;
+    S.demand.R += (fin(R) - S.demand.R) * k;
+    S.demand.C += (fin(Cd) - S.demand.C) * k;
+    S.demand.I += (fin(I) - S.demand.I) * k;
+  }
   const sort = (a) => a.sort((p, q) => Math.abs(q.value) - Math.abs(p.value));
   X.factors = { R: sort(fR), C: sort(fC), I: sort(fI) };
 }
@@ -604,10 +774,10 @@ function desirability(S, zt, i) {
     const svc = (m.police[i] + m.fire[i] + m.health[i] + m.edu[i]) / 1020;
     d = 0.3 + lv * 0.6 - pol * 0.6 - cri * 0.3 - noi * 0.2 + svc * 0.25 + (m.park[i] / 255) * 0.15;
   } else if (zt === 2) {
-    // shops like passing trade on the street out front (busy, not jammed)
+    // shops like passing trade on the street out front (busy, not jammed: 0.67 = at capacity)
     const r = X.accRoad ? X.accRoad[i] : -1;
     const t = r >= 0 ? m.traffic[r] / 255 : 0;
-    d = 0.35 + lv * 0.45 - cri * 0.3 - pol * 0.15 + (t < 0.6 ? t * 0.35 : 0.21 - (t - 0.6) * 0.4);
+    d = 0.35 + lv * 0.45 - cri * 0.3 - pol * 0.15 + (t < 0.6 ? t * 0.35 : 0.21 - (t - 0.6) * 1.0);
   } else {
     // industry wants cheap land and fast roads for freight
     const r = X.accRoad ? X.accRoad[i] : -1;
@@ -657,16 +827,29 @@ function tryGrow(S, i, zt, den, dem) {
   for (const s of sizes) if (s[0] * s[1] < smallest[0] * smallest[1]) smallest = s;
   const limit = Math.max(0, X.unmet[zt]) * 1.3;
   const h0 = S.height[i];
-  for (const s of order) {
-    if (s !== smallest && G.cap[0] * s[0] * s[1] > limit) continue;
+  /** Places lot size s covering tile (x, z) if it fits (place = false: only test). */
+  const tryOne = (s, place) => {
     for (let rot = 0; rot < (s[0] !== s[1] ? 2 : 1); rot++) {
       const w = rot ? s[1] : s[0], d = rot ? s[0] : s[1];
       for (let oz = 0; oz < d; oz++)
         for (let ox = 0; ox < w; ox++) {
           const x0 = x - ox, z0 = z - oz;
-          if (!fits(S, x0, z0, w, d, code, h0)) continue;
-          return placeGrow(S, x0, z0, w, d, zt, den);
+          if (fits(S, x0, z0, w, d, code, h0)) return place ? placeGrow(S, x0, z0, w, d, zt, den) : true;
         }
+    }
+    return null;
+  };
+  for (const s of order) {
+    if (s !== smallest && G.cap[0] * s[0] * s[1] > limit) continue;
+    const b = tryOne(s, true);
+    if (b) return b;
+  }
+  // odd strips no regular lot fits into (e.g. the 5th column of a 5-wide industrial block)
+  if (G.fallback) {
+    for (const s of sizes) if (tryOne(s, false)) return null; // a regular lot fits: wait for demand
+    for (const s of G.fallback) {
+      const b = tryOne(s, true);
+      if (b) return b;
     }
   }
   return null;
@@ -774,23 +957,70 @@ function toRubble(S, b, reason) {
   return rb;
 }
 
+/** Was this fire started by a disaster (or did it spread from one)? Those stay silent here. */
+const disasterFire = (b) => !!(b.simFireD || b.fireCause === 'disaster');
+
 function burnDown(S, b) {
+  // debris / dust / smoke and the collapse sound come from the particles & audio modules'
+  // own 'bldRemove' handlers (reason 'fire'); this only does the bookkeeping
   const name = SIM.buildingName(b);
-  burst('debris', b, 16, 0.5);
-  burst('smoke', b, 14);
-  VC.bus.emit('sfx', { name: 'collapse', x: b.x + b.w / 2, z: b.z + b.d / 2 });
+  const quiet = disasterFire(b);
+  // today's totals were counted before the fire step: keep the stats exact (a save made now and
+  // loaded again must show the same population)
+  const t = X.tot;
+  if (t && b.key === 'grow' && !b.abandoned) {
+    const built = b.built >= 1 || b.simReplay;
+    if (b.zt === 1) { t.pop -= b.pop; t.capR -= b.cap; if (built) t.capRBuilt -= b.cap; }
+    else {
+      t.jobsFilled -= b.pop;
+      if (b.zt === 2) { t.capC -= b.cap; if (built) t.capCBuilt -= b.cap; }
+      else { t.capI -= b.cap; if (built) t.capIBuilt -= b.cap; }
+    }
+  }
   toRubble(S, b, 'fire');
+  if (quiet) return;
   const day = S.time.day;
   X.fireLog.push(day);
   while (X.fireLog.length && X.fireLog[0] < day - 30) X.fireLog.shift();
-  if (day - X.lastBurnToast > 1) {
-    X.lastBurnToast = day;
-    toast(`${name} burned down!`, 'bad', '🔥');
-  }
-  if (X.fireLog.length >= 3 && day - X.lastFireNews > 60) {
+  X.fireLost++;
+  X.fireLostName = name;
+  if (X.fireLog.length >= 3 && day - X.lastFireNews > 60 && !S.demo) {
     X.lastFireNews = day;
-    VC.bus.emit('news', { text: `Massive blaze in ${SIM.districtName(b.x, b.z)}: ${X.fireLog.length} buildings lost this month. Residents demand more fire stations!` });
+    const text = `Massive blaze in ${SIM.districtName(b.x, b.z)}: ${X.fireLog.length} buildings lost this month. Residents demand more fire stations!`;
+    if (VC.advisors && VC.advisors.pushNews) VC.advisors.pushNews(text);
+    else VC.bus.emit('news', { text });
   }
+}
+
+/**
+ * One aggregated fire toast at most every FIRE_TOAST_MS of real time: new fires and buildings lost
+ * since the last one ("Fire at X!", "3 buildings on fire", "Maple Cottage burned down"). Fires
+ * started by disasters are announced by the disaster card instead.
+ */
+const FIRE_TOAST_MS = 8000;
+function fireNotice(S) {
+  if (!X.fireNew && !X.fireLost) return;
+  const now = performance.now();
+  if (now - X.lastFireToast < FIRE_TOAST_MS) return;
+  X.lastFireToast = now;
+  let burning = 0;
+  for (const id of X.burning) {
+    const b = S.buildings.get(id);
+    if (b && !disasterFire(b)) burning++;
+  }
+  let text, type = 'warn';
+  if (X.fireLost) {
+    type = 'bad';
+    text = X.fireLost === 1 ? `<b>${esc(X.fireLostName)}</b> burned down!` : `${X.fireLost} buildings burned down!`;
+    if (burning) text += ` ${burning} still on fire.`;
+  } else if (burning <= 1 && X.fireNew === 1 && X.fireNewB) {
+    text = `Fire at <b>${esc(SIM.buildingName(X.fireNewB))}</b>!`;
+  } else if (burning > 0) text = `${burning} buildings on fire!`;
+  X.fireNew = 0;
+  X.fireNewB = null;
+  X.fireLost = 0;
+  X.fireLostName = '';
+  if (text) toast(text, type, '🔥');
 }
 
 function spreadFrom(S, b) {
@@ -803,13 +1033,15 @@ function spreadFrom(S, b) {
   else if ((k -= b.w + 2) < b.d) { x = b.x - 1; z = b.z + k; }
   else { x = b.x + b.w; z = b.z + (k - b.d); }
   const n = VC.world.buildingAt(x, z);
-  if (n && n !== b && !(n.fire > 0)) SIM.ignite(n);
+  // a disaster fire that spreads is still part of the disaster
+  if (n && n !== b && !(n.fire > 0)) SIM.ignite(n, disasterFire(b) ? SPREAD_D : null);
 }
+const SPREAD_D = { disaster: true };
 
 function fireStep(S) {
   if (!X.burning.size) return;
   const rnd = X.rnd, fmap = S.maps.fire;
-  const wet = S.weather ? S.weather.wet || 0 : 0;
+  const wet = X.wx ? X.wx.wet : 0;
   const arr = X._burnArr;
   arr.length = 0;
   for (const id of X.burning) arr.push(id);
@@ -867,6 +1099,8 @@ function monthly(S) {
   X.abandonedMonth = 0;
   X.levelUpsMonth = X.levelUps;
   X.levelUps = 0;
+  X.redevelopedLast = X.redevelopedMonth;
+  X.redevelopedMonth = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -883,7 +1117,12 @@ function checkShortages(S) {
   }
   if (w && !X.wasWaterShort && day - X.lastWaterToast > 45) {
     X.lastWaterToast = day;
-    toast(X.water.supply > 0 ? 'Water shortage! Taps are running dry. Build more pumps or towers.' : 'No water supply! Build a water tower or pump (pumps need power).', 'bad', '💧');
+    const dark = X.water.unpoweredSources | 0;
+    let text;
+    if (dark > 0) text = `Water shortage! ${dark} water ${dark === 1 ? 'source has' : 'sources have'} no power — connect ${dark === 1 ? 'it' : 'them'} to the grid with a road or power line.`;
+    else if (X.water.supply > 0) text = 'Water shortage! Taps are running dry. Build more pumps or towers.';
+    else text = 'No water supply! Build a water tower or pump (pumps need power).';
+    toast(text, 'bad', '💧');
   }
   X.wasPowerShort = p;
   X.wasWaterShort = w;
@@ -903,25 +1142,43 @@ Object.assign(SIM, {
       const S = VC.state;
       if (!X.ready || !S) return;
       if (b.simI == null) initBuilding(S, b);
-      if (b.key !== 'grow' && !X.selfEdit) {
-        X.netDirty = true;
-        if (b.key !== 'rubble') X.mapsDirty = true;
+      if (b.key === 'grow') {
+        // joins the cached network on the next (periodic) recalc — no full rebuild needed
+        if (X.joinQ) X.joinQ.push(b);
+      } else if (b.key === 'rubble') {
+        // rubble conducts nothing and needs nothing: no network work at all
+      } else {
+        // road access right away (coverage / staffing must not wait for the network solve)
+        if (X.buildingRoad && X.accRoad) b.simRoad = X.buildingRoad(S, b);
+        X.topoDirty = true;
+        if (!X.selfEdit) {
+          X.netDirty = true;
+          if (b.key !== 'rubble') X.mapsDirty = true;
+        }
       }
     });
     bus.on('bldRemove', (b) => {
       if (!X.ready) return;
       X.constructing.delete(b.id);
       X.burning.delete(b.id);
+      // homes / shops / rubble: drop their footprint from the cached network (a split it may cause
+      // is picked up by the next scheduled full rebuild); catalog buildings rebuild the topology
+      if (b.key === 'grow' || b.key === 'rubble') X.softRemoved = true;
+      else X.topoDirty = true;
       if (X.selfEdit) return;
       X.netDirty = true;
       if (b.key !== 'grow') X.mapsDirty = true;
     });
-    bus.on('roadChange', () => { X.netDirty = true; });
+    bus.on('roadChange', () => { X.netDirty = X.topoDirty = true; });
     bus.on('dirty', (r) => {
       const S = VC.state;
       if (!X.ready || !S) return;
-      if (!X.netDirty && X.plineChanged(S, r)) X.netDirty = true;
-      if (X.heightChanged) X.heightChanged(S, r);
+      if (X.plineChanged(S, r)) X.netDirty = X.topoDirty = true;
+      if (X.heightChanged) {
+        const v = X.terrVer;
+        X.heightChanged(S, r);
+        if (X.terrVer !== v) X.topoDirty = true; // road access does not cross water
+      }
     });
     const md = () => { X.mapsDirty = true; };
     bus.on('budgetChanged', md);
@@ -933,6 +1190,10 @@ Object.assign(SIM, {
     X.ensureNet(S);
     X.ensureMaps(S);
     if (X.ensureTraffic) X.ensureTraffic(S);
+    X.topoDirty = true;
+    X.joinQ = [];
+    X.mapsJob = null;
+    X.lvPrev.set(S.maps.landValue); // crime's poverty input: this city's land value, not the last one's
     X.hCopy = null; // new terrain: rebuild static land value / water distance
     X.staticVer = -1;
     X.acc = 0;
@@ -946,8 +1207,12 @@ Object.assign(SIM, {
       X.perm[i] = X.perm[j];
       X.perm[j] = t;
     }
-    X.permPos = 0;
-    X.growAcc = [0, 12, 4, 6]; // a little head start so the first homes appear within days
+    // persisted growth state (saved games continue exactly; new games get a small head start)
+    const ss = S.simState;
+    const saved = ss && Array.isArray(ss.growAcc) && ss.growAcc.length === 4 && ss.growAcc.every((v) => typeof v === 'number' && isFinite(v));
+    X.permPos = saved && ss.permPos >= 0 && ss.permPos < N ? ss.permPos | 0 : 0;
+    X.growAcc = saved ? ss.growAcc.slice() : [0, 12, 4, 6]; // a little head start so the first homes appear within days
+    X.rAppeal = saved && typeof ss.rAppeal === 'number' && isFinite(ss.rAppeal) ? ss.rAppeal : 0.3;
     X.growRate = [0, 0, 0, 0];
     X.constructing = new Set();
     X.burning = new Set();
@@ -955,16 +1220,21 @@ Object.assign(SIM, {
     X.bk = [new Float64Array(9), new Float64Array(9), new Float64Array(9), new Float64Array(9)];
     X._burnArr = [];
     X.fireLog = [];
-    X.lastBurnToast = -99;
+    X.fireNew = 0;
+    X.fireNewB = null;
+    X.fireLost = 0;
+    X.fireLostName = '';
+    X.lastFireToast = -1e9;
     X.lastFireNews = -999;
     X.lastPowerToast = X.lastWaterToast = -999;
     X.wasPowerShort = X.wasWaterShort = false;
     X.abandonedMonth = 0;
     X.levelUpsMonth = 0;
     X.levelUps = 0;
+    X.redevelopedMonth = 0;
+    X.redevelopedLast = 0;
     X.fill = 1;
     X.unemp = 0;
-    X.rAppeal = 0.3;
     X.unmet = [0, 150, 40, 80];
     X.cityEdu = 0;
     X.svcCov = 0;
@@ -975,6 +1245,7 @@ Object.assign(SIM, {
     X.dayMs = 0;
     X.dayMsMax = 0;
     X.days = 0;
+    X.netGap = 150;
     X.prof = { net: 0, bld: 0, misc: 0, growth: 0, maps: 0, traffic: 0 };
     X.profMax = { net: 0, bld: 0, misc: 0, growth: 0, maps: 0, traffic: 0 };
     X.factors = { R: [], C: [], I: [] };
@@ -983,24 +1254,29 @@ Object.assign(SIM, {
     X.ready = true;
     refreshCity(S);
     // full recompute so loaded games show correct flags, maps and stats immediately
-    SIM.recalcNetworks();
+    SIM.recalcNetworks(true);
     dailyBuildings(S, false);
     updateStats(S);
     if (SIM.computeTraffic) SIM.computeTraffic();
     SIM.computeMaps();
     dailyBuildings(S, false);
     updateStats(S);
-    if (S.buildings.size) updateDemand(S, false);
+    // explain the (saved) demand without moving it: loading must not change the game
+    if (S.buildings.size) updateDemand(S, 'factors');
     else X.factors = { R: [{ label: 'Small-town appeal', value: 0.6 }], C: [{ label: 'Shoppers', value: 0.26 }], I: [{ label: 'External trade', value: 0.37 }] };
+    saveState(S);
   },
 
   update(dt, rdt) {
     const S = VC.state;
     if (!S || !X.ready) return;
     const now = performance.now();
-    // responsive network / coverage updates (also while paused)
-    if (X.netDirty && now - (X.lastNet || 0) > 150) SIM.recalcNetworks();
-    if (X.mapsDirty && now - (X.lastMaps || 0) > 600) SIM.computeMaps();
+    // responsive network / coverage updates (also while paused); the network gap adapts to how
+    // long a solve takes, so big maps never spend more than ~1/4 of the time re-solving
+    if (X.netDirty && now - (X.lastNet || 0) > (X.netGap || 150)) SIM.recalcNetworks();
+    if (X.mapsJob) X.stepMaps(3);
+    else if (X.mapsDirty && !X.netDirty && now - (X.lastMaps || 0) > 600) mapsNow(true); // maps read the networks' results
+    fireNotice(S);
     const sp = C.SPEEDS[S.time.speed] || 0;
     if (!sp) return;
     const days = (rdt * sp) / C.DAY_SEC;
@@ -1052,7 +1328,7 @@ Object.assign(SIM, {
     growth(S);
     lap('growth');
     if (day % 4 === 2 || X.mapsDirty) {
-      SIM.computeMaps();
+      mapsNow(X.inUpdate);
       lap('maps');
     }
     if (day % 8 === 3 && SIM.computeTraffic) {
@@ -1060,6 +1336,8 @@ Object.assign(SIM, {
       lap('traffic');
     }
     if (day % 3 === 0) updateDemand(S, false);
+    saveState(S);
+    fireNotice(S);
     const ms = performance.now() - t0;
     X.days++;
     X.dayMs += ms;
@@ -1075,23 +1353,30 @@ Object.assign(SIM, {
   },
 
   /* ---------------- fires ---------------- */
-  ignite(b) {
+  /**
+   * Sets b on fire. opts.disaster (or b.fireCause === 'disaster'): part of a disaster — the disaster
+   * card is its notification, the sim stays silent. Returns false if b cannot burn (parks without
+   * staff, rubble, already burning).
+   */
+  ignite(b, opts) {
     if (typeof b === 'number') b = VC.world.get(b);
     if (!b || b.key === 'rubble' || b.fire > 0 || !VC.state || !VC.state.buildings.has(b.id)) return false;
     const def = defOf(b);
     if (def && def.group === 'parks' && !def.jobs) return false;
     b.fire = 0.05;
     b.simDispatched = false;
+    b.simFireD = !!((opts && opts.disaster) || b.fireCause === 'disaster');
     X.burning && X.burning.add(b.id);
     VC.world.changed(b);
-    VC.bus.emit('sfx', { name: 'fire', x: b.x + b.w / 2, z: b.z + b.d / 2 });
-    const day = VC.state.time.day;
-    if (X.burning && X.burning.size === 1 && day - (X.lastFireToast || -99) > 3) {
-      X.lastFireToast = day;
-      toast(`Fire at ${SIM.buildingName(b)}!`, 'warn', '🔥');
+    // no sound here: the aggregated fire toast (fireNotice) is the one cue, and the audio
+    // module's ambience voices burning buildings
+    if (!b.simFireD) {
+      X.fireNew = (X.fireNew || 0) + 1;
+      X.fireNewB = b;
     }
     return true;
   },
+
   extinguish(b) {
     if (typeof b === 'number') b = VC.world.get(b);
     if (!b || !(b.fire > 0)) return false;
@@ -1189,25 +1474,43 @@ Object.assign(SIM, {
       L('Happiness', pct(hs), hs > 0.65 ? 'good' : hs < 0.35 ? 'bad' : null);
       evalHappy(S, b, factors);
       factors.sort((p, q) => Math.abs(q.raw) - Math.abs(p.raw));
-      // level-up hint
+      // level-up hint: every gate tryLevelUp checks, so "Ready" really means ready
       if (b.level < 3 && !b.abandoned) {
         const next = b.level + 1;
         const need = [];
-        if (b.pop < b.cap * 0.85) need.push('fuller');
+        if (!fullEnough(b)) need.push(b.zt === 1 ? 'more residents' : 'more workers');
         if (hs <= 0.65) need.push('happier');
         if (b.zt === 3) { if (Math.max(m.edu[i], X.cityEdu * 255) < EDU_REQ[next]) need.push('better education'); }
         else if (m.landValue[i] < LV_REQ[b.zt][next]) need.push('higher land value');
         if (!b.watered) need.push('water');
-        L('Next level', need.length ? 'Needs ' + need.join(', ') : 'Ready to upgrade', need.length ? null : 'good');
+        if (!b.powered) need.push('power');
+        if (S.demand[zk] <= 0) need.push(`more ${VC.ZONES[b.zt].name.toLowerCase()} demand`);
+        let txt = need.length ? 'Needs ' + need.join(', ') : 'Ready to upgrade';
+        if (!need.length && X.growAcc[b.zt] <= 0) txt = 'Ready — waiting for the city to grow';
+        L('Next level', txt, need.length ? null : 'good');
+      }
+      // repainted with another density: the lot is waiting to be redeveloped
+      const zc = S.zone[i];
+      if (zc && zc >> 2 === b.zt && (zc & 3) !== b.den && !b.abandoned) {
+        const up = (zc & 3) > b.den;
+        L('Rezoned', `${up ? 'Upzoning' : 'Downzoning'} to ${VC.DENSITY[zc & 3].toLowerCase()} density` + (up && S.demand[zk] <= 0.02 ? ' (waits for demand)' : ''), 'warn');
       }
       if (S.demand[zk] < -0.3) problems.push(`Low ${VC.ZONES[b.zt].name.toLowerCase()} demand`);
       if (b.zt === 1 && b.simCommute < 0 && b.built >= 1) problems.push('No road route to any jobs');
+      if (b.zt === 1 && b.simCommute > 30) problems.push('Very long commute — build avenues or transit');
       if (b.zt !== 1 && X.fill < 0.7) problems.push('Not enough workers');
       if (b.zt === 2 && S.demand.C < -0.3) problems.push('Not enough customers');
       if (b.simGarbage > 0.4) problems.push('Garbage piling up — no garbage pickup');
       if (X.taxW[b.zt] && X.taxW[b.zt][b.wealth | 0] < -0.3) problems.push('Taxes too high');
     } else if (def) {
       subtitle = `${subtitle}${def.dept ? ' · ' + ((VC.DEPARTMENTS.find((d) => d.key === def.dept) || {}).name || '') : ''}`;
+      const closed = closedVenue(S, def);
+      const access = X.accessMul(b, def);
+      if (closed) {
+        const pol = VC.POLICY[def.requiresPolicy];
+        L('Status', 'Closed', 'bad');
+        problems.push(`Closed — requires the ${pol ? pol.name : def.requiresPolicy} policy`);
+      }
       if (def.power) {
         const out = X.powerOut(S, b);
         L('Output', `${Math.round(out)} MW` + (b.key === 'wind_turbine' ? ' (wind)' : b.key === 'solar_farm' ? ' (sun)' : ''), 'good');
@@ -1217,29 +1520,40 @@ Object.assign(SIM, {
         const out = X.waterOut(S, b);
         L('Output', `${Math.round(out)} kL` + (out <= 0 && b.built >= 1 ? ' (needs power)' : ''), out > 0 ? 'good' : 'bad');
         L('City water', `${VC.fmt.num(S.stats.waterDemand)} / ${VC.fmt.num(S.stats.waterSupply)} kL used`, X.water.shortage ? 'bad' : null);
+        if (out <= 0 && b.built >= 1 && !b.powered) problems.push('No power — pumps need electricity (connect a road or power line)');
       }
       if (def.jobs) L('Staff', `${VC.fmt.num(b.simJobs != null ? b.simJobs : 0)} / ${def.jobs}`);
       if (def.housing) L('Residents', `${VC.fmt.num(b.pop)} / ${VC.fmt.num(def.housing)}`);
       if (def.cover) {
-        const eff = X.eff(def.dept) * (b.powered ? 1 : 0.4);
+        const capF = def.capacity && b.simCapF > 0 ? b.simCapF : 1;
+        const eff = X.eff(def.dept) * (b.powered ? 1 : 0.4) * access * capF;
         for (const svc in def.cover) {
           const s = VC.SERVICES.find((q) => q.key === svc);
           L((s ? s.name : svc) + ' radius', `${Math.round(def.cover[svc] * (0.45 + 0.55 * Math.min(eff, 1.3)))} tiles`);
         }
+        if (def.capacity) {
+          const cap = Math.round(def.capacity * clamp(X.eff(def.dept), 0.3, 1.3));
+          L('Serves', `${VC.fmt.num(b.simLoad || 0)} / ${VC.fmt.num(cap)} residents`, (b.simLoad || 0) > cap ? 'warn' : null);
+          if ((b.simLoad || 0) > cap * 1.15) problems.push('Overloaded — too many residents for one building: build another nearby');
+        }
         L('Effectiveness', pct(eff), eff < 0.7 ? 'warn' : 'good');
         if (X.eff(def.dept) < 0.6) problems.push('Underfunded — raise the budget');
       }
-      if (def.tourism) L('Tourism', '+' + def.tourism);
-      if (def.income) L('Income', VC.fmt.money(def.income) + '/mo', 'good');
+      if (def.tourism) L('Tourism', closed ? 'Closed' : '+' + def.tourism, closed ? 'bad' : null);
+      if (def.income) L('Income', closed ? 'Closed' : VC.fmt.money(def.income) + '/mo', closed ? 'bad' : 'good');
       if (def.happy) L('City happiness', '+' + (def.happy * 100).toFixed(1) + '%', 'good');
       if (def.pollution) L('Pollution', lvl(def.pollution), 'bad');
+      if (access < 1) problems.push(`No road access — staff and vehicles can't reach it (works at ${Math.round(access * 100)}%)`);
     }
     // shared lines
     const needP = b.simNeedP, needW = b.simNeedW;
     if (needP) L('Power', b.powered ? 'Connected' : 'No power', b.powered ? 'good' : 'bad');
     if (needW) L('Water', b.watered ? 'Connected' : 'No water', b.watered ? 'good' : b.key === 'grow' && b.den === 1 ? 'warn' : 'bad');
     if (needP && !b.powered) problems.push(X.power.shortage && b.simNetP ? 'Power shortage — build more power plants' : 'Not connected to the power grid');
-    if (needW && !b.watered) problems.push(X.water.shortage && b.simNetW ? 'Water shortage — build more pumps' : 'No water service — connect with roads to a pump or tower');
+    if (needW && !b.watered) {
+      const dark = X.water.unpoweredSources | 0;
+      problems.push(X.water.shortage && b.simNetW ? (dark ? `Water shortage — ${dark} pump${dark > 1 ? 's have' : ' has'} no power` : 'Water shortage — build more pumps') : 'No water service — connect with roads to a pump or tower');
+    }
     if (b.key === 'grow' || b.key === 'arcology') {
       L('Land value', VC.fmt.money(m.landValue[i] * 40) + ' /tile', m.landValue[i] > 150 ? 'good' : m.landValue[i] < 60 ? 'warn' : null);
       L('Pollution', lvl(m.pollution[i]), m.pollution[i] > 120 ? 'bad' : null);
@@ -1248,12 +1562,15 @@ Object.assign(SIM, {
       if (b.simRoad >= 0) {
         const cg = SIM.trafficAt ? SIM.trafficAt(b.simRoad % S.W, (b.simRoad / S.W) | 0) : 0;
         L('Street traffic', cg > 1 ? 'Jammed' : cg > 0.6 ? 'Busy' : 'Light', cg > 1 ? 'bad' : cg > 0.6 ? 'warn' : null);
+        if (cg > 1) problems.push('Jammed street — build avenues, alternative routes or transit');
       }
       if (m.pollution[i] > 120) problems.push('Heavy air pollution');
       if (m.crime[i] > 120) problems.push('High crime — build police stations');
-      if (b.key === 'grow' && b.zt === 1 && m.fire[i] < 40) problems.push('No fire protection');
+      // industry burns 2x as often: flag it more readily
+      if (b.key === 'grow' && m.fire[i] < (b.zt === 3 ? 70 : 40)) problems.push(b.zt === 3 ? 'No fire protection — factories burn easily' : 'No fire protection');
     }
     if (b.simRoad < 0 && b.key === 'grow') problems.push('No road access');
+
     L('Age', b.age >= 360 ? Math.floor(b.age / 360) + ' yr' : Math.floor((b.age || 0) / 30) + ' mo');
     return { name, subtitle, lines, problems, factors };
   },
@@ -1273,23 +1590,33 @@ Object.assign(SIM, {
       connectedDemand: p.connectedDemand, shortage: !!p.shortage, deficit: p.demand > p.supply, unpowered: p.unpowered | 0, networks: p.networks | 0,
     };
   },
-  /** Same shape as powerInfo with sources:[{b, output}] (kL) and unwatered. */
+  /** Same shape as powerInfo with sources:[{b, output}] (kL), unwatered and unpoweredSources (pumps with no power). */
   waterInfo() {
     const p = X.water || { supply: 0, demand: 0, sources: [], served: 0 };
     return {
       supply: p.supply, demand: p.demand, sources: p.sources.slice(), served: p.served,
       connectedDemand: p.connectedDemand, shortage: !!p.shortage, deficit: p.demand > p.supply, unwatered: p.unwatered | 0, networks: p.networks | 0,
+      unpoweredSources: p.unpoweredSources | 0,
     };
   },
 
-  /** {police:{coverage, buildings, funding, effectiveness, name, icon}, …} coverage = share of residents covered. */
+  /**
+   * {police:{coverage, buildings, funding, effectiveness, name, icon, jobs, capacity, load, usage,
+   *  overloaded, noAccess}, …}. coverage = share of residents covered; capacity = residents the
+   * service's buildings can serve at the current funding; load = residents inside their areas;
+   * usage = population / capacity (> 1: the city needs more buildings); overloaded = buildings
+   * serving more than their capacity.
+   */
   serviceStats() {
     const S = VC.state;
     const res = {};
     if (!S) return res;
     const covered = {};
     for (const s of VC.SERVICES) {
-      res[s.key] = { name: s.name, icon: s.icon, coverage: 0, buildings: 0, funding: S.budget[s.dept] != null ? S.budget[s.dept] : 1, effectiveness: X.eff(s.dept), jobs: 0 };
+      res[s.key] = {
+        name: s.name, icon: s.icon, coverage: 0, buildings: 0, funding: S.budget[s.dept] != null ? S.budget[s.dept] : 1, effectiveness: X.eff(s.dept), jobs: 0,
+        capacity: 0, load: 0, usage: 0, overloaded: 0, noAccess: 0,
+      };
       covered[s.key] = 0;
     }
     let pop = 0;
@@ -1301,11 +1628,39 @@ Object.assign(SIM, {
         for (const s of VC.SERVICES) if (S.maps[s.key][b.simI] > 96) covered[s.key] += b.pop;
       } else if (b.key !== 'grow') {
         const def = VC.BLD[b.key];
-        if (def && def.cover && b.built >= 1) for (const k in def.cover) if (res[k]) { res[k].buildings++; res[k].jobs += def.jobs || 0; }
+        if (!def || !def.cover || b.built < 1) continue;
+        for (const k in def.cover) {
+          const r = res[k];
+          if (!r) continue;
+          r.buildings++;
+          r.jobs += def.jobs || 0;
+          if (X.accessMul(b, def) < 1) r.noAccess++;
+          if (def.capacity) {
+            const cap = def.capacity * clamp(X.eff(def.dept), 0.3, 1.3);
+            r.capacity += cap;
+            r.load += b.simLoad || 0;
+            if ((b.simLoad || 0) > cap * 1.15) r.overloaded++;
+          }
+        }
       }
     }
-    for (const s of VC.SERVICES) res[s.key].coverage = pop > 0 ? covered[s.key] / pop : 0;
+    for (const s of VC.SERVICES) {
+      const r = res[s.key];
+      r.coverage = pop > 0 ? covered[s.key] / pop : 0;
+      r.capacity = Math.round(r.capacity);
+      r.usage = r.capacity > 0 ? pop / r.capacity : 0;
+    }
     return res;
+  },
+
+  /** Sim weather for today: {type: clear|cloudy|rain|storm|snow, cloud, wind, wet 0..1, windDir}. */
+  weather() {
+    const w = X.wx || (VC.state ? simWeather(VC.state) : null);
+    return w ? { type: w.type, cloud: w.cloud, wind: w.wind, wet: w.wet, windDir: w.windDir } : { type: 'clear', cloud: 0.2, wind: 0.3, wet: 0, windDir: 0.6 };
+  },
+  /** Does a catalog building (key) need a street/avenue at the door to work fully? */
+  needsRoadAccess(key) {
+    return X.needsAccess(VC.BLD[key]);
   },
 
   /** City-wide problem counts for advisors/HUD. */

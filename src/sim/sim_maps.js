@@ -2,17 +2,26 @@
  * VOXELPOLIS — simulation: derived per-tile maps (part of VC.sim).
  *
  *   VC.sim.computeMaps()  rewrites every S.maps[VC.MAP_KEYS] layer (Uint8 0..255) except 'traffic'
- *                         (traffic.js owns it), bumps S.ver.maps, emits 'mapsUpdated'.
+ *                         (traffic.js owns it), bumps S.ver.maps, emits 'mapsUpdated'. Synchronous.
+ *   X.startMaps()/stepMaps(ms)  the same pass in 6 stages spread over frames (the live game uses
+ *                         this so a 256 map never stalls one frame for the whole pass).
  *
  * COVERAGE (police, fire, health, edu, park, transit, garbage): each built service building stamps a
- *   plateau-then-smooth-falloff disc; radius & strength scale with VC.econ.effectiveness(dept) and
- *   drop to 40% while unpowered. Overlaps add softly (max + 1/4 of the smaller). Trees add a little park.
+ *   plateau-then-smooth-falloff disc; radius & strength scale with VC.econ.effectiveness(dept), drop
+ *   to 40% while unpowered and to 30% without a street at the door (X.accessMul). CAPACITY: a
+ *   building with def.capacity serves that many residents at full strength; the residents inside
+ *   its disc are shared with overlapping buildings of the same service (each resident counts
+ *   1/n for n covering buildings); overload (capF = min(1, capacity / load)) shrinks the radius a
+ *   little and the strength by capF squared
+ *   (b.simLoad = residents it serves, b.simCapF = that factor). Overlaps add softly (max + 1/4 of
+ *   the smaller). Trees add a little park.
  * POLLUTION: industry (dirty low-tech, clean high-tech), catalog sources (def.pollution/pollR), road
- *   traffic, garbage, fires; blurred, drifted downwind (S.weather.windDir), minus trees & parks.
+ *   traffic, garbage, fires; blurred, drifted downwind (sim weather X.wx.windDir), minus trees & parks.
  * NOISE: roads by type + traffic, industry, commerce, def.noise/noiseR; blurred; trees damp it.
  * CRIME: people density x poverty (low land value, unemployment) + abandoned buildings, minus police.
- * LAND VALUE: base 60 + water views + elevation + def.lv stamps + parks + services + shops + trees
- *   - pollution - crime - noise - industry; smoothed.
+ * LAND VALUE: base 60 + water views + elevation + def.lv stamps (positive ones scale with the
+ *   department's funding, up to 100%) + parks + services + shops + trees - pollution - crime - noise
+ *   - industry (jammed roads count through their extra noise); smoothed.
  * HAPPINESS: per-building happiness painted on footprints and feathered 1 tile around.
  *
  * EFFICIENCY: everything except the coverage stamps is computed only inside the DEVELOPED RECT
@@ -37,7 +46,7 @@ X.ensureMaps = function (S) {
   const N = S.N;
   if (X.mapN === N && X.fA) return;
   X.mapN = N;
-  for (const k of ['fA', 'fB', 'polF', 'noiF', 'lvF', 'indF', 'comF', 'popF', 'crF', 'treeD', 'hapS', 'hapW']) X[k] = new Float32Array(N);
+  for (const k of ['fA', 'fB', 'polF', 'noiF', 'lvF', 'indF', 'comF', 'popF', 'crF', 'treeD', 'hapS', 'hapW', 'resF', 'cntF']) X[k] = new Float32Array(N);
   X.waterDist = new Uint8Array(N);
   X.lvBase = new Uint8Array(N);
   X.lvPrev = new Uint8Array(N); // last land value (crime's poverty input)
@@ -208,19 +217,98 @@ function devRect(S) {
   return R;
 }
 
-function finish(S, t0) {
-  X.mapsDirty = false;
+/** Coverage effectiveness of a built catalog building before capacity: funding x power x road access. */
+function coverF(b, def, effCache) {
+  return (effCache[def.dept] != null ? effCache[def.dept] : 1) * (b.powered ? 1 : 0.4) * (X.accessMul ? X.accessMul(b, def) : 1);
+}
+/** Tiles of a disc (same rule as stampCover): calls fn(i) for every tile centre inside radius r. */
+function forDisc(S, cx, cz, r, fn) {
+  const W = S.W, H = S.H;
+  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W - 1, Math.ceil(cx + r));
+  const z0 = Math.max(0, Math.floor(cz - r)), z1 = Math.min(H - 1, Math.ceil(cz + r));
+  const r2 = r * r;
+  for (let z = z0; z <= z1; z++) {
+    const dz = z + 0.5 - cz;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx;
+      if (dx * dx + dz * dz < r2) fn(z * W + x);
+    }
+  }
+}
+/**
+ * Service capacity: residents inside each capacity-limited service building's disc, shared between
+ * overlapping buildings of the same service -> b.simLoad, b.simCapF = min(1, capacity / load).
+ */
+function serviceLoads(S, effCache) {
+  const res = X.resF, cnt = X.cntF, W = S.W;
+  res.fill(0);
+  const groups = X._svcGroups || (X._svcGroups = {});
+  for (const k in groups) groups[k].length = 0;
+  for (const b of S.buildings.values()) {
+    if (b.key === 'grow') {
+      if (b.zt !== 1 || !(b.pop > 0)) continue;
+      const per = b.pop / (b.w * b.d);
+      for (let z = b.z; z < b.z + b.d; z++) for (let x = b.x; x < b.x + b.w; x++) res[z * W + x] += per;
+      continue;
+    }
+    const def = VC.BLD[b.key];
+    if (!def) continue;
+    if (def.housing && b.pop > 0) {
+      const per = b.pop / (b.w * b.d);
+      for (let z = b.z; z < b.z + b.d; z++) for (let x = b.x; x < b.x + b.w; x++) res[z * W + x] += per;
+    }
+    if (!def.cover || !def.capacity) continue;
+    b.simLoad = 0;
+    b.simCapF = 1;
+    if (b.built < 1) continue;
+    const f = coverF(b, def, effCache);
+    if (!(f > 0)) continue;
+    const fr = 0.45 + 0.55 * Math.min(f, 1.3);
+    for (const svc in def.cover) {
+      const g = groups[svc] || (groups[svc] = []);
+      // better-funded departments handle more people per building (more staff)
+      const cap = def.capacity * M.clamp(effCache[def.dept] != null ? effCache[def.dept] : 1, 0.3, 1.3);
+      g.push({ b, cx: b.x + b.w * 0.5, cz: b.z + b.d * 0.5, r: def.cover[svc] * fr, cap, load: 0 });
+    }
+  }
+  for (const svc in groups) {
+    const g = groups[svc];
+    if (!g.length) continue;
+    for (const e of g) forDisc(S, e.cx, e.cz, e.r, (i) => { cnt[i] += 1; });
+    for (const e of g) {
+      let load = 0;
+      forDisc(S, e.cx, e.cz, e.r, (i) => { if (res[i] > 0) load += res[i] / cnt[i]; });
+      e.load = load;
+    }
+    for (const e of g) forDisc(S, e.cx, e.cz, e.r, (i) => { cnt[i] = 0; });
+    for (const e of g) {
+      const b = e.b;
+      b.simLoad = Math.max(b.simLoad, Math.round(e.load));
+      b.simCapF = Math.min(b.simCapF, e.load > e.cap ? e.cap / e.load : 1);
+    }
+  }
+}
+
+/** End of a map pass. tWork = ms actually spent computing (a staged pass spans several frames). */
+function finish(S, t0, tWork) {
   X.lastMaps = performance.now();
-  X.mapsMs = X.lastMaps - t0;
+  X.mapsMs = tWork != null ? tWork : X.lastMaps - t0;
   S.ver.maps++;
   VC.bus.emit('mapsUpdated');
 }
 
 /* ---------------- main ---------------- */
-SIM.computeMaps = function () {
-  const S = VC.state;
-  if (!S || !S.maps) return;
+const COVER_KEYS = ['police', 'fire', 'health', 'edu', 'park', 'transit', 'garbage'];
+/**
+ * The map pass as a sequence of stages (generator; `yield` between stages). Each stage clears and
+ * rewrites only the output maps it owns, so the maps stay valid between stages: coverage (+ point
+ * sources) -> pollution -> noise -> crime -> land value -> happiness. Scratch buffers live in X and
+ * are only touched by the running job.
+ */
+function* mapsJob(S) {
   const t0 = performance.now();
+  let tWork = 0, tStage = t0;
+  const lapW = () => { const n = performance.now(); tWork += n - tStage; };
   X.ensureNet(S);
   X.ensureMaps(S);
   const W = S.W, H = S.H, N = S.N, maps = S.maps, mods = S.mods;
@@ -229,18 +317,25 @@ SIM.computeMaps = function () {
     X.terrVer = (X.terrVer || 0) + 1;
   }
   if (X.staticVer !== X.terrVer || S.time.day - X.staticDay >= 60 || S.time.day < X.staticDay) refreshStatic(S);
-  for (const k of VC.MAP_KEYS) if (k !== 'traffic' && k !== 'landValue') maps[k].fill(0);
-  // land value: static base everywhere (scaled by policy); city effects overwrite the developed rect
   const lvMul = Math.max(0, 1 + (mods.landValue || 0));
   const lvOut = maps.landValue, base = X.lvBase;
   const eduAdd = (X.cityEdu || 0) * 6;
-  for (let i = 0; i < N; i++) {
-    const bv = base[i];
-    const v = bv ? (bv + eduAdd) * lvMul : 0;
-    lvOut[i] = v >= 255 ? 255 : v;
+  /** land value: static base everywhere (scaled by policy); city effects overwrite the developed rect */
+  const lvBaseFill = () => {
+    for (let i = 0; i < N; i++) {
+      const bv = base[i];
+      const v = bv ? (bv + eduAdd) * lvMul : 0;
+      lvOut[i] = v >= 255 ? 255 : v;
+    }
+  };
+  const R0 = devRect(S);
+  if (!R0) {
+    for (const k of VC.MAP_KEYS) if (k !== 'traffic' && k !== 'landValue') maps[k].fill(0);
+    lvBaseFill();
+    lapW();
+    return finish(S, t0, tWork);
   }
-  const R = devRect(S);
-  if (!R) return finish(S, t0);
+  const R = R0.slice(); // own copy: the rect must not change while the job runs across frames
   const rx0 = R[0], rz0 = R[1], rx1 = R[2], rz1 = R[3];
 
   const polF = X.polF, noiF = X.noiF, lvF = X.lvF, indF = X.indF, comF = X.comF, popF = X.popF, crF = X.crF;
@@ -252,7 +347,9 @@ SIM.computeMaps = function () {
   for (const d of VC.DEPARTMENTS) effCache[d.key] = X.eff(d.key);
   const cityEdu = X.cityEdu || 0;
 
-  /* ---- buildings: coverage stamps + point sources ---- */
+  /* ======== stage 1: coverage stamps + point sources ======== */
+  for (const k of COVER_KEYS) if (maps[k]) maps[k].fill(0);
+  serviceLoads(S, effCache);
   for (const b of S.buildings.values()) {
     const cx = b.x + b.w * 0.5, cz = b.z + b.d * 0.5;
     const area = b.w * b.d;
@@ -263,15 +360,21 @@ SIM.computeMaps = function () {
     if (b.key !== 'grow') {
       const def = VC.BLD[b.key];
       if (!def || b.built < 1) continue;
-      const f = (effCache[def.dept] != null ? effCache[def.dept] : 1) * (b.powered ? 1 : 0.4);
-      if (def.cover && f > 0) {
-        const fr = 0.45 + 0.55 * Math.min(f, 1.3);
-        const str = 255 * Math.min(1.25, 0.3 + 0.8 * f);
-        for (const svc in def.cover) if (maps[svc]) stampCover(maps[svc], S, cx, cz, def.cover[svc] * fr, str);
+      if (def.cover) {
+        // overload (capF < 1) shrinks the radius a little and weakens the service sharply:
+        // a station serving twice its capacity barely counts as coverage
+        const capF = def.capacity && b.simCapF > 0 ? b.simCapF : 1;
+        const f0 = coverF(b, def, effCache), f = f0 * capF;
+        if (f > 0) {
+          const fr = 0.45 + 0.55 * Math.min(f, 1.3);
+          const str = 255 * Math.min(1.25, 0.3 + 0.8 * f0) * capF * capF;
+          for (const svc in def.cover) if (maps[svc]) stampCover(maps[svc], S, cx, cz, def.cover[svc] * fr, str);
+        }
       }
       if (def.pollution) stampRadial(polF, S, cx, cz, def.pollR || 4, def.pollution * (b.fire > 0 ? 1.4 : 1));
       if (def.noise) stampRadial(noiF, S, cx, cz, def.noiseR || 3, def.noise);
-      if (def.lv) stampRadial(lvF, S, cx, cz, def.lvR || 4, def.lv);
+      // amenities (parks, landmarks, schools) lose their land-value pull when their budget is cut
+      if (def.lv) stampRadial(lvF, S, cx, cz, def.lvR || 4, def.lv > 0 ? def.lv * Math.min(1, effCache[def.dept] != null ? effCache[def.dept] : 1) : def.lv);
       const jobsPer = (b.simJobs || 0) / area;
       const resPer = def.housing ? b.pop / area : 0;
       for (let z = b.z; z < b.z + b.d; z++)
@@ -326,7 +429,8 @@ SIM.computeMaps = function () {
       if (r) {
         const t = traffic[i] * (1 / 255);
         polF[i] += (r === 3 ? 22 : r === 2 ? 8 : 3) + 70 * t;
-        noiF[i] += (r === 3 ? 70 : r === 2 ? 38 : 18) + 70 * t;
+        // jammed roads (t > 0.66 = over capacity) are much noisier: honking, idling engines
+        noiF[i] += (r === 3 ? 70 : r === 2 ? 38 : 18) + 70 * t + (t > 0.66 ? 150 * (t - 0.66) : 0);
       }
       treeD[i] = trees[i] * (1 / 3);
     }
@@ -341,15 +445,20 @@ SIM.computeMaps = function () {
         park[i] = v > 255 ? 255 : v;
       }
     }
+  lapW();
+  yield 1;
+  tStage = performance.now();
 
-  /* ---- pollution: blur, drift downwind, sinks ---- */
+  /* ======== stage 2: pollution: blur, drift downwind, sinks ======== */
   blur(polF, S, R, 2, 2);
-  const wind = S.weather ? M.sat(S.weather.wind != null ? S.weather.wind : 0.5) : 0.5;
-  const wdir = S.weather && S.weather.windDir != null ? S.weather.windDir : 0.6;
+  const wx = X.wx; // sim weather (never the visual one)
+  const wind = wx ? M.sat(wx.wind) : 0.5;
+  const wdir = wx ? wx.windDir : 0.6;
   const sh = 1 + 2 * wind;
   const sx = Math.round(Math.cos(wdir) * sh), sz = Math.round(Math.sin(wdir) * sh);
   const pMul = Math.max(0, 1 + (mods.pollution || 0));
   const polOut = maps.pollution;
+  polOut.fill(0);
   for (let z = rz0; z <= rz1; z++) {
     const uz = M.clamp(z - sz, 0, H - 1);
     for (let x = rx0; x <= rx1; x++) {
@@ -360,20 +469,28 @@ SIM.computeMaps = function () {
       polOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
     }
   }
+  lapW();
+  yield 2;
+  tStage = performance.now();
 
-  /* ---- noise ---- */
+  /* ======== stage 3: noise ======== */
   blur(noiF, S, R, 1, 2);
   const nMul = Math.max(0, 1 + (mods.noise || 0));
   const noiOut = maps.noise;
+  noiOut.fill(0);
   for (let z = rz0; z <= rz1; z++)
     for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
       const v = (noiF[i] - treeD[i] * 10) * nMul;
       noiOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
     }
+  lapW();
+  yield 3;
+  tStage = performance.now();
 
-  /* ---- crime (poverty uses the previous land value) ---- */
+  /* ======== stage 4: crime (poverty uses the previous land value) ======== */
   const police = maps.police, lvPrev = X.lvPrev;
   const unemp = S.stats.unemployment || 0;
+  fA.fill(0);
   for (let z = rz0; z <= rz1; z++)
     for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
       const p = popF[i];
@@ -386,13 +503,17 @@ SIM.computeMaps = function () {
   blur(fA, S, R, 1, 2);
   const cMul = Math.max(0, 1 + (mods.crime || 0));
   const crOut = maps.crime;
+  crOut.fill(0);
   for (let z = rz0; z <= rz1; z++)
     for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
       const v = (fA[i] - police[i] * (0.8 / 255) - park[i] * (0.08 / 255)) * cMul * 255;
       crOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
     }
+  lapW();
+  yield 4;
+  tStage = performance.now();
 
-  /* ---- land value (rect) ---- */
+  /* ======== stage 5: land value (rect) ======== */
   blur(comF, S, R, 2, 2);
   blur(indF, S, R, 2, 2);
   const hgt = S.height, wd = X.waterDist, edu = maps.edu, health = maps.health;
@@ -412,6 +533,7 @@ SIM.computeMaps = function () {
     }
   // (no final blur: its inputs are already smooth, and blurring would mix in the zero-valued water
   // tiles and rob waterfront lots of their premium)
+  lvBaseFill();
   // blend into the static base near the rect border so there is no visible seam
   // (only on rect sides that are not the map edge)
   for (let z = rz0; z <= rz1; z++) {
@@ -425,14 +547,18 @@ SIM.computeMaps = function () {
     }
   }
   lvPrev.set(lvOut);
+  lapW();
+  yield 5;
+  tStage = performance.now();
 
-  /* ---- happiness: footprints + 1-tile feather ---- */
+  /* ======== stage 6: happiness: footprints + 1-tile feather ======== */
   const t = lvF; // lvF is no longer needed: reuse as scratch
   blurH(hapS, fB, W, rx0, rz0, rx1, rz1, 1);
   blurV(fB, fA, W, H, rx0, rz0, rx1, rz1, 1);
   blurH(hapW, fB, W, rx0, rz0, rx1, rz1, 1);
   blurV(fB, t, W, H, rx0, rz0, rx1, rz1, 1);
   const hOut = maps.happiness;
+  hOut.fill(0);
   for (let z = rz0; z <= rz1; z++)
     for (let x = rx0, i = z * W + rx0; x <= rx1; x++, i++) {
       let v = 0;
@@ -441,5 +567,42 @@ SIM.computeMaps = function () {
       v *= 255;
       hOut[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
     }
-  return finish(S, t0);
+  lapW();
+  return finish(S, t0, tWork);
+}
+
+/**
+ * Recomputes every map now (synchronously; cancels a running staged job). Used by reset, by
+ * VC.debug.run and whenever the sim is not inside a frame update.
+ */
+SIM.computeMaps = function () {
+  const S = VC.state;
+  if (!S || !S.maps) return;
+  X.mapsJob = null;
+  X.mapsDirty = false;
+  const job = mapsJob(S);
+  while (!job.next().done);
+};
+/**
+ * Starts a staged map pass (one stage per call of stepMaps — the sim advances it once per frame),
+ * unless one is running already. Keeps big maps from stalling a frame for the whole pass.
+ */
+X.startMaps = function () {
+  const S = VC.state;
+  if (!S || !S.maps || X.mapsJob) return;
+  X.mapsDirty = false;
+  X.mapsJob = mapsJob(S);
+  X.mapsJobS = S;
+};
+/** Advances a running staged map pass by one stage (at most budgetMs, at least one stage). */
+X.stepMaps = function (budgetMs) {
+  const job = X.mapsJob;
+  if (!job) return;
+  if (X.mapsJobS !== VC.state) { X.mapsJob = null; return; }
+  const t0 = performance.now();
+  do {
+    let r;
+    try { r = job.next(); } catch (e) { X.mapsJob = null; throw e; }
+    if (r.done) { X.mapsJob = null; return; }
+  } while (performance.now() - t0 < (budgetMs || 0));
 };

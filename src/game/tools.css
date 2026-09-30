@@ -36,3 +36,14 @@
 #ui .tool-cursor.bad { border-color: rgba(255, 90, 106, 0.55); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 90, 106, 0.2) inset; }
 #ui .tool-cursor.bad .tc-cost { color: #ff9aa4; text-shadow: none; }
 #ui .tool-cursor.warn { border-color: rgba(255, 200, 61, 0.45); }
+/* a commit was refused (not enough money): shake + glow. Uses the independent translate/scale properties because
+   transform positions the label at the cursor. */
+#ui .tool-cursor.flash { animation: tcFlash 0.6s ease-out; }
+@keyframes tcFlash {
+  0% { translate: 0 0; scale: 1; }
+  15% { translate: -4px 0; scale: 1.08; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), 0 0 0 3px rgba(255, 90, 106, 0.55); }
+  30% { translate: 4px 0; }
+  45% { translate: -3px 0; }
+  60% { translate: 2px 0; scale: 1; }
+  100% { translate: 0 0; scale: 1; }
+}

@@ -9,24 +9,39 @@
  * Particles are left to the fx module, which reacts to 'built' and 'bldRemove'.
  *
  *   roadPath(x0,z0,x1,z1, straight)    -> [{x,z}] L-shaped (longer axis first) or straight (dominant axis)
- *   canBuildRoad(tiles, type)          -> plan {ok, cost, reason, bad:[i], count, bridges, levelCost, status, levels}
+ *   canBuildRoad(tiles, type)          -> plan {ok, cost, reason, bad:[i], count, bridges, levelCost, status, levels,
+ *                                         tiles} (status/levels/bad index plan.tiles = the input minus duplicates)
  *   buildRoad(tiles, type)             -> {ok, cost, reason, count}
- *   canZone / zone(x0,z0,x1,z1, code)  code 0 = dezone (removes growables, demolish fee)
+ *   canZone / zone(x0,z0,x1,z1, code)  code 0 = dezone (removes growables, demolish fee); any other code must be
+ *                                      a VC.ZONE_TOOLS code (undefined / junk is rejected, never a silent dezone)
  *   canPlace(key,x,z,rot)              -> {ok, reason, cost, w, d, flattenCost, level, warn}
  *   placeBuilding(key,x,z,rot)         -> {ok, reason, cost, b}
- *   canBulldoze / bulldoze(x0,z0,x1,z1, opts {buildings, roads, trees, plines, zones})
- *   canPowerLine / powerLine(tiles)
- *   canPlantTrees / plantTrees(x0,z0,x1,z1, opts {tiles})     (+1 tree density, max 3)
+ *   canBulldoze / bulldoze(x0,z0,x1,z1, opts {buildings, roads, trees, plines, zones, ids})
+ *                                      ids (array | Set of building ids): only those buildings are demolished
+ *                                      (confirm dialogs pass the ids they showed, so a lot that changed meanwhile
+ *                                      is never demolished by mistake)
+ *   canPowerLine / powerLine(tiles)    (plan.tiles = the input minus duplicates)
+ *   canPlantTrees / plantTrees(x0,z0,x1,z1, opts {tiles})     (+1 tree density, max 3; duplicate tiles count once)
  *   brushTiles(x,z,radius)             -> [{x,z}] round brush, radius 0..3
  *   canTerraform / terraform(x,z,radius, mode 'raise'|'lower'|'level', level)
  *   UNDO: every commit is journaled (tiles touched + buildings added/removed + money spent).
  *     beginGroup(label) / endGroup() merge several commits (brush strokes, multi-place drags) into one step.
  *     canUndo() -> {ok, label, age}, undo() -> {ok, reason, refund}: allowed for UNDO_SEC seconds and only
- *     while every touched tile / added building is still exactly as the action left it.
+ *     while every touched tile / added building is still exactly as the action left it. Refunds are booked
+ *     under the money category 'refund' (so spending stats / achievements can tell them apart from income).
+ *
+ * INPUT VALIDATION: every public entry point rejects non-integer / non-finite coordinates ('Invalid position'),
+ *   off-map tiles ('Out of bounds'), unknown keys / modes / zone codes, and de-duplicates tile lists, so a bad
+ *   call can never create a corrupt building or charge for the same tile twice.
+ * MONEY: commits charge through VC.money; an unaffordable commit calls VC.money.spend, which is the ONLY emitter
+ *   of bus 'noMoney' (the HUD shows it). Actions never toast; the result is fail('Not enough money', {plan}).
  *
  * Road levels: consecutive road tiles may differ by at most 1 level (the terrain renders ramps). Bridges
  * (roads on water tiles) keep their seabed height and act as road level SEA+1 (the terrain deck level).
  * Steeper steps are auto-leveled toward the neighbouring road level (terraform cost), never below SEA.
+ * Bridges: at most MAX_BRIDGE water tiles in a row — counted across segments, i.e. the existing bridge that
+ *   continues a new run at an open path end (followed around corners) and existing bridge tiles in line with a new
+ *   tile along either axis count too — and every new run of water tiles must touch land or a road (bridgeCheck).
  */
 const C = VC.C, M = VC.M;
 const W = VC.world;
@@ -49,18 +64,54 @@ const mul = () => (VC.money && VC.money.costMul ? VC.money.costMul() : 1);
 const fmtPop = (n) => VC.fmt.num(n || 0);
 const lockReason = (unlock) => 'Locked: ' + fmtPop(unlock) + ' pop';
 const isRubble = (b) => b && b.key === 'rubble';
-const roadDef = (type) => VC.ROADS[type] || null;
+const roadDef = (type) => (Number.isInteger(type) && VC.ROADS[type]) || null;
+/** Catalog definition (own keys only: 'constructor' & co. are not buildings). */
+const bldDef = (key) => (typeof key === 'string' && Object.prototype.hasOwnProperty.call(VC.BLD, key) ? VC.BLD[key] : null);
+const isInt = Number.isInteger;
+const BAD_POS = 'Invalid position';
+const TERRAFORM_MODES = new Set(['raise', 'lower', 'level']);
+/** Building removal reasons (core/state.js). */
+const REM = VC.REMOVE || { BULLDOZE: 'bulldoze', REPLACE: 'replace', UNDO: 'undo' };
 
-/** Clips an (unordered) inclusive rectangle to the map. Returns {x0,z0,x1,z1,w,d} or null. */
+/** Clips an (unordered) inclusive rectangle to the map. Returns {x0,z0,x1,z1,w,d} or null (off-map / not integers). */
 function clipRect(x0, z0, x1, z1) {
   const S = VC.state;
-  if (!S) return null;
-  let a = Math.min(x0, x1) | 0, b = Math.max(x0, x1) | 0, c = Math.min(z0, z1) | 0, d = Math.max(z0, z1) | 0;
+  if (!S || !isInt(x0) || !isInt(z0) || !isInt(x1) || !isInt(z1)) return null;
+  let a = Math.min(x0, x1), b = Math.max(x0, x1), c = Math.min(z0, z1), d = Math.max(z0, z1);
   a = Math.max(0, a); c = Math.max(0, c);
   b = Math.min(S.W - 1, b); d = Math.min(S.H - 1, d);
   if (a > b || c > d) return null;
   return { x0: a, z0: c, x1: b, z1: d, w: b - a + 1, d: d - c + 1 };
 }
+/** Failure reason for a rectangle clipRect rejected. */
+function rectReason(x0, z0, x1, z1) {
+  return isInt(x0) && isInt(z0) && isInt(x1) && isInt(z1) ? 'Out of bounds' : BAD_POS;
+}
+/**
+ * Copy of a tile list without repeated tiles (first occurrence wins, order kept). Malformed entries stay in the
+ * list as {x: NaN, z: NaN} / as given so validators can flag them; only valid on-map tiles are de-duplicated.
+ */
+function uniqTiles(tiles) {
+  const S = VC.state, out = [];
+  if (!Array.isArray(tiles)) return out;
+  const seen = new Set();
+  for (const t of tiles) {
+    if (!t || typeof t !== 'object') { out.push({ x: NaN, z: NaN }); continue; }
+    if (isInt(t.x) && isInt(t.z) && W.inb(t.x, t.z)) {
+      const i = t.z * S.W + t.x;
+      if (seen.has(i)) continue;
+      seen.add(i);
+    }
+    out.push(t);
+  }
+  return out;
+}
+/** Invalid-tile reason ('' when the tile is a valid on-map integer tile). */
+function tileReason(t) {
+  if (!isInt(t.x) || !isInt(t.z)) return BAD_POS;
+  return W.inb(t.x, t.z) ? '' : 'Out of bounds';
+}
+const adjacent = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.z - b.z) === 1;
 /** Bounding box of a tile list. */
 function tilesBox(tiles) {
   let x0 = 1e9, z0 = 1e9, x1 = -1e9, z1 = -1e9;
@@ -82,19 +133,28 @@ function sfx(name, x, z, opts, vol) {
 function built(kind, box, key, cost, count, extra) {
   VC.bus.emit('built', Object.assign({ kind, x: box.x, z: box.z, w: box.w, d: box.d, key, cost, count }, extra || {}));
 }
-/** Charges several [amount, category] parts atomically. Emits 'noMoney' when unaffordable. */
+/**
+ * Charges several [amount, category] parts atomically. When the total is unaffordable, VC.money.spend is asked
+ * for it anyway: it refuses and emits bus 'noMoney' (the single owner of that event — never emit it here).
+ */
 function pay(parts) {
   let total = 0;
   for (const p of parts) total += Math.max(0, p[0]);
-  if (total <= 0) return true;
-  if (!VC.money.canAfford(total)) {
-    VC.bus.emit('noMoney', { amount: total, cat: parts[0][1] });
+  if (!Number.isFinite(total)) {
+    console.warn('[actions] bad cost', parts);
     return false;
   }
+  if (total <= 0) return true;
+  const sandbox = VC.state && VC.state.sandbox;
+  if (!VC.money.canAfford(total)) {
+    if (!VC.money.spend(total, parts[0][1])) return false; // emits 'noMoney'
+    if (J && !sandbox) J.spent.push([total, parts[0][1]]); // (cannot happen: canAfford and spend agree)
+    return true;
+  }
   for (const p of parts) {
-    if (p[0] <= 0) continue;
+    if (!(p[0] > 0)) continue;
     VC.money.spend(p[0], p[1], true);
-    if (J && !VC.state.sandbox) J.spent.push([p[0], p[1]]);
+    if (J && !sandbox) J.spent.push([p[0], p[1]]);
   }
   return true;
 }
@@ -153,7 +213,7 @@ function addB(props, opts) {
   }
   touchRect(props.x, props.z, w, d);
   const b = W.addBuilding(props, opts);
-  if (J) J.added.push(b.id);
+  if (b && J) J.added.push(b.id);
   return b;
 }
 function removeB(b, reason) {
@@ -180,6 +240,7 @@ function journaled(label, fn) {
 /** Round brush tiles around (x,z): radius 0 = 1 tile, 1 = 3x3, 2 = 21 tiles, 3 = 37 tiles. */
 function brushTiles(x, z, radius) {
   const out = [];
+  if (!isInt(x) || !isInt(z)) return out;
   const r = M.clamp(radius | 0, 0, 3), lim = r * r + r;
   for (let dz = -r; dz <= r; dz++)
     for (let dx = -r; dx <= r; dx++) {
@@ -187,6 +248,107 @@ function brushTiles(x, z, radius) {
       if (W.inb(x + dx, z + dz)) out.push({ x: x + dx, z: z + dz });
     }
   return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Bridges                                                               */
+/* ------------------------------------------------------------------ */
+/**
+ * Bridge rules for a road path (tiles already de-duplicated; status 3 = invalid position). Calls markBad(k, why)
+ * for offending tiles. A "deck" tile after the build = a water tile that has a road or is a tile of this path.
+ *  1. every run of consecutive touching water tiles in the path, plus the existing bridge that continues an open
+ *     end of the run (followed around corners: farthest existing deck tile by walking distance), is at most
+ *     MAX_BRIDGE tiles;
+ *  2. no new deck tile ends up in a straight line (x or z) of more than MAX_BRIDGE deck tiles — this is what
+ *     stops long bridges assembled from short segments (gaps filled afterwards, segments in line, …);
+ *  3. every run must touch land or a road (no roads floating in open water).
+ */
+function bridgeCheck(S, tiles, status, markBad) {
+  const n = tiles.length, SW = S.W;
+  const TOO_LONG = 'Bridge too long (max ' + MAX_BRIDGE + ')';
+  const path = new Set();
+  for (let k = 0; k < n; k++) if (status[k] !== 3) path.add(tiles[k].z * SW + tiles[k].x);
+  const water = (x, z) => S.height[z * SW + x] < C.SEA;
+  const deck = (x, z) => W.inb(x, z) && water(x, z) && (S.road[z * SW + x] > 0 || path.has(z * SW + x));
+  const oldDeck = (x, z) => W.inb(x, z) && water(x, z) && S.road[z * SW + x] > 0 && !path.has(z * SW + x);
+  /** Tiles satisfying fn in a straight line from (x,z) (exclusive), capped just above the limit. */
+  const walk = (x, z, dx, dz, fn) => {
+    let c = 0;
+    for (x += dx, z += dz; c <= MAX_BRIDGE && fn(x, z); x += dx, z += dz) c++;
+    return c;
+  };
+  /**
+   * Existing bridge continuing from tile (x,z): walking distance (BFS over existing deck tiles, never through
+   * this path) to its farthest tile, capped just above the limit. 0 when (x,z) is not an existing deck tile.
+   */
+  const chain = (x, z) => {
+    if (!oldDeck(x, z)) return 0;
+    const seen = new Set([z * SW + x]);
+    let front = [z * SW + x], depth = 1;
+    while (depth <= MAX_BRIDGE) {
+      const next = [];
+      for (const i of front) {
+        const cx = i % SW, cz = (i - cx) / SW;
+        for (let d = 0; d < 4; d++) {
+          const ax = cx + DX4[d], az = cz + DZ4[d];
+          if (!oldDeck(ax, az) || seen.has(az * SW + ax)) continue;
+          seen.add(az * SW + ax);
+          next.push(az * SW + ax);
+        }
+      }
+      if (!next.length) break;
+      depth++;
+      front = next;
+    }
+    return depth;
+  };
+  /** Existing bridges leaving tile t (not toward `back`), longest first. */
+  const ext = (t, back) => {
+    const v = [];
+    for (let d = 0; d < 4; d++) {
+      if (back && back.x === t.x + DX4[d] && back.z === t.z + DZ4[d]) continue;
+      v.push(chain(t.x + DX4[d], t.z + DZ4[d]));
+    }
+    return v.sort((a, b) => b - a);
+  };
+  const isW = (k) => status[k] !== 3 && water(tiles[k].x, tiles[k].z);
+  // 1 + 3: runs along the path
+  for (let k = 0; k < n; ) {
+    if (!isW(k)) { k++; continue; }
+    let e = k;
+    while (e + 1 < n && isW(e + 1) && adjacent(tiles[e], tiles[e + 1])) e++;
+    // an end is "open" unless the path continues onto land right there
+    const openS = !(k > 0 && status[k - 1] !== 3 && adjacent(tiles[k - 1], tiles[k]));
+    const openE = !(e + 1 < n && status[e + 1] !== 3 && adjacent(tiles[e], tiles[e + 1]));
+    const len = e - k + 1;
+    let total = len;
+    if (len === 1 && openS && openE) {
+      const v = ext(tiles[k], null);
+      total += v[0] + v[1];
+    } else {
+      if (openS) total += ext(tiles[k], len > 1 ? tiles[k + 1] : null)[0];
+      if (openE) total += ext(tiles[e], len > 1 ? tiles[e - 1] : null)[0];
+    }
+    let anchored = !openS || !openE;
+    for (let q = k; q <= e && !anchored; q++) {
+      const t = tiles[q];
+      if (S.road[t.z * SW + t.x]) anchored = true; // already part of the road network
+      for (let d = 0; d < 4 && !anchored; d++) {
+        const nx = t.x + DX4[d], nz = t.z + DZ4[d];
+        if (W.inb(nx, nz) && (!water(nx, nz) || S.road[nz * SW + nx])) anchored = true;
+      }
+    }
+    if (!anchored) for (let q = k; q <= e; q++) markBad(q, 'Bridges must start at land or a road');
+    else if (total > MAX_BRIDGE) for (let q = k; q <= e; q++) markBad(q, TOO_LONG);
+    k = e + 1;
+  }
+  // 2: straight deck lines through every new water tile
+  for (let k = 0; k < n; k++) {
+    if (!isW(k)) continue; // (also skips tiles rule 1 already rejected)
+    const t = tiles[k];
+    if (S.road[t.z * SW + t.x]) continue; // existing deck: its lines only grow through new tiles (checked)
+    if (1 + walk(t.x, t.z, 1, 0, deck) + walk(t.x, t.z, -1, 0, deck) > MAX_BRIDGE || 1 + walk(t.x, t.z, 0, 1, deck) + walk(t.x, t.z, 0, -1, deck) > MAX_BRIDGE) markBad(k, TOO_LONG);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -213,13 +375,16 @@ const A = (VC.actions = {
    */
   roadPath(x0, z0, x1, z1, straight) {
     const out = [];
-    if (!VC.state) return out;
-    x0 |= 0; z0 |= 0; x1 |= 0; z1 |= 0;
+    const S = VC.state;
+    if (!S || !isInt(x0) || !isInt(z0) || !isInt(x1) || !isInt(z1)) return out;
     const alongX = Math.abs(x1 - x0) >= Math.abs(z1 - z0);
     if (straight) {
       if (alongX) z1 = z0;
       else x1 = x0;
     }
+    // clamp to one tile outside the map: same on-map tiles, bounded loops for absurd inputs
+    x0 = M.clamp(x0, -1, S.W); x1 = M.clamp(x1, -1, S.W);
+    z0 = M.clamp(z0, -1, S.H); z1 = M.clamp(z1, -1, S.H);
     const push = (x, z) => { if (W.inb(x, z)) out.push({ x, z }); };
     const sx = Math.sign(x1 - x0), sz = Math.sign(z1 - z0);
     if (alongX) {
@@ -238,8 +403,9 @@ const A = (VC.actions = {
    */
   canBuildRoad(tiles, type) {
     const S = VC.state;
-    const n = tiles ? tiles.length : 0;
-    const res = { ok: false, cost: 0, reason: '', bad: [], count: 0, upgrades: 0, bridges: 0, leveled: 0, roadCost: 0, levelCost: 0, status: new Uint8Array(n), levels: new Int16Array(n), money: false, type };
+    tiles = S ? uniqTiles(tiles) : [];
+    const n = tiles.length;
+    const res = { ok: false, cost: 0, reason: '', bad: [], count: 0, upgrades: 0, bridges: 0, leveled: 0, roadCost: 0, levelCost: 0, status: new Uint8Array(n), levels: new Int16Array(n), money: false, type, tiles };
     const rd = roadDef(type);
     if (!S || !rd) { res.reason = 'Unknown road type'; return res; }
     if (!n) { res.reason = 'Nothing to build'; return res; }
@@ -251,18 +417,16 @@ const A = (VC.actions = {
       if (res.status[k] !== 3) { res.status[k] = 3; res.bad.push(k); }
       reasons.push(why);
     };
-    let run = 0, runStart = 0;
+    for (let k = 0; k < n; k++) {
+      const why = tileReason(tiles[k]);
+      if (why) markBad(k, why);
+    }
+    bridgeCheck(S, tiles, res.status, markBad);
     for (let k = 0; k < n; k++) {
       const { x, z } = tiles[k];
-      if (!W.inb(x, z)) { markBad(k, 'Out of bounds'); run = 0; continue; }
+      if (tileReason(tiles[k])) continue;
       const i = z * S.W + x, h = S.height[i], water = h < C.SEA, rt = S.road[i];
       res.levels[k] = water ? DECK_LVL : h;
-      // bridge length
-      if (water) {
-        if (!run) runStart = k;
-        run++;
-        if (run > MAX_BRIDGE) for (let q = runStart; q <= k; q++) markBad(q, 'Bridge too long (max ' + MAX_BRIDGE + ')');
-      } else run = 0;
       if (rt >= type) { res.status[k] = res.status[k] === 3 ? 3 : 1; fixed[k] = 1; continue; }
       const id = S.bld[i];
       if (id) {
@@ -280,13 +444,16 @@ const A = (VC.actions = {
       if (water) res.bridges++;
     }
     // ramps: neighbouring road levels may differ by at most 1 — relax toward the neighbours
+    // (only consecutive tiles that really touch: callers may pass arbitrary tile lists)
     const L = res.levels;
+    const link = new Uint8Array(n); // link[k] = tiles k-1 and k are valid 4-neighbours
+    for (let k = 1; k < n; k++) link[k] = !tileReason(tiles[k]) && !tileReason(tiles[k - 1]) && adjacent(tiles[k], tiles[k - 1]) ? 1 : 0;
     for (let it = 0; it < 4; it++) {
-      for (let k = 1; k < n; k++) if (!fixed[k]) L[k] = Math.max(C.SEA, M.clamp(L[k], L[k - 1] - 1, L[k - 1] + 1));
-      for (let k = n - 2; k >= 0; k--) if (!fixed[k]) L[k] = Math.max(C.SEA, M.clamp(L[k], L[k + 1] - 1, L[k + 1] + 1));
+      for (let k = 1; k < n; k++) if (link[k] && !fixed[k]) L[k] = Math.max(C.SEA, M.clamp(L[k], L[k - 1] - 1, L[k - 1] + 1));
+      for (let k = n - 2; k >= 0; k--) if (link[k + 1] && !fixed[k]) L[k] = Math.max(C.SEA, M.clamp(L[k], L[k + 1] - 1, L[k + 1] + 1));
     }
     for (let k = 1; k < n; k++) {
-      if (Math.abs(L[k] - L[k - 1]) > 1) {
+      if (link[k] && Math.abs(L[k] - L[k - 1]) > 1) {
         if (!fixed[k]) markBad(k, 'Too steep');
         else if (!fixed[k - 1]) markBad(k - 1, 'Too steep');
         else if (res.status[k] !== 1 || res.status[k - 1] !== 1) markBad(res.status[k] !== 1 ? k : k - 1, 'Too steep');
@@ -318,13 +485,14 @@ const A = (VC.actions = {
     const rd = roadDef(type);
     return journaled('Road', () => {
       if (!pay([[p.roadCost, 'roads'], [p.levelCost, 'terraform']])) return fail('Not enough money', { plan: p });
+      const tiles = p.tiles; // de-duplicated
       for (let k = 0; k < tiles.length; k++) {
         const st = p.status[k];
         if (st === 1 || st === 3) continue;
         const { x, z } = tiles[k];
         const i = z * S.W + x;
         const b = S.bld[i] ? S.buildings.get(S.bld[i]) : null;
-        if (isRubble(b)) removeB(b, 'bulldoze');
+        if (isRubble(b)) removeB(b, REM.BULLDOZE);
         if (S.height[i] >= C.SEA && p.levels[k] !== S.height[i]) setH(x, z, p.levels[k]);
         setR(x, z, type);
       }
@@ -339,15 +507,18 @@ const A = (VC.actions = {
   /* ================= ZONES ================= */
   /**
    * status per rect tile (row-major): 0 invalid/skip, 1 will be (re)zoned, 2 already this zone, 3 will be dezoned.
-   * Painting over growables of the SAME zone type changes the density of the lot (the building stays and is
-   * redeveloped by the sim eventually); other buildings, roads, water and power lines are skipped.
+   * Painting over growables of the SAME zone type at another density re-zones their lots (charged like any
+   * zoning): the building stays and the sim redevelops it to the new density (up- or down-zoning) over time.
+   * Other buildings, roads, water and power lines are skipped. code must be 0 (dezone) or a VC.ZONE_TOOLS code.
    */
   canZone(x0, z0, x1, z1, code) {
     const S = VC.state;
     const r = clipRect(x0, z0, x1, z1);
     const res = { ok: false, cost: 0, reason: '', count: 0, rect: r, status: null, remove: [], fee: 0, code, money: false };
-    if (!S || !r) { res.reason = 'Out of bounds'; return res; }
+    if (!S) { res.reason = 'No city'; return res; }
+    if (!r) { res.reason = rectReason(x0, z0, x1, z1); return res; }
     res.status = new Uint8Array(r.w * r.d);
+    if (!isInt(code) || (code && !VC.ZONE_TOOLS.some((t) => t.code === code))) { res.reason = 'Unknown zone'; return res; }
     const m = mul();
     if (!code) {
       const seen = new Set();
@@ -397,14 +568,13 @@ const A = (VC.actions = {
   zone(x0, z0, x1, z1, code, opts) {
     const S = VC.state;
     if (!S) return fail('No city');
-    code = code | 0;
     const p = A.canZone(x0, z0, x1, z1, code);
     if (!p.ok && !p.money) return fail(p.reason, { plan: p });
     const r = p.rect;
     const box = { x: r.x0, z: r.z0, w: r.w, d: r.d };
     return journaled(code ? 'Zoning' : 'Dezoning', () => {
       if (!pay([[p.cost, code ? 'zoning' : 'demolish']])) return fail('Not enough money', { plan: p });
-      for (const b of p.remove) removeB(b, 'bulldoze');
+      for (const b of p.remove) removeB(b, REM.BULLDOZE);
       for (let z = r.z0; z <= r.z1; z++)
         for (let x = r.x0; x <= r.x1; x++) {
           const st = p.status[(z - r.z0) * r.w + (x - r.x0)];
@@ -421,18 +591,19 @@ const A = (VC.actions = {
   /* ================= BUILDINGS ================= */
   /** Footprint of a catalog building at rotation rot -> [w, d]. */
   footprint(key, rot) {
-    const def = VC.BLD[key];
+    const def = bldDef(key);
     const sz = def ? def.size : [1, 1];
     return rot & 1 ? [sz[1], sz[0]] : [sz[0], sz[1]];
   },
 
   canPlace(key, x, z, rot) {
     const S = VC.state;
-    const def = VC.BLD[key];
+    const def = bldDef(key);
     rot = (rot | 0) & 3;
     const [w, d] = A.footprint(key, rot);
     const res = { ok: false, reason: '', cost: 0, w, d, flattenCost: 0, level: 0, warn: '', money: false, key, x, z, rot };
     if (!S || !def) { res.reason = 'Unknown building'; return res; }
+    if (!isInt(x) || !isInt(z)) { res.reason = BAD_POS; return res; }
     const m = mul();
     res.cost = def.cost * m;
     // hard gates first (they explain the red ghost best)
@@ -485,8 +656,9 @@ const A = (VC.actions = {
     rot = (rot | 0) & 3;
     const p = A.canPlace(key, x, z, rot);
     if (!p.ok && !p.money) return fail(p.reason, { plan: p });
-    const def = VC.BLD[key];
+    const def = bldDef(key);
     return journaled(def.name, () => {
+      const spent0 = J ? J.spent.length : 0;
       if (!pay([[p.cost - p.flattenCost, 'construction'], [p.flattenCost, 'terraform']])) return fail('Not enough money', { plan: p });
       const { w, d } = p;
       // clear the lot: rubble, power lines (buildings conduct), then grade it
@@ -498,12 +670,17 @@ const A = (VC.actions = {
           if (id && !seen.has(id)) {
             seen.add(id);
             const rb = S.buildings.get(id);
-            if (isRubble(rb)) removeB(rb, 'replace');
+            if (isRubble(rb)) removeB(rb, REM.REPLACE);
           }
           if (S.pline[i]) setP(xx, zz, 0);
           if (S.height[i] !== p.level) setH(xx, zz, p.level);
         }
       const b = addB({ key, x, z, rot }, { noFlatten: true });
+      if (!b) {
+        // the world refused the footprint (cannot happen after canPlace): give the money back
+        if (J) for (const [amt] of J.spent.splice(spent0)) VC.money.earn(amt, 'refund');
+        return fail('Cannot build here', { plan: p });
+      }
       const box = { x, z, w, d };
       built('building', box, key, p.cost, 1, { id: b.id });
       sfx('build', x + w / 2, z + d / 2, opts);
@@ -515,16 +692,19 @@ const A = (VC.actions = {
   canBulldoze(x0, z0, x1, z1, opts) {
     const S = VC.state;
     const o = Object.assign({ buildings: true, roads: true, trees: true, plines: true, zones: false }, opts || {});
+    // ids: restrict building demolition to these building ids (others in the rectangle are left alone)
+    const ids = o.ids == null ? null : new Set(Array.isArray(o.ids) || o.ids instanceof Set ? o.ids : [o.ids]);
     const r = clipRect(x0, z0, x1, z1);
     const res = { ok: false, cost: 0, reason: '', rect: r, buildings: [], roads: 0, trees: 0, plines: 0, zones: 0, rubble: 0, count: 0, money: false, opts: o };
-    if (!S || !r) { res.reason = 'Out of bounds'; return res; }
+    if (!S) { res.reason = 'No city'; return res; }
+    if (!r) { res.reason = rectReason(x0, z0, x1, z1); return res; }
     const seen = new Set();
     let cost = 0;
     for (let z = r.z0; z <= r.z1; z++)
       for (let x = r.x0; x <= r.x1; x++) {
         const i = z * S.W + x;
         const id = S.bld[i];
-        if (o.buildings && id && !seen.has(id)) {
+        if (o.buildings && id && !seen.has(id) && (!ids || ids.has(id))) {
           seen.add(id);
           const b = S.buildings.get(id);
           if (b) {
@@ -560,7 +740,7 @@ const A = (VC.actions = {
         bx0 = Math.min(bx0, b.x); bz0 = Math.min(bz0, b.z);
         bx1 = Math.max(bx1, b.x + b.w - 1); bz1 = Math.max(bz1, b.z + b.d - 1);
         if (!isRubble(b)) big = Math.max(big, b.w * b.d);
-        removeB(b, 'bulldoze');
+        removeB(b, REM.BULLDOZE);
       }
       for (let z = r.z0; z <= r.z1; z++)
         for (let x = r.x0; x <= r.x1; x++) {
@@ -579,17 +759,19 @@ const A = (VC.actions = {
   },
 
   /* ================= POWER LINES ================= */
-  /** status per tile: 0 new, 1 existing, 3 bad. Crosses roads, not buildings or water. */
+  /** status per tile of plan.tiles (input minus duplicates): 0 new, 1 existing, 3 bad. Crosses roads, not buildings or water. */
   canPowerLine(tiles) {
     const S = VC.state;
-    const n = tiles ? tiles.length : 0;
-    const res = { ok: false, cost: 0, reason: '', bad: [], count: 0, status: new Uint8Array(n), money: false };
+    tiles = S ? uniqTiles(tiles) : [];
+    const n = tiles.length;
+    const res = { ok: false, cost: 0, reason: '', bad: [], count: 0, status: new Uint8Array(n), money: false, tiles };
     if (!S || !n) { res.reason = 'Nothing to build'; return res; }
     let why = '';
     for (let k = 0; k < n; k++) {
       const { x, z } = tiles[k];
       const bad = (w) => { res.status[k] = 3; res.bad.push(k); why = why || w; };
-      if (!W.inb(x, z)) { bad('Out of bounds'); continue; }
+      const tr = tileReason(tiles[k]);
+      if (tr) { bad(tr); continue; }
       const i = z * S.W + x;
       if (S.height[i] < C.SEA) { bad('Cannot cross water'); continue; }
       if (S.bld[i]) {
@@ -613,13 +795,14 @@ const A = (VC.actions = {
     const p = A.canPowerLine(tiles);
     if (!p.ok && !p.money) return fail(p.reason, { plan: p });
     return journaled('Power line', () => {
-      if (!pay([[p.cost, 'construction']])) return fail('Not enough money', { plan: p });
+      if (!pay([[p.cost, 'pline']])) return fail('Not enough money', { plan: p });
+      const tiles = p.tiles; // de-duplicated
       for (let k = 0; k < tiles.length; k++) {
         if (p.status[k] !== 0) continue;
         const { x, z } = tiles[k];
         const i = z * S.W + x;
         const b = S.bld[i] ? S.buildings.get(S.bld[i]) : null;
-        if (isRubble(b)) removeB(b, 'bulldoze');
+        if (isRubble(b)) removeB(b, REM.BULLDOZE);
         if (S.trees[i]) setTr(x, z, 0);
         setP(x, z, 1);
       }
@@ -637,20 +820,25 @@ const A = (VC.actions = {
     const S = VC.state;
     return S.height[i] >= C.SEA && !S.road[i] && !S.bld[i] && !S.zone[i] && !S.pline[i] && S.terr[i] !== VC.TERR.ROCK && S.trees[i] < 3;
   },
-  /** opts.tiles: explicit tile list (brush) instead of the rectangle. status: 1 plantable. */
+  /**
+   * opts.tiles: explicit tile list (brush) instead of the rectangle; invalid / off-map entries are ignored and a
+   * tile listed twice still gets one tree. plan.tiles = the plantable tiles.
+   */
   canPlantTrees(x0, z0, x1, z1, opts) {
     const S = VC.state;
     const res = { ok: false, cost: 0, reason: '', count: 0, tiles: [], money: false };
     if (!S) { res.reason = 'No city'; return res; }
     let list = opts && opts.tiles;
-    if (!list) {
+    if (list) list = uniqTiles(list);
+    else {
       const r = clipRect(x0, z0, x1, z1);
+      if (!r) { res.reason = rectReason(x0, z0, x1, z1); return res; }
       list = [];
-      if (r) for (let z = r.z0; z <= r.z1; z++) for (let x = r.x0; x <= r.x1; x++) list.push({ x, z });
+      for (let z = r.z0; z <= r.z1; z++) for (let x = r.x0; x <= r.x1; x++) list.push({ x, z });
     }
     for (const t of list) {
-      if (!W.inb(t.x, t.z)) continue;
-      if (A.canTreeAt(t.z * S.W + t.x)) res.tiles.push(t);
+      if (tileReason(t)) continue;
+      if (A.canTreeAt(t.z * S.W + t.x)) res.tiles.push({ x: t.x, z: t.z });
     }
     res.count = res.tiles.length;
     res.cost = res.count * C.TREE_COST * mul();
@@ -684,10 +872,14 @@ const A = (VC.actions = {
   canTerraform(x, z, radius, mode, level) {
     const S = VC.state;
     const res = { ok: false, cost: 0, reason: '', count: 0, levels: 0, tiles: [], skipped: 0, mode, level: 0, money: false };
-    if (!S || !W.inb(x | 0, z | 0)) { res.reason = 'Out of bounds'; return res; }
-    const lv = M.clamp(level == null ? S.height[(z | 0) * S.W + (x | 0)] : level | 0, 0, C.MAXH);
+    if (!S) { res.reason = 'No city'; return res; }
+    if (!isInt(x) || !isInt(z)) { res.reason = BAD_POS; return res; }
+    if (!W.inb(x, z)) { res.reason = 'Out of bounds'; return res; }
+    if (!TERRAFORM_MODES.has(mode)) { res.reason = 'Unknown terraform mode'; return res; }
+    if (level != null && !Number.isFinite(level)) { res.reason = 'Invalid level'; return res; }
+    const lv = M.clamp(level == null ? S.height[z * S.W + x] : Math.round(level), 0, C.MAXH);
     res.level = lv;
-    for (const t of brushTiles(x | 0, z | 0, radius)) {
+    for (const t of brushTiles(x, z, radius)) {
       const i = t.z * S.W + t.x, h = S.height[i];
       let to = h;
       if (S.bld[i] || S.road[i]) { res.skipped++; res.tiles.push({ x: t.x, z: t.z, from: h, to: h, skip: true }); continue; }
@@ -781,7 +973,7 @@ const A = (VC.actions = {
     for (const id of r.added) if (!S.buildings.has(id)) return fail('Can’t undo — the city changed there');
     for (const b of r.removed) if (S.buildings.has(b.id)) return fail('Can’t undo — the city changed there');
     // 1) remove what the step added
-    for (const id of r.added) W.removeBuilding(id, 'undo');
+    for (const id of r.added) W.removeBuilding(id, REM.UNDO);
     // 2) bring back what it removed (same id, runtime fields of other modules stripped so they re-init)
     for (const b of r.removed) {
       const props = {};
@@ -798,10 +990,11 @@ const A = (VC.actions = {
       W.setPowerLine(x, z, pre[4]);
       W.setTrees(x, z, pre[5]);
     }
-    // 4) refund
+    // 4) refund — booked as 'refund' (not as income of the original category), so spending stats and
+    //    achievements can tell an undone expense from real income
     let refund = 0;
-    for (const [amt, cat] of r.spent) {
-      VC.money.earn(amt, cat);
+    for (const [amt] of r.spent) {
+      VC.money.earn(amt, 'refund');
       refund += amt;
     }
     VC.bus.emit('sfx', { name: 'whoosh' });

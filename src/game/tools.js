@@ -17,9 +17,15 @@
  *   exactly once per rendered frame. Buildings also get a ghost via VC.bldgfx.setGhost({key, x, z, rot, valid})
  *   (x/z = footprint min corner, as VC.world.addBuilding; called only on change, null clears), a voxel service
  *   coverage ring (plus faint rings of existing buildings of the same service) and an entrance arrow.
- * CURSOR LABEL: div.tool-cursor in #ui (style: game/tools.css) with cost, size / count and a red reason.
+ * CURSOR LABEL: div.tool-cursor in #ui (style: game/tools.css) with cost, size / count and a red reason
+ *   ("Not enough money · $X short" included). A commit refused for money pulses the label: the HUD's 'noMoney'
+ *   toast (emitted by VC.money.spend) is the only notification, tools never toast money failures themselves.
+ * FEEDBACK: other meaningful failures get ONE error sound + ONE (rate-limited) VC.ui.toast, shown directly
+ *   (a bus 'toast' would add the audio module's notify sound on top of the error sound).
+ * CONFIRMS: demolishing expensive / unique buildings asks first; the confirm re-checks, by id, that the very
+ *   buildings it showed still stand and only demolishes those (the sim keeps running behind the dialog).
  * PHOTO MODE (VC.hud.uiHidden / photo): falls back to the select tool — no invisible edits.
- * Bus: emits 'tool' {key}, 'select' {building, x, z} | null, 'toast' (meaningful failures only), 'sfx'.
+ * Bus: emits 'tool' {key}, 'select' {building, x, z} | null, 'sfx'.
  */
 const C = VC.C, M = VC.M;
 const W = VC.world;
@@ -74,7 +80,8 @@ const SVC_COL = {
 /* ------------------------------------------------------------------ */
 const ROAD_TOOL = { road_street: 1, road_avenue: 2, road_highway: 3 };
 const TERRAIN_MODE = { terrain_raise: 'raise', terrain_lower: 'lower', terrain_level: 'level' };
-const QUIET = new Set(['Already built', 'Already zoned', 'Nothing to bulldoze', 'Nothing to dezone', 'Already level', 'No room for trees', 'Nothing to build', 'Nothing to zone here', 'Maximum height', 'Minimum depth', 'Blocked by buildings/roads', 'Out of bounds']);
+const QUIET = new Set(['Already built', 'Already zoned', 'Nothing to bulldoze', 'Nothing to dezone', 'Already level', 'No room for trees', 'Nothing to build', 'Nothing to zone here', 'Maximum height', 'Minimum depth', 'Blocked by buildings/roads', 'Out of bounds', 'Invalid position']);
+const NO_MONEY = 'Not enough money';
 
 function kindOf(key) {
   if (!key || key === 'select') return 'select';
@@ -477,8 +484,9 @@ const T = (VC.tools = {
   },
   /** Bulldozes one building (Delete key on the selection), with the usual landmark confirmation. */
   demolish(b) {
-    if (!b || !VC.state || !VC.state.buildings.has(b.id)) return;
-    feedback(bulldozeRect(b.x, b.z, b.x, b.z));
+    const S = VC.state;
+    if (!b || !S || S.buildings.get(b.id) !== b) return;
+    feedback(bulldozeRect(b.x, b.z, b.x + b.w - 1, b.z + b.d - 1, { ids: [b.id], roads: false, trees: false, plines: false }));
   },
   /** Cancels the active drag (brush strokes keep what was already applied). */
   cancelDrag() {
@@ -622,66 +630,101 @@ function applyBrush(d, repeat) {
   d.acc = 0;
   d.lastX = h.x;
   d.lastZ = h.z;
+  const A = VC.actions;
+  const trees = d.kind === 'trees';
+  const mode = TERRAIN_MODE[T.current];
+  const tiles = trees ? A.brushTiles(h.x, h.z, T.brush.trees) : null;
+  const lvl = mode === 'level' ? d.level : null;
+  if (repeat && d.noMoney) {
+    // still short of money: validate only, so a held brush does not fire 'noMoney' several times a second
+    const plan = trees ? A.canPlantTrees(0, 0, 0, 0, { tiles }) : A.canTerraform(h.x, h.z, T.brush.terrain, mode, lvl);
+    if (!plan.ok && plan.money) return;
+  }
   const now = performance.now();
   const quiet = repeat && now - lastSfx < 280;
   if (!quiet) lastSfx = now;
-  let res;
-  if (d.kind === 'trees') {
-    res = VC.actions.plantTrees(0, 0, 0, 0, { tiles: VC.actions.brushTiles(h.x, h.z, T.brush.trees), quiet });
-  } else {
-    const mode = TERRAIN_MODE[T.current];
-    res = VC.actions.terraform(h.x, h.z, T.brush.terrain, mode, mode === 'level' ? d.level : null, { quiet });
-  }
+  const res = trees ? A.plantTrees(0, 0, 0, 0, { tiles, quiet }) : A.terraform(h.x, h.z, T.brush.terrain, mode, lvl, { quiet });
+  if (!res.ok && res.reason === NO_MONEY) d.noMoney = true;
   planDirty = true;
   if (!res.ok && !d.warned && !(repeat && QUIET.has(res.reason))) {
     if (!QUIET.has(res.reason)) d.warned = true;
     feedback(res);
   }
 }
-/** Places the current building at the ghost position. quiet: no failure feedback (row placement). */
+/**
+ * Places the current building at the ghost position. quiet: row placement — tiles that cannot take the building
+ * are skipped without feedback; a money shortage is committed (and so reported by VC.money) once per drag only.
+ */
 function placeAtHover(quiet) {
   const g = ghostPos();
   if (!g) return null;
-  const res = VC.actions.placeBuilding(g.key, g.x, g.z, g.rot, { quiet: quiet && T.drag && T.drag.placed > 0 && performance.now() - lastSfx < 150 });
+  const d = T.drag;
+  if (quiet) {
+    const p = VC.actions.canPlace(g.key, g.x, g.z, g.rot);
+    if (!p.ok && (!p.money || !d || d.noMoney)) return null;
+  }
+  const res = VC.actions.placeBuilding(g.key, g.x, g.z, g.rot, { quiet: quiet && d && d.placed > 0 && performance.now() - lastSfx < 150 });
   if (res.ok) {
     lastSfx = performance.now();
-    if (T.drag) T.drag.placed++;
-  }
+    if (d) d.placed++;
+  } else if (res.reason === NO_MONEY && d) d.noMoney = true;
   planDirty = true;
   if (!quiet || res.ok) return res;
+  if (res.reason === NO_MONEY) flashLabel();
   return null;
 }
-/** Bulldoze with a confirmation for expensive / unique buildings. */
-function bulldozeRect(x0, z0, x1, z1) {
-  const p = VC.actions.canBulldoze(x0, z0, x1, z1);
-  if (!p.ok) return p;
+/**
+ * Bulldoze with a confirmation for expensive / unique buildings. opts: VC.actions.bulldoze options (ids, roads…).
+ * The confirm callback runs later (the sim keeps going behind the modal): it re-validates by id that the shown
+ * landmarks still stand and demolishes only the buildings the dialog listed.
+ */
+function bulldozeRect(x0, z0, x1, z1, opts) {
+  const A = VC.actions;
+  const p = A.canBulldoze(x0, z0, x1, z1, opts);
+  // short of money: commit anyway so VC.money reports it (the HUD's single 'noMoney' notification)
+  if (!p.ok) return p.money ? A.bulldoze(x0, z0, x1, z1, opts) : p;
   const pricey = p.buildings.filter((b) => {
     const def = VC.BLD[b.key];
     return def && (def.unique || def.cost >= 20000);
   });
   if (T.confirmDemolish && pricey.length && VC.ui && VC.ui.confirm) {
-    const names = pricey.slice(0, 3).map((b) => (VC.sim && VC.sim.buildingName ? safeName(b) : VC.BLD[b.key].name));
+    const names = pricey.slice(0, 3).map((b) => esc(VC.sim && VC.sim.buildingName ? safeName(b) : VC.BLD[b.key].name));
     const more = pricey.length > 3 ? ` and ${pricey.length - 3} more` : '';
+    const o = Object.assign({}, opts || {}, { ids: p.buildings.map((b) => b.id) });
     VC.ui.confirm(`Demolish <b>${names.join(', ')}</b>${more}? This costs ${VC.fmt.money(p.cost)} and cannot be refunded.`, () => {
-      feedback(VC.actions.bulldoze(x0, z0, x1, z1));
+      const S = VC.state;
+      if (!S || pricey.some((b) => S.buildings.get(b.id) !== b)) {
+        notify(pricey.length > 1 ? 'Those buildings are already gone.' : 'That building is already gone.', 'info', '🚜');
+        return;
+      }
+      feedback(A.bulldoze(x0, z0, x1, z1, o));
     }, { title: '🚜 Demolish?', yes: 'Demolish' });
     return null;
   }
-  return VC.actions.bulldoze(x0, z0, x1, z1);
+  return A.bulldoze(x0, z0, x1, z1, opts);
 }
 function safeName(b) {
   try { return VC.sim.buildingName(b) || VC.BLD[b.key].name; } catch (e) { return VC.BLD[b.key].name; }
 }
-/** Success is audible via actions' sfx; failures get an error sound + (rate-limited) toast. */
+/** One visible message, no extra sound (never over the title-screen demo). text is HTML. */
+function notify(html, type, icon) {
+  const S = VC.state;
+  if ((S && S.demo) || !VC.ui || !VC.ui.toast) return null;
+  return VC.ui.toast(html, { type, icon });
+}
+/**
+ * Success is audible via actions' sfx. Money failures: VC.money.spend already emitted 'noMoney' (HUD toast +
+ * sound), so only the cursor label reacts. Other failures: one error sound + one rate-limited toast.
+ */
 function feedback(res) {
   if (!res || res.ok) return;
+  if (res.reason === NO_MONEY) { flashLabel(); return; }
   if (QUIET.has(res.reason)) return;
   VC.bus.emit('sfx', { name: 'error' });
   const now = performance.now();
   if (now - lastToast < 900) return;
   lastToast = now;
-  const money = res.reason === 'Not enough money';
-  VC.bus.emit('toast', { text: money ? 'Not enough money' + (res.plan && res.plan.cost ? ' — this costs <b>' + VC.fmt.money(res.plan.cost) + '</b>' : '') : res.reason, type: money ? 'bad' : 'warn', icon: money ? '💸' : '🚧' });
+  notify(esc(res.reason), 'warn', '🚧');
 }
 
 /* ------------------------------------------------------------------ */
@@ -762,12 +805,12 @@ function buildPlan() {
   if (!h && !d) return;
   const sx = d ? d.sx : h.x, sz = d ? d.sz : h.z, ex = d ? d.ex : h.x, ez = d ? d.ez : h.z;
   if (k === 'road' || k === 'pline') {
-    const tiles = A.roadPath(sx, sz, ex, ez, straightHeld());
-    const res = k === 'road' ? A.canBuildRoad(tiles, ROAD_TOOL[T.current]) : A.canPowerLine(tiles);
-    res.tiles = tiles;
+    const path = A.roadPath(sx, sz, ex, ez, straightHeld());
+    const res = k === 'road' ? A.canBuildRoad(path, ROAD_TOOL[T.current]) : A.canPowerLine(path);
+    if (!res.tiles) res.tiles = path; // (actions return the de-duplicated list the status array indexes)
     res.kind = k;
     T.plan = res;
-    drawPath(res, tiles, k);
+    drawPath(res, res.tiles, k);
   } else if (k === 'zone' || k === 'dezone') {
     const zt = VC.ZONE_TOOLS.find((z) => z.key === T.current);
     const code = k === 'zone' && zt ? zt.code : 0;
@@ -1107,6 +1150,8 @@ function labelContent(p) {
     }
   }
   if (reason && QUIET.has(reason) && reason !== 'Nothing to bulldoze') { warn = warn || reason; reason = ''; }
+  // money: say by how much (the label is where a refused commit is explained; the HUD toasts 'noMoney' once)
+  if (reason === NO_MONEY && S && !S.sandbox && cost > S.money) reason = NO_MONEY + ' · ' + VC.fmt.money(Math.ceil(cost - Math.max(0, S.money))) + ' short';
   const cls = reason ? 'bad' : warn ? 'warn' : '';
   let html = '<div class="tc-main">';
   if (showCost) html += '<span class="tc-cost' + (S && S.sandbox ? ' free' : '') + '">' + esc(money(cost)) + '</span>';
@@ -1119,7 +1164,16 @@ function labelContent(p) {
 function safeGrowName(b) {
   try { return VC.sim.buildingName(b) || 'Building'; } catch (e) { return 'Building'; }
 }
-let labelCls = '', labelW = 0, labelH = 0;
+let labelCls = '', labelW = 0, labelH = 0, flashTimer = 0;
+/** Pulses the cursor label (a commit was refused for money: the label already shows the reason). */
+function flashLabel() {
+  if (!label) return;
+  label.classList.remove('flash');
+  void label.offsetWidth; // restart the animation
+  label.classList.add('flash');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => label.classList.remove('flash'), 700);
+}
 function updateLabel() {
   if (!label) return;
   const p = T.plan;

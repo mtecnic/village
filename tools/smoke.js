@@ -27,7 +27,7 @@ const html = path.resolve(opt('html', path.join(__dirname, '..', 'Voxelpolis.htm
   page.on('pageerror', (e) => errs.push('pageerror: ' + (e.stack || e.message)));
   await page.goto(`file://${html}?autostart=1&seed=4242&size=${SIZE}&map=river&difficulty=normal`);
   await page.waitForFunction(() => window.VC && VC.gfx && VC.gfx.frameCount > 3, null, { timeout: 90000 });
-  const shot = async (name) => { await page.waitForTimeout(1500); await page.screenshot({ path: path.join(OUT, name + '.png') }); };
+  const shot = async (name) => { await page.waitForTimeout(1500); await page.screenshot({ path: path.join(OUT, name + '.png'), timeout: 120000 }); };
   const ev = (fn, arg) => page.evaluate(fn, arg);
   const report = {};
 

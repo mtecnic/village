@@ -235,3 +235,43 @@ audio: `play(name, {x,z,vol})`, listens to `sfx`, music + ambience from settings
   LOD. Target 60 fps on a mid-range laptop with a 128x128 city of ~5k buildings.
 * Guard everything that can be missing (`VC.foo && VC.foo.bar`). Never throw from `update()`.
 * Comment density: short header per file + comments on non-obvious logic.
+
+## 10. Implemented extensions (post-merge reference)
+
+Each module added APIs beyond the original contract. The file header of every module documents them in
+full; this is the index.
+
+* **Render core** (`gfx/core.js`, `shaderlib.js`, `shadows.js`, `post.js`): the shadow pass culls FRONT faces;
+  `ctx.viewProj`, `ctx.frustum` (6 planes, cull against this — it is the light frustum in the shadow pass),
+  `ctx.cascade` (-1 camera, 0/1 shadow cascades); `VC.gfx.depthProgram(name, vsBody)`,
+  `boxVisible/sphereVisible/frustumPlanes`, `render(dt, rdt, force)` (may skip frames when the GPU lags),
+  `profile()`, `caps.software` (`?soft=0|1`), `TOD_KEYS`, `sunDirection()`. UBO `uPad` is reserved.
+  GLSL: `libLuma, libIgn, libSunDir, libMoonDir, libFogColor, libFogAmount`, `#define LIB_SOFT` on CPU GL.
+  `VC.post.debugView`, `VC.post.tune`, settings `ssao`, `godRays`.
+* **Terrain/worldgen**: `VC.terrain.roadY(wx,wz)`, `surfaceY`, `roadInfo(x,z)`, `lampSpots(x,z)`, `DECK_Y`, `CURB`,
+  `SKIRT_Y`, `warmup()`; `VC.worldgen.previewCanvas(o, px)`, `startArea(S)`, `sample()`.
+* **Water/sky**: `VC.sky.GLSL` + `VC.sky.attach(prog)` (SkyFrame UBO, binding 3), `moonPhase`, `moonIllum`,
+  `forceAurora`, `forceRainbow`, `shootingStar()`; `VC.water.ocean`, `mode`, `depthAt`, `shoreDist`, `iceAt`, `flowAt`.
+  Water writes no depth.
+* **Buildings/props**: `VC.bldgfx.setGhost`, `handlesLift`, `warm()`, `inspect(id)`, `eng` (shared instancing engine);
+  `VC.props`. Construction/fire/powered/disLift are polled per frame (no `changed()` needed).
+* **Models**: `VC.growKit`, `VC.civicKit`, `VC.natureKit` (`treeFor`, `signalVariant`, `seasonPalette`, `toWorld`);
+  `grid.meta.style`, `meta.rocket`, `meta.wire`, `meta.siren`, `meta.nav`, `meta.feet`; `def.lodMinFill`.
+* **Sim**: `growReason(x,z)`, `issues()`, `trafficStats()`, `trafficVolume`, `trafficParent`, `cityTitle()`,
+  `powerInfo().deficit/shortage/unpowered`, building fields `simJobs`, `simReplay`.
+* **Econ**: `forecast()` (+ `taxDetail`, `dept`, `policies`, `venues`), `loanOptions()`, `takeLoan(amount|option, months)`,
+  `debt()`, `creditLimit()`, `runway()`, `onStrike(dept)`, `effectivenessAt(f)`, `CATEGORIES`; bus `econ`.
+* **Disasters**: `trigger(type,x,z,opts)`, `info`, `setEnabled`, `nextIn`, `focus`, `clear`, `S.disasterStats`;
+  active entry fields documented in `sim/disasters.js`. Buildings being abducted carry `b.disLift`.
+* **Advisors**: `adviceInfo(key)`, `milestoneInfo()`, `toastAchievements`.
+* **Actions/tools/input**: `can*` validators, undo (`canUndo/undo`, 10 s), `beginGroup/endGroup`; `VC.tools.rotate`,
+  `adjustBrush`, `cancel`, tools layer (order 990); `VC.input.KEYMAP [{group, keys, action}]`, `enabled()`.
+* **Agents/particles/fx**: `VC.agents.signal(x,z)`, `vehicles()`; extra particle types (rainsplash, contrail, fog,
+  wake, ember, flash, willow, crackle, firefly); `VC.fx.weatherInfo`, `confetti`, `launchRocket`, `isLaunching`,
+  `lightning`; `VC.fxgl` helpers.
+* **UI**: `VC.ui` extra widgets (`segmented, sparkline, cards, counter, input, kbd, badge, prompt, popover`),
+  live tooltips (`el._tip`); `VC.hud` (`photoMode, openPanel, pushNews, showMilestone, startTutorial…`);
+  `VC.menu` (`startGame, loadGame, newCity, pause, resume, fade`); `VC.panels.open(key, {tab})`, `close`, `isOpen`,
+  `refresh`, `onSelectHook`.
+* **Audio/save**: `VC.audio.play(name, {x,z,vol,rate,delay})` + auto-handled bus events (see `audio/audio.js`);
+  `VC.save.register(key, {save, load})`, `importText`, `exportBlob`, `selfTest()`; bus `saved`, `loaded`, `saveFailed`.

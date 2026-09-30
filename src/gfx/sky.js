@@ -7,23 +7,28 @@
  * pole with a faint milky-way band + two drifting cloud layers (puffy cumulus lit by the key light with
  * bright tops, dark bases, silver linings and sunset/afterglow tints; wind-stretched cirrus that catch the
  * last light) + overcast / rain deck + lightning glowing inside clouds + city light-pollution glow at
- * night + rare aurora curtains on clear winter nights + occasional shooting stars.
+ * night + milky sky in fog + rare aurora curtains on clear winter nights + occasional shooting stars +
+ * a double rainbow when the sun breaks through after rain. Cloud cover tracks S.weather.cloud.
  *
  * SHARED GLSL: VC.sky.GLSL declares the `SkyFrame` uniform block (binding VC.sky.UBO_BINDING = 3,
  * refreshed once per frame by sky.update()) and these fragment-shader helpers (prefix `sk`):
  *   vec3 skFog(v)             horizon/fog color seen along v (libFogColor when available, else uFog)
+ *   float skFoggy()           0..1 weather fog
  *   vec3 skBase(d)            gradient sky without celestial bodies / clouds (what lies past the far plane)
  *   vec4 skClouds(d, hq)      both cloud layers: rgb = premultiplied radiance, a = coverage (hq: lit)
  *   vec3 skStars(d, px)       stars + milky way (px = pixel angular size, use uSkMisc.x)
+ *   vec4 skMoon(d, px)        moon disc + halo (a = disc coverage); vec3 skSunDisc(d, px)
  *   vec3 skAurora(d)          aurora curtains (0 when inactive)
  *   vec3 skRainbow(d)         rainbow after rain (0 when inactive)
- *   vec3 skyReflect(d, rough) cheap full sky for reflections (clouds, stars on calm water, aurora, no sun disc)
+ *   vec3 skyReflect(d, rough) cheap full sky for reflections (clouds, stars/moon on calm water, aurora,
+ *                             rainbow; no sun disc — add your own specular)
  * Any program that includes VC.sky.GLSL must be passed once to VC.sky.attach(program) after creation.
  * Include it AFTER the shaderlib (it uses tnoise, skyColor, NIGHT ...). Fragment shaders only.
  *
- * JS API: GLSL, UBO_BINDING, attach(prog), moonPhase (0 new .. 0.5 full .. 1), moonIllum (0..1 lit
- * fraction), cover (smoothed cloud cover), auroraLevel (0..1 current), forceAurora(v|null),
- * shootingStar() (spawns one now, e.g. for celebrations), cityGlow (0..1).
+ * JS API: GLSL, UBO_BINDING, ubo, attach(prog), moonPhase (0 new .. 0.5 full .. 1, from S.time.day),
+ * moonIllum (0..1 lit fraction), cover (smoothed cloud cover), cityGlow (0..1 from the population),
+ * auroraLevel (0..1 current), forceAurora(v|null), forceRainbow(v|null), shootingStar() (spawns one now,
+ * e.g. for celebrations). Reads VC.fx.lastBolt {x, z} (optional) to light the clouds above a strike.
  */
 const M = VC.M;
 
@@ -55,6 +60,9 @@ vec3 skFog(vec3 v){
 #endif
 }
 
+/** 0..1 how foggy the weather is (fog density well above the clear-air baseline). */
+float skFoggy(){ return smoothstep(0.009, 0.028, uFog.w); }
+
 /** Gradient sky + glows, no disc / stars / clouds. */
 vec3 skBase(vec3 d){
   vec3 c = skyColor(d);
@@ -67,17 +75,18 @@ vec3 skBase(vec3 d){
 #endif
   // city light pollution: warm haze low above the horizon at night
   c += vec3(1.0, 0.52, 0.22) * (uSkNight.w * NIGHT * 0.045) * exp(-max(d.y, 0.0) * 6.0);
-  return c;
+  // weather fog: a milky sky
+  return mix(c, skFog(d), skFoggy() * 0.8);
 }
 
 /* ---------------------------------------------------------------- clouds */
 // Flattened-dome projection of direction d onto the cloud plane (k: horizon compression).
 vec2 skCloudUV(vec3 d, float k){ return d.xz / (max(d.y, 0.0) + k); }
 
-// Cumulus density 0..1. Base shape (coarse channels) + detail; threshold from cover.
-float skCumulus(vec2 p, float th){
+// Cumulus: x = density 0..1 (threshold from cover), y = raw noise (keeps growing inside: thickness / relief).
+vec2 skCumulus(vec2 p, float th){
   float n = tnoise(p).a * 0.55 + tnoise(p * 2.3 + vec2(0.31, 0.77)).r * 0.33 + tnoise(p * 7.1 - vec2(0.53, 0.21)).g * 0.12;
-  return smoothstep(th, th + 0.2, n);
+  return vec2(smoothstep(th, th + 0.12, n), n);
 }
 
 /** Both cloud layers composited: rgb = premultiplied radiance, a = coverage. hq = lighting sample + detail. */
@@ -109,25 +118,29 @@ vec4 skClouds(vec3 d, bool hq){
   }
 
   // ---- cumulus / overcast deck ----
-  float th = mix(0.72, 0.26, cover);
+  float th = 0.54 - 0.25 * cover;                     // coverage ~ cover (fitted to the noise distribution)
   vec2 uv = skCloudUV(d, 0.1);
   vec2 p = uv * 0.34 + uSkCloud.xy;
-  float dens = skCumulus(p, th);
+  vec2 cd = skCumulus(p, th);
+  float dens = cd.x;
   float deck = uSkWx.w;
   // overcast: a continuous deck with soft darker rolls
   float deckN = tnoise(p * 0.7 + 0.13).r;
   dens = max(dens, deck * (0.82 + 0.18 * deckN));
   if (dens > 0.002) {
+    // relief lighting from the raw noise: brighter where the cloud thins toward the key light
     float lit = 0.6;
+    float thick = smoothstep(th + 0.04, th + 0.3, cd.y);
     if (hq) {
-      // light sample one step toward the key light in the cloud plane: less cloud there = sunlit top
-      vec2 ld = normalize(L.xz + vec2(1e-4)) * (0.035 + 0.05 * (1.0 - clamp(L.y, 0.0, 1.0)));
-      float dl = skCumulus(p + ld, th);
-      lit = clamp(0.62 + (dens - dl) * 1.25 - dens * 0.25, 0.0, 1.0);
+      vec2 ld = normalize(L.xz + vec2(1e-4)) * (0.03 + 0.05 * (1.0 - clamp(L.y, 0.0, 1.0)));
+      float nl = skCumulus(p + ld, th).y;
+      lit = clamp(0.55 + (cd.y - nl) * 7.0 + (0.5 - thick) * 0.3, 0.0, 1.0);
     }
-    float thick = smoothstep(0.2, 1.0, dens);
-    vec3 shadowCol = amb * mix(0.95, 0.62, thick) + vec3(0.04, 0.045, 0.06) * (1.0 - night);
-    vec3 litCol = amb * 0.75 + keyL * 0.38;
+    // under an overcast deck the relief flattens into soft, slowly rolling grey
+    lit = mix(lit, 0.45 + deckN * 0.2, deck * 0.8);
+    thick = mix(thick, 0.55 + deckN * 0.2, deck * 0.8);
+    vec3 shadowCol = amb * mix(0.95, 0.55, thick) * mix(1.0, 0.85, clamp(d.y, 0.0, 1.0)) + vec3(0.04, 0.045, 0.06) * (1.0 - night);
+    vec3 litCol = amb * 0.75 + keyL * 0.4;
     vec3 col = mix(shadowCol, litCol, lit);
     // silver lining: thin edges glow when looking toward the sun
     float edge = dens * (1.0 - dens) * 4.0;
@@ -212,7 +225,7 @@ vec4 skMoon(vec3 d, float px){
   const float R = 0.03;
   float chord = sqrt(max(2.0 - 2.0 * cosA, 0.0));
   float illum = 0.5 - 0.5 * cos(uSkMoon.w * 6.2831853);
-  vec3 halo = vec3(0.55, 0.65, 0.9) * (exp(-chord * 9.0) * 0.05 + exp(-chord * 40.0) * 0.12) * mb * (0.15 + 0.85 * illum) * (1.0 - uSkWx.x * 0.6);
+  vec3 halo = vec3(0.55, 0.65, 0.9) * (exp(-chord * 9.0) * 0.085 + exp(-chord * 40.0) * 0.2) * mb * (0.15 + 0.85 * illum) * (1.0 - uSkWx.x * 0.6);
   if (chord > R * 1.6) return vec4(halo, 0.0);
   vec3 right = normalize(cross(md, vec3(0.0, 1.0, 0.0)));
   vec3 up = cross(right, md);
@@ -226,7 +239,7 @@ vec4 skMoon(vec3 d, float px){
   float lit = smoothstep(-0.06, 0.1, dot(nrm, normalize(Ld)));
   float mar = tnoise(q * 0.21 + vec2(0.3, 0.6)).r;
   float cr = tnoise(q * 0.6 + vec2(0.7, 0.1)).b;
-  vec3 alb = vec3(0.95, 0.93, 0.88) * (0.62 + 0.38 * smoothstep(0.38, 0.62, mar)) * (0.9 + 0.2 * cr);
+  vec3 alb = vec3(0.95, 0.93, 0.88) * (0.5 + 0.5 * smoothstep(0.36, 0.6, mar)) * (0.82 + 0.3 * cr);
   vec3 col = alb * (lit * (0.8 + 0.2 * nrm.z) * 1.0 + 0.035) * mb;
   return vec4(col * disc + halo, disc);
 }
@@ -275,19 +288,25 @@ vec3 skAurora(vec3 d){
 }
 
 /* ---------------------------------------------------------------- rainbow */
-// Primary bow at 42 deg around the anti-solar point (red outside), faint reversed secondary at 51 deg.
+// Spectral color for x in 0 (violet, inner edge) .. 1 (red, outer edge), smooth band profile.
+vec3 skSpectrum(float x){
+  float h = (1.0 - clamp(x, 0.0, 1.0)) * 0.78;          // hue: 0 red .. 0.78 violet
+  vec3 c = clamp(abs(fract(h + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+  float band = sin(3.14159265 * clamp(x, 0.0, 1.0));
+  return c * band * band;
+}
+// Primary bow at ~42 deg around the anti-solar point (red outside), faint reversed secondary at ~51 deg,
+// a brighter sky inside the primary and Alexander's darker band between the two.
 vec3 skRainbow(vec3 d){
   float amt = uSkShootB.w;
   if (amt < 0.004 || d.y < 0.0) return vec3(0.0);
   float a = acos(clamp(dot(d, -uSkSun.xyz), -1.0, 1.0));
-  vec3 c = vec3(0.0);
-  float x1 = (a - 0.7) / 0.045;                         // 0 violet .. 1 red across the primary band
-  if (x1 > -0.4 && x1 < 1.4) c += clamp(vec3(x1 - 0.55, 1.0 - abs(x1 - 0.5) * 2.2, 0.55 - x1) * 2.2, 0.0, 1.0) * smoothstep(-0.4, 0.1, x1) * smoothstep(1.4, 0.9, x1);
-  float x2 = (0.925 - a) / 0.07;
-  if (x2 > -0.4 && x2 < 1.4) c += clamp(vec3(x2 - 0.55, 1.0 - abs(x2 - 0.5) * 2.2, 0.55 - x2) * 2.2, 0.0, 1.0) * smoothstep(-0.4, 0.1, x2) * smoothstep(1.4, 0.9, x2) * 0.3;
-  // brighter sky inside the bow, fading toward the ground
-  c += vec3(0.06) * smoothstep(0.72, 0.4, a);
-  return c * (amt * 0.2 * smoothstep(0.0, 0.2, d.y)) * uSunColor.rgb;
+  if (a > 0.98) return vec3(0.0);
+  vec3 c = skSpectrum((a - 0.705) / 0.038);
+  c += skSpectrum((0.93 - a) / 0.055) * 0.22;
+  vec3 sky = uSkyAmb.rgb;
+  c += sky * (0.12 * smoothstep(0.73, 0.5, a) - 0.06 * smoothstep(0.74, 0.77, a) * smoothstep(0.9, 0.87, a));
+  return c * (amt * 0.55 * smoothstep(0.0, 0.25, d.y)) * (0.35 + 0.65 * uSunDir.w) * (uSunColor.rgb / max(max(uSunColor.r, uSunColor.g), 0.2));
 }
 
 /* ---------------------------------------------------------------- composites */
@@ -301,8 +320,9 @@ vec3 skyReflect(vec3 d, float rough){
   vec4 m = skMoon(d, uSkMisc.x * 2.0);
   c = c * (1.0 - m.a * 0.9) + m.rgb * calm;
   if (uSkShootB.w > 0.004) c += skRainbow(d) * calm;
-  // reflected clouds: softer (waves blur them), and fading with roughness
-  vec4 cl = skClouds(d, false) * mix(0.8, 0.5, clamp(rough, 0.0, 1.0));
+  // reflected clouds: softer (waves blur them), fading with roughness, in fog, and toward the horizon where
+  // a mirror-flat far sea would squash them into horizontal bands
+  vec4 cl = skClouds(d, false) * (mix(0.8, 0.5, clamp(rough, 0.0, 1.0)) * smoothstep(0.08, 0.35, d.y) * (1.0 - skFoggy() * 0.85));
   return c * (1.0 - cl.a) + cl.rgb;
 }
 `;
@@ -335,7 +355,7 @@ void main(){
       float dist = length(d - (tl + ab * t)) / (px * 1.1);
       col += vec3(1.0, 0.93, 0.82) * (exp(-dist * dist) * t * t * uSkShootA.w * 4.0);
     }
-    vec4 cl = skClouds(d, true);
+    vec4 cl = skClouds(d, true) * (1.0 - skFoggy() * 0.75);
     col = col * (1.0 - cl.a) + cl.rgb;
     // tiny dither against gradient banding after tonemapping
     col *= 1.0 + (jit - 0.5) * 0.012;
@@ -457,7 +477,7 @@ const Sk = (VC.sky = {
 function simulate(rdt) {
   const st = Sk.st, S = VC.state, env = VC.gfx.env;
   const w = (S && S.weather) || { cloud: 0.25, wet: 0, wind: 0.5, windDir: 0.6, lightning: 0 };
-  const k = 1 - Math.exp(-rdt * 0.6);
+  const k = 1 - Math.exp(-rdt * 2.5); // fx already eases weather over ~15 s; this only guards against jumps
   // smoothed wind vector (direction changes never make the clouds jump)
   const a = w.windDir || 0;
   st.wind[0] += (Math.cos(a) - st.wind[0]) * k;
@@ -569,10 +589,11 @@ function upload() {
   const night = env.night || 0;
   put(0, sun[0], sun[1], sun[2], discI);
   put(1, moon[0], moon[1], moon[2], Sk.moonPhase);
-  put(2, 1.0, M.lerp(0.93, 0.5, warm), M.lerp(0.82, 0.2, warm), 1.3 * M.smoothstep(0.15, 0.8, night));
+  put(2, 1.0, M.lerp(0.93, 0.5, warm), M.lerp(0.82, 0.2, warm), 0.75 * M.smoothstep(0.15, 0.8, night));
   put(3, st.cu[0], st.cu[1], st.ci[0], st.ci[1]);
   put(4, st.cover, st.rain, st.cirrus * (1 - M.smoothstep(0.5, 0.9, st.cover)), M.smoothstep(0.62, 0.95, st.cover));
-  const starVis = M.smoothstep(0.45, 0.95, night) * (1 - st.rain) * (1 - (env.fogWeather || 0) * 0.8);
+  // stars: fade in after dusk; rain, fog and a bright full moon wash the faint ones out
+  const starVis = M.smoothstep(0.45, 0.95, night) * (1 - st.rain) * (1 - (env.fogWeather || 0) * 0.8) * (1 - Sk.moonIllum * 0.3);
   put(5, starVis, ((env.tod || 0) - 0.5) * M.PI2 * 0.9, st.aurora, st.glow);
   const px = (2 * Math.tan(((cam && cam.fov) || 0.6) / 2)) / Math.max(1, G.rh || 1);
   const after = M.smoothstep(-0.22, -0.03, h) * (1 - M.smoothstep(-0.03, 0.08, h)) * (1 - st.cover * 0.5);

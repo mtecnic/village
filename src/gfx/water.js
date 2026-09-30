@@ -11,7 +11,8 @@
  *                          shallows -> deep blue), refraction of the seabed through the waves, contact foam
  *                          around anything piercing the surface (bridge piers, boats, cliffs)
  *   ssr     (high/ultra)   + screen-space reflections of the city (lit windows at night!) over the sky
- * The surface writes depth (post-processing / later transparent layers see the water plane).
+ * The surface writes no depth unless VC.water.writeDepth is set (a flat depth-written plane at grazing angles
+ * makes screen-space AO band into stripes near the horizon; post effects see the seabed through it instead).
  *
  * SHADING: wind-aligned analytic swells + 4 scrolling noise slope layers (roughness from uWind.z, choppy
  * storms with whitecaps), Fresnel reflection of the shared sky (VC.sky.GLSL: gradient, clouds, stars and
@@ -28,7 +29,7 @@
  * incrementally for the SDF) when terrain edits change water tiles.
  *
  * API: ocean (bool; false = diorama: water clipped to the map, translucent water walls at the map edges),
- *   mode ('auto' | 'basic' | 'refract' | 'ssr'), freeze (0..1 current ice amount), depthAt(wx, wz),
+ *   mode ('auto' | 'basic' | 'refract' | 'ssr'), writeDepth (false), freeze (0..1 current ice amount), depthAt(wx, wz),
  *   shoreDist(wx, wz) (tiles, + over water), iceAt(wx, wz) 0..1, flowAt(wx, wz) -> {x, z, speed},
  *   bodies [{id, size, sea, lake}], stats {variant, fieldMs, ...}, rebuild(), variant(name) -> program.
  */
@@ -63,18 +64,24 @@ uniform vec4 uWt2;  // x storm 0..1, y rain ripples 0..1, z far plane, w reflect
 float linZ(float d){ return uProj[3][2] / ((d * 2.0 - 1.0) + uProj[2][2]); }
 
 /* ---- waves: analytic swells (height-field gradients) + scrolling noise slopes ---- */
-vec3 waveNormal(vec2 p, float lodFine, float lodSwell, float amp, float storm, vec2 flow, out float crest){
+// fp = world size of one pixel footprint along the view: each swell fades out before it can alias.
+vec3 waveNormal(vec2 p, float lodFine, float lodSwell, float amp, float storm, vec2 flow, float fp, out float crest){
   float t = TIME;
   vec2 w = uWind.xy;
   vec2 wn = vec2(-w.y, w.x);
   vec2 d1 = w, d2 = normalize(w + wn * 0.65), d3 = normalize(w - wn * 0.8);
-  float s1 = dot(p, d1) * 1.3 - t * 1.25;
-  float s2 = dot(p, d2) * 2.1 - t * 1.6;
-  float s3 = dot(p, d3) * 3.3 - t * 2.05;
-  float c1 = cos(s1), c2 = cos(s2), c3 = cos(s3);
-  crest = (sin(s1) * 0.5 + sin(s2) * 0.3 + sin(s3) * 0.2);
-  vec2 g = (d1 * (0.5 * 1.3 * c1) + d2 * (0.3 * 2.1 * c2) + d3 * (0.2 * 3.3 * c3)) * (0.035 + storm * 0.1) * lodSwell;
   vec2 n1 = tnoise(p * 0.09 + w * (t * 0.016)).rg - 0.5;
+  // swells: phases warped and amplitudes grouped by the coarse noise, so crests never form straight stripes
+  vec2 warp = n1 * 7.0;
+  float s1 = dot(p, d1) * 1.3 - t * 1.25 + warp.x;
+  float s2 = dot(p, d2) * 2.1 - t * 1.6 + warp.y;
+  float s3 = dot(p, d3) * 3.3 - t * 2.05 + warp.x - warp.y;
+  float grp = 0.4 + 1.2 * clamp(n1.y + 0.5, 0.0, 1.0);
+  float c1 = cos(s1), c2 = cos(s2), c3 = cos(s3);
+  crest = (sin(s1) * 0.5 + sin(s2) * 0.3 + sin(s3) * 0.2) * grp;
+  float a1 = 1.0 - smoothstep(0.6, 1.6, fp), a2 = 1.0 - smoothstep(0.38, 1.0, fp), a3 = 1.0 - smoothstep(0.24, 0.64, fp);
+  crest *= mix(a3, a1, 0.5);
+  vec2 g = (d1 * (0.65 * c1 * a1) + d2 * (0.63 * c2 * a2) + d3 * (0.66 * c3 * a3)) * ((0.035 + storm * 0.1) * lodSwell * grp);
   vec2 n2 = tnoise(p * 0.21 - d2 * (t * 0.025) + 0.37).ba - 0.5;
   vec2 n3 = tnoise(p * 0.57 + d3 * (t * 0.045) + 0.61).gr - 0.5;
   vec2 slope = g + (n1 * 1.0 + n2 * 0.75 + n3 * 0.55 * lodFine) * amp;
@@ -193,9 +200,11 @@ void main(){
   float open = smoothstep(0.8, 4.0, sd);                        // open water gets the bigger seas
   float amp = (0.42 + uWind.z * 0.45 + storm * 1.3 * open) * mix(0.55, 1.0, open) * (1.0 - poll * 0.5);
   float crest;
-  vec3 n = waveNormal(p, lodFine, lodSwell * mix(0.35, 1.0, open), amp, storm * open, flow, crest);
+  // pixel footprint on the water (world units along the view): grows with distance and at grazing angles
+  float fp = dist * (2.0 / (uProj[1][1] * uScreen.y)) / max(-rd.y, 0.02);
+  vec3 n = waveNormal(p, lodFine, lodSwell * mix(0.35, 1.0, open), amp, storm * open, flow, fp, crest);
   // rain rings
-  float rain = uWt2.y * lodFine;
+  float rain = uWt2.y * lodFine * (1.0 - smoothstep(0.04, 0.12, fp));
   if (rain > 0.01) {
     vec2 rp = (rippleCell(p * 5.0, TIME) + rippleCell(p * 5.0 + vec2(0.5, 0.27), TIME + 0.43)) * (0.55 * rain);
     n = normalize(n + vec3(-rp.x, 0.0, -rp.y));
@@ -212,7 +221,7 @@ void main(){
   float cosT = max(linS / dist, 0.05);
   float dB0 = linZ(texture(uSceneDepth, suv).r);
   float thick0 = max(dB0 - linS, 0.0) / cosT;
-  vec2 ruv = suv + n.xz * (0.028 * min(thick0, 1.0)) / (1.0 + dist * 0.03);
+  vec2 ruv = suv + n.xz * (0.045 * min(thick0, 1.0)) / (1.0 + dist * 0.03);
   float dB = linZ(texture(uSceneDepth, ruv).r);
   if (dB < linS + 0.01) { ruv = suv; dB = dB0; }                 // never refract what floats above the water
   thick = max(dB - linS, 0.0) / cosT;
@@ -276,11 +285,14 @@ void main(){
 #endif
   vec3 col = mix(refr, refl, fres);
 
-  // oily rainbow sheen on polluted water
+  // polluted water: drifting oil slicks with a faint thin-film rainbow
   if (poll > 0.05) {
-    float fl = tnoise(p * 0.35 + vec2(TIME * 0.004, 0.0)).r * 3.0 + nv * 2.0;
-    vec3 rb = 0.5 + 0.5 * cos(6.2831853 * (fl + vec3(0.0, 0.33, 0.67)));
-    col += rb * (ambL + sunL * 0.3) * smoothstep(0.2, 0.8, poll) * 0.12;
+    float slick = smoothstep(0.56, 0.68, tnoise(p * 0.11 + vec2(TIME * 0.003, -TIME * 0.002)).a) * smoothstep(0.2, 0.7, poll);
+    if (slick > 0.001) {
+      float fl = tnoise(p * 0.45 + vec2(TIME * 0.006, 0.0)).r * 2.5 + nv * 1.5;
+      vec3 rb = 0.5 + 0.5 * cos(6.2831853 * (fl + vec3(0.0, 0.33, 0.67)));
+      col = mix(col, col * 0.8 + rb * (ambL + sunL * 0.25) * 0.08, slick * 0.6);
+    }
   }
 
   // ---- sun / moon glints (HDR, bloom) + sparkles ----
@@ -295,18 +307,20 @@ void main(){
   vec2 sc = floor(p * 10.0);
   float hs = hash12(sc + floor(TIME * 0.5) * 7.0);
   float tw = sin(TIME * (4.0 + 9.0 * hs) + hs * 40.0);
-  spec += smoothstep(0.96, 1.0, tw) * step(0.8, hs) * pow(nh, gB * 1.6 + 40.0) * 22.0 * lodFine * (1.0 - night * 0.75);
+  spec += smoothstep(0.96, 1.0, tw) * step(0.8, hs) * pow(nh, gB * 1.6 + 40.0) * 22.0 * lodFine * (1.0 - night * 0.75) * (1.0 - smoothstep(0.05, 0.15, fp));
   col += uSunColor.rgb * (uSunDir.w * spec * sh * smoothstep(-0.02, 0.1, L.y) * (1.0 - poll * 0.6));
 
   // ---- foam ----
+  float fsp = length(flow);
+  float surf = (1.0 - smoothstep(0.05, 0.3, fsp)) * (1.0 - lake * 0.75);   // no surf on rivers, little on lakes
   float fn1 = tnoise(p * 0.8 + vec2(TIME * 0.02, -TIME * 0.013)).g;
   // breaking band hugging the shore; it breathes with the swell
   float breathe = sin(TIME * 1.1 + fn1 * 7.0 + p.x * 0.35 + p.y * 0.23);
-  float bw = 0.24 + 0.24 * fn1 + 0.08 * breathe;
+  float bw = (0.24 + 0.24 * fn1 + 0.08 * breathe) * mix(0.55, 1.0, surf);
   float band = 1.0 - smoothstep(bw * 0.12, bw, sd);
   // incoming wave lines: travel shoreward, thin out and die before they reach the band
   float wave = sd * 1.25 + TIME * 0.28 + fn1 * 1.7;
-  float lines = smoothstep(0.72, 0.97, sin(wave * 6.2831853)) * smoothstep(1.9, 0.6, sd) * smoothstep(bw * 0.9, bw * 1.6, sd) * 0.8;
+  float lines = smoothstep(0.72, 0.97, sin(wave * 6.2831853)) * smoothstep(1.9, 0.6, sd) * smoothstep(bw * 0.9, bw * 1.6, sd) * 0.8 * surf;
   float fm = max(band, lines);
 #ifdef REFRACT
   fm = max(fm, (1.0 - smoothstep(0.01, 0.06, vdepC)) * 0.7);     // contact foam: piers, boats, walls
@@ -317,7 +331,6 @@ void main(){
     float wc = tnoise(wq * vec2(0.35, 1.1) - vec2(TIME * 0.09, 0.0)).g + tnoise(wq * vec2(0.9, 2.6) - vec2(TIME * 0.16, 0.3)).b * 0.5;
     fm = max(fm, smoothstep(1.05, 1.35, wc + crest * 0.12) * storm * open * 0.75);
   }
-  float fsp = length(flow);
   if (fsp > 0.05) {
     vec2 fdir = flow / fsp;
     vec2 fq = vec2(dot(p, fdir), dot(p, vec2(-fdir.y, fdir.x)));
@@ -354,8 +367,8 @@ void main(){
     ice = max(ice, floe * near * frz * step(ice, 0.5));
     if (ice > 0.001) {
       float cr = iceCracks(p * 1.2);
-      float crk = 1.0 - smoothstep(0.0, 0.045, cr);
-      float cr2 = 1.0 - smoothstep(0.0, 0.03, iceCracks(p * 3.1 + 4.1));
+      float crk = (1.0 - smoothstep(0.0, 0.045, cr)) * (1.0 - smoothstep(0.08, 0.25, fp));
+      float cr2 = (1.0 - smoothstep(0.0, 0.03, iceCracks(p * 3.1 + 4.1))) * (1.0 - smoothstep(0.03, 0.1, fp));
       float clear = tnoise(p * 0.45 + 0.4).g;
       vec3 alb = mix(vec3(0.3, 0.52, 0.72), vec3(0.62, 0.8, 0.92), smoothstep(0.35, 0.65, clear));
       float dust = smoothstep(0.66, 0.86, tnoise(p * 0.8 + 0.4).b + SNOW * 0.1) * 0.7;
@@ -442,6 +455,7 @@ const Wt = (VC.water = {
   order: 500,
   ocean: true,
   mode: 'auto',
+  writeDepth: false,
   freeze: 0,
   bodies: [],
   stats: { variant: '', fieldMs: 0, sdfMs: 0, bodyMs: 0, copy: false },
@@ -457,12 +471,14 @@ const Wt = (VC.water = {
 
   /** Returns (compiling on first use) the program for a variant: 'basic' | 'refract' | 'ssr'. */
   variant(name) {
-    if (Wt.progs[name]) return Wt.progs[name];
+    const steps = name === 'ssr' ? ((VC.settings && VC.settings.quality) === 'ultra' ? 18 : 12) : 0;
+    const key = steps ? name + steps : name;
+    if (Wt.progs[key]) return Wt.progs[key];
     let defs = '';
     if (name !== 'basic') defs += '#define REFRACT 1\n';
-    if (name === 'ssr') defs += '#define SSR 1\n#define SSR_STEPS ' + (((VC.settings && VC.settings.quality) === 'ultra') ? 18 : 12) + '\n';
+    if (steps) defs += '#define SSR 1\n#define SSR_STEPS ' + steps + '\n';
     const skyGlsl = (VC.sky && VC.sky.GLSL) || FALLBACK_SKY;
-    const P = VC.gfx.program('water_' + name, VS, defs + skyGlsl + FS);
+    const P = VC.gfx.program('water_' + key, VS, defs + skyGlsl + FS);
     if (VC.sky && VC.sky.attach) VC.sky.attach(P);
     const gl = VC.gfx.gl;
     gl.useProgram(P.prog);
@@ -470,7 +486,7 @@ const Wt = (VC.water = {
     if (P.u.uSceneDepth) gl.uniform1i(P.u.uSceneDepth, 1);
     if (P.u.uField) gl.uniform1i(P.u.uField, 2);
     if (P.u.uPoll) gl.uniform1i(P.u.uPoll, 3);
-    Wt.progs[name] = P;
+    Wt.progs[key] = P;
     return P;
   },
 
@@ -479,6 +495,7 @@ const Wt = (VC.water = {
     Wt.rebuild();
     F.pollDirty = true;
     Wt.freeze = iceTarget();
+    F.snapIce = 3; // env is one frame stale at reset: snap the ice to the season for the first frames
   },
 
   /** Full recompute of the water field (SDF, bodies, flow) + upload. */
@@ -509,8 +526,9 @@ const Wt = (VC.water = {
       if (F.pendingAge > 0.12 || F.pendingAge > 1.0) applyPending(S);
     }
     if (F.pollDirty) uploadPollution(S);
-    // ice grows slowly and thaws a little faster
+    // ice grows slowly and thaws a little faster (snaps right after a reset / load)
     const target = iceTarget();
+    if (F.snapIce > 0) { F.snapIce--; Wt.freeze = target; }
     const rate = target > Wt.freeze ? 0.12 : 0.2;
     Wt.freeze += (target - Wt.freeze) * (1 - Math.exp(-rate * rdt * (1 + (S.time.speed || 0))));
     if (Math.abs(target - Wt.freeze) < 0.002) Wt.freeze = target;
@@ -539,12 +557,7 @@ const Wt = (VC.water = {
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, F.glPoll);
     gl.activeTexture(gl.TEXTURE0);
-    // quad: camera-centered to the far plane (ocean), or the map rectangle
     const far = cam.far || 1500;
-    if (Wt.ocean) {
-      const cx = cam.pos[0], cz = cam.pos[2], r = far * 1.02;
-      gl.uniform4f(u.uRect, cx - r, cz - r, cx + r, cz + r);
-    } else gl.uniform4f(u.uRect, 0, 0, S.W, S.H);
     const wx = env.windStrength == null ? 0.5 : env.windStrength;
     const storm = M.smoothstep(0.45, 1.0, wx) * (0.35 + 0.65 * M.sat(env.cloud || 0));
     const causticsFallback = VC.terrain && (VC.terrain.hasCaustics || VC.terrain.SKIRT_Y != null) ? 0 : 1;
@@ -552,10 +565,19 @@ const Wt = (VC.water = {
     gl.uniform4f(u.uWt2, storm, M.sat(env.wet || 0) * (1 - Wt.freeze * 0.5), far, 1.35);
     gl.disable(gl.CULL_FACE);
     if (name !== 'basic') gl.disable(gl.BLEND);
-    gl.depthMask(true);
     gl.bindVertexArray(G.emptyVao);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    if (!Wt.ocean) drawWalls(gl, G);
+    // Depth writes are opt-in (Wt.writeDepth): a flat depth-written plane at grazing angles makes the
+    // screen-space AO band into stripes toward the horizon. Without them, post effects see the seabed
+    // (or the sky past the map), which reads naturally through the water.
+    gl.depthMask(!!Wt.writeDepth);
+    if (Wt.ocean) {
+      // camera-centered quad reaching the far plane
+      const cx = cam.pos[0], cz = cam.pos[2], r = far * 1.02;
+      quad(gl, u, cx - r, cz - r, cx + r, cz + r);
+    } else {
+      quad(gl, u, 0, 0, S.W, S.H);
+      drawWalls(gl, G);
+    }
     gl.bindVertexArray(null);
   },
 
@@ -596,6 +618,13 @@ const Wt = (VC.water = {
     return s > 1e-4 ? { x: fx / s, z: fz / s, speed: Math.min(1, s) } : { x: 0, z: 0, speed: 0 };
   },
 });
+
+/** One water quad over the world rect (skipped when empty). */
+function quad(gl, u, x0, z0, x1, z1) {
+  if (x1 - x0 < 1e-3 || z1 - z0 < 1e-3) return;
+  gl.uniform4f(u.uRect, x0, z0, x1, z1);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
 
 /** Diorama walls (blended, no depth writes). */
 function drawWalls(gl, G) {
@@ -672,7 +701,6 @@ function allocField(S) {
     F.W = W; F.H = H;
     F.fw = W * FR; F.fh = H * FR;
     F.wm = new Uint8Array(N);
-    F.lv = new Uint8Array(N);
     F.lake = new Float32Array(N);
     F.fx = new Float32Array(N);
     F.fz = new Float32Array(N);
@@ -693,14 +721,14 @@ function allocField(S) {
   F.pending = null;
 }
 
-/** Copies water mask + levels for the rect; returns true if anything relevant changed. */
+/** Copies the water mask for the rect; returns true if it changed (depths come from uTileTex). */
 function snapshot(S, x0, z0, x1, z1) {
   let changed = false;
-  const W = S.W, hg = S.height, SEA = C.SEA;
+  const W = S.W, hg = S.height, SEA = C.SEA, wm = F.wm;
   for (let z = z0; z <= z1; z++)
     for (let i = z * W + x0, e = z * W + x1; i <= e; i++) {
-      const lv = hg[i], w = lv < SEA ? 1 : 0, l = w ? lv : SEA;
-      if (F.wm[i] !== w || F.lv[i] !== l) { F.wm[i] = w; F.lv[i] = l; changed = true; }
+      const w = hg[i] < SEA ? 1 : 0;
+      if (wm[i] !== w) { wm[i] = w; changed = true; }
     }
   return changed;
 }
@@ -737,19 +765,29 @@ function sdfRect(x0, z0, x1, z1) {
       const uniform = self ? cnt === area : cnt === 0;
       best[0] = best[1] = best[2] = best[3] = R2;
       if (!uniform) {
-        // exact distance from each sub-texel center to the nearest tile square of the other kind
-        for (let z = tz - RMAX; z <= tz + RMAX; z++)
-          for (let x = tx - RMAX; x <= tx + RMAX; x++) {
-            const other = x < 0 || z < 0 || x >= W || z >= H ? 1 : wm[z * W + x];
-            if (other === self) continue;
-            for (let s = 0; s < 4; s++) {
-              const px = tx + ((s & 1) + 0.5) / FR, pz = tz + ((s >> 1) + 0.5) / FR;
-              const dx = x > px ? x - px : px > x + 1 ? px - x - 1 : 0;
-              const dz = z > pz ? z - pz : pz > z + 1 ? pz - z - 1 : 0;
-              const d2 = dx * dx + dz * dz;
-              if (d2 < best[s]) best[s] = d2;
+        // exact distance from each sub-texel center to the nearest tile square of the other kind, searched
+        // ring by ring; a ring r+1 tile is at least r + 0.25 away from every sub-texel, so stop early
+        const p0 = tx + 0.5 / FR, p1 = tx + 1.5 / FR, q0 = tz + 0.5 / FR, q1 = tz + 1.5 / FR;
+        for (let r = 1; r <= RMAX; r++) {
+          for (let dz = -r; dz <= r; dz++) {
+            const z = tz + dz, edgeRow = dz === -r || dz === r, step = edgeRow ? 1 : 2 * r;
+            for (let dx = -r; dx <= r; dx += step) {
+              const x = tx + dx;
+              const other = x < 0 || z < 0 || x >= W || z >= H ? 1 : wm[z * W + x];
+              if (other === self) continue;
+              const ax0 = x > p0 ? x - p0 : p0 > x + 1 ? p0 - x - 1 : 0;
+              const ax1 = x > p1 ? x - p1 : p1 > x + 1 ? p1 - x - 1 : 0;
+              const az0 = z > q0 ? z - q0 : q0 > z + 1 ? q0 - z - 1 : 0;
+              const az1 = z > q1 ? z - q1 : q1 > z + 1 ? q1 - z - 1 : 0;
+              let d = ax0 * ax0 + az0 * az0; if (d < best[0]) best[0] = d;
+              d = ax1 * ax1 + az0 * az0; if (d < best[1]) best[1] = d;
+              d = ax0 * ax0 + az1 * az1; if (d < best[2]) best[2] = d;
+              d = ax1 * ax1 + az1 * az1; if (d < best[3]) best[3] = d;
             }
           }
+          const lim = (r + 0.25) * (r + 0.25);
+          if (best[0] <= lim && best[1] <= lim && best[2] <= lim && best[3] <= lim) break;
+        }
       }
       for (let s = 0; s < 4; s++) {
         const d = Math.sqrt(best[s]) * (self ? 1 : -1);
@@ -764,6 +802,7 @@ function sdfRect(x0, z0, x1, z1) {
  * body's mouth (its longest map-edge side) -> downhill direction, speed from the local channel width.
  */
 function analyzeBodies() {
+  const t0 = performance.now();
   const W = F.W, H = F.H, N = W * H, wm = F.wm, comp = F.comp, q = F.queue, dist = F.dist;
   comp.fill(-1);
   F.lake.fill(0);
@@ -794,6 +833,7 @@ function analyzeBodies() {
     b.lake = b.sea ? 0 : b.size <= POND ? 1 : 0.5;
     bodies.push(b);
   }
+  const tA = performance.now();
   // lake class per tile
   for (let i = 0; i < N; i++) if (comp[i] >= 0) F.lake[i] = bodies[comp[i]].lake;
   // flow: multi-source BFS from the mouth side of every sea-connected body
@@ -819,8 +859,31 @@ function analyzeBodies() {
     if (z > 0 && wm[i - W] && dist[i - W] < 0) { dist[i - W] = d; q[qt++] = i - W; }
     if (z < H - 1 && wm[i + W] && dist[i + W] < 0) { dist[i + W] = d; q[qt++] = i + W; }
   }
+  const tB = performance.now();
+  // channel half-width ~ the largest shore distance within +-2 tiles (separable max filter, off-map = open)
+  const fx = F.fx, fz = F.fz, tex = F.tex, fw = F.fw, hw = F.tmpx, hr = F.tmpz;
+  const sdScale = (2 * RMAX) / 255;
+  for (let z = 0; z < H; z++)
+    for (let x = 0; x < W; x++) {
+      let m = x < 2 || x >= W - 2 ? RMAX : -RMAX;
+      for (let dx = -2; dx <= 2; dx++) {
+        const xx = x + dx;
+        if (xx < 0 || xx >= W) continue;
+        const v = (tex[(z * FR * fw + xx * FR) * 4] - 127.5) * sdScale;
+        if (v > m) m = v;
+      }
+      hr[z * W + x] = m;
+    }
+  for (let z = 0; z < H; z++)
+    for (let x = 0; x < W; x++) {
+      let m = z < 2 || z >= H - 2 ? RMAX : -RMAX;
+      for (let dz = -2; dz <= 2; dz++) {
+        const zz = z + dz;
+        if (zz >= 0 && zz < H && hr[zz * W + x] > m) m = hr[zz * W + x];
+      }
+      hw[z * W + x] = m;
+    }
   // downhill direction of the BFS distance, scaled by channel narrowness
-  const fx = F.fx, fz = F.fz, tex = F.tex, fw = F.fw;
   for (let z = 0; z < H; z++)
     for (let x = 0; x < W; x++) {
       const i = z * W + x;
@@ -828,25 +891,17 @@ function analyzeBodies() {
       const c = dist[i];
       const l = x > 0 && dist[i - 1] >= 0 ? dist[i - 1] : c, r = x < W - 1 && dist[i + 1] >= 0 ? dist[i + 1] : c;
       const u = z > 0 && dist[i - W] >= 0 ? dist[i - W] : c, dn = z < H - 1 && dist[i + W] >= 0 ? dist[i + W] : c;
-      let gx = l - r, gz = u - dn;
+      const gx = l - r, gz = u - dn;
       const gl = Math.hypot(gx, gz);
       if (gl < 1e-6) continue;
-      // channel half-width ~ the largest shore distance nearby (field texel decode)
-      let hw = 0;
-      for (let dz = -2; dz <= 2; dz++)
-        for (let dx = -2; dx <= 2; dx++) {
-          const xx = x + dx, zz = z + dz;
-          if (xx < 0 || zz < 0 || xx >= W || zz >= H) { hw = RMAX; continue; }
-          const sd = (tex[((zz * FR) * fw + xx * FR) * 4] - 127.5) / (255 / (2 * RMAX));
-          if (sd > hw) hw = sd;
-        }
-      const speed = M.smoothstep(2.9, 1.1, hw);
+      const speed = M.smoothstep(2.9, 1.1, hw[i]);
       fx[i] = (gx / gl) * speed;
       fz[i] = (gz / gl) * speed;
     }
+  const tC = performance.now();
   // smooth the flow (2 box passes over water, land takes the water average for clean bilinear edges)
   for (let pass = 0; pass < 2; pass++) {
-    const ox = F.tmpx, oz = F.tmpz;
+    const ox = F.tmpx, oz = F.tmpz; // (the width scratch above is no longer needed)
     for (let z = 0; z < H; z++)
       for (let x = 0; x < W; x++) {
         const i = z * W + x;
@@ -878,6 +933,8 @@ function analyzeBodies() {
     lk[i] = m;
   }
   Wt.bodies = bodies.map((b) => ({ id: b.id, size: b.size, sea: b.sea, lake: b.lake }));
+  const tD = performance.now();
+  Wt.stats.prof = { comps: +(tA - t0).toFixed(2), bfs: +(tB - tA).toFixed(2), flow: +(tC - tB).toFixed(2), smooth: +(tD - tC).toFixed(2) };
 }
 
 /** Writes lake + flow channels for the rect. */
@@ -931,10 +988,9 @@ function onDirty(d) {
   const W = S.W, SEA = C.SEA, hg = S.height;
   for (let z = z0; z <= z1 && !changed; z++)
     for (let i = z * W + x0, e = z * W + x1; i <= e; i++) {
-      const lv = hg[i], w = lv < SEA ? 1 : 0;
-      if (F.wm[i] !== w || (w && F.lv[i] !== lv)) { changed = true; break; }
+      if (F.wm[i] !== (hg[i] < SEA ? 1 : 0)) { changed = true; break; }
     }
-  if (!changed) return;
+  if (!changed) return; // roads, zones, buildings or depth-only edits don't touch the field
   const p = F.pending;
   if (p) { p.x0 = Math.min(p.x0, x0); p.z0 = Math.min(p.z0, z0); p.x1 = Math.max(p.x1, x1); p.z1 = Math.max(p.z1, z1); }
   else F.pending = { x0, z0, x1, z1 };

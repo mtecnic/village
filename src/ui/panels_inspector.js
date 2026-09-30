@@ -166,7 +166,7 @@ function buildBuilding(p, b) {
     }
     // pills
     const building = b.built < 1;
-    pills.build.set('🚧 Under construction · ' + Math.round(M.sat(b.built) * 100) + '%', 'warn');
+    pills.build.set((b.simReplay ? '⬆️ Upgrading · ' : '🚧 Under construction · ') + Math.round(M.sat(b.built) * 100) + '%', b.simReplay ? 'info' : 'warn');
     U.show(pills.build, building);
     U.show(pills.aband, !!b.abandoned);
     U.show(pills.fire, b.fire > 0);

@@ -171,7 +171,8 @@ function tabOverview(c) {
   return () => {
     const S = VC.state;
     const f = forecast();
-    let netSub = f.net >= 0 ? 'Surplus 👍' : 'Deficit — cut costs';
+    const flat = Math.abs(f.net) < 0.5;
+    let netSub = flat ? 'Balanced' : f.net > 0 ? 'Surplus 👍' : 'Deficit — cut costs';
     if (f.net < 0 && !S.sandbox) {
       const run = U.api('econ', 'runway', [], null);
       const r = typeof run === 'number' ? run : S.money > 0 ? S.money / -f.net : 0;
@@ -180,7 +181,7 @@ function tabOverview(c) {
     kNet.set(U.smoney(f.net) + ' /mo', netSub, f.net > 0 ? 'good' : f.net < 0 ? 'bad' : '');
     kBal.set(U.money(S.money), S.sandbox ? 'Sandbox: unlimited funds' : S.money < 0 ? 'In debt!' : S.loans && S.loans.length ? S.loans.length + ' loan' + (S.loans.length > 1 ? 's' : '') + ' outstanding' : 'No debt', S.money < 0 ? 'bad' : '');
     const proj = S.money + f.net * 12;
-    kProj.set(U.money(proj), U.smoney(f.net * 12) + ' over the year', proj < 0 ? 'bad' : proj > S.money ? 'good' : 'warn');
+    kProj.set(U.money(proj), U.smoney(f.net * 12) + ' over the year', proj < 0 ? 'bad' : flat ? '' : proj > S.money ? 'good' : 'warn');
     // sparkline: last 12 months of treasury + 12-month projection
     const past = U.hist('money', 12).map(Number).filter(isFinite);
     past.push(S.money);
@@ -195,7 +196,7 @@ function tabOverview(c) {
     U.show(expEmpty, !exp.length);
     U.txt(incTot, U.money(f.totalIncome));
     U.txt(expTot, U.money(f.totalExpenses));
-    U.txt(srcNote, f.src === 'forecast' ? 'Forecast for next month at current rates, funding and policies.' : 'Based on last month’s books (no forecast available yet).');
+    U.txt(srcNote, !inc.length && !exp.length ? 'Nothing on the books yet — zone land and build services to get the economy going.' : f.src === 'forecast' ? 'Forecast for next month at current rates, funding and policies.' : 'Based on last month’s books (no forecast available yet).');
 
     const cm = ledgerSums(S.ledger && S.ledger.month), cl = ledgerSums(S.ledger && S.ledger.last);
     const set = (r, col, v, signed) => {

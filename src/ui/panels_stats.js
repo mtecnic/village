@@ -107,10 +107,11 @@ P.defs.stats = {
       const n = Math.max(U.histLen('pop'), U.histLen('money'));
       U.txt(months, n ? '📅 ' + n + ' month' + (n === 1 ? '' : 's') + ' of records' : '');
       U.show(empty, n < 2);
-      U.cls(grid, 'pn-cc-sparse', n < 2);
+      U.show(grid, n >= 2);
+      if (n < 2) return; // a single sample makes flat, meaningless charts
       for (const c of cards) {
         c.upd(S, force);
-        U.show(c, n < 2 || c.hasData); // hide charts whose metric this city does not record
+        U.show(c, c.hasData); // hide charts whose metric this city does not record
       }
     }
     return upd;
@@ -198,7 +199,8 @@ function popOverview(c) {
     kJobs.set(U.int(jobs), 'C ' + U.short(st.jobsC) + ' · I ' + U.short(st.jobsI));
     kWork.set(U.int(workers), pop > 0 ? U.pct(workers / pop) + ' of residents' : '—');
     const un = U.n01(st.unemployment);
-    kUn.set(U.pct(un, 1), un > 0.12 ? 'jobs needed!' : un < 0.03 ? 'labor shortage' : 'healthy', un > 0.12 ? 'bad' : un > 0.07 ? 'warn' : 'good');
+    if (!pop) kUn.set('—', 'no residents yet', '');
+    else kUn.set(U.pct(un, 1), un > 0.12 ? 'jobs needed!' : un < 0.03 ? 'labor shortage' : 'healthy', un > 0.12 ? 'bad' : un > 0.07 ? 'warn' : 'good');
     const avail = Math.max(0, pop * 0.6);
     let msg, tone;
     if (!pop) { msg = '🏗️ Zone residential areas to attract your first citizens.'; tone = 'info'; }

@@ -241,7 +241,6 @@
 .pn-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 18px; }
 .pn-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 14px; }
 .pn-cc-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.pn-cc-grid.pn-cc-sparse { opacity: 0.55; }
 .pn-cc { padding: 10px 11px 8px; border-radius: 12px; border: 1px solid var(--line); background: linear-gradient(170deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.012)); min-width: 0; transition: border-color 0.2s; }
 .pn-cc:hover { border-color: var(--line2); }
 .pn-cc-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }

@@ -93,6 +93,16 @@ VC.togglePause = function () {
   else VC.setSpeed(S.time.prevSpeed || 1);
 };
 
+/* ---------------- day/night clock ---------------- */
+const todRate = (h) => 0.4 + 0.6 * VC.M.smoothstep(0.06, 0.35, h);
+/** Normalisation so that one full cycle still takes C.DAYCYCLE_SEC on average (sun height ~ sin). */
+const TOD_NORM = (() => {
+  let acc = 0;
+  const n = 2000;
+  for (let i = 0; i < n; i++) acc += 1 / todRate(Math.abs(Math.sin(((i + 0.5) / n) * Math.PI * 2)));
+  return acc / n;
+})();
+
 /* ---------------- main loop ---------------- */
 let last = 0;
 function frame(t) {
@@ -102,7 +112,10 @@ function frame(t) {
   const S = VC.state;
   const dt = S && S.time.speed > 0 ? rdt : 0;
   if (S && VC.running && VC.settings.dayNight === 'cycle' && S.time.speed > 0) {
-    S.time.tod = (S.time.tod + rdt / VC.C.DAYCYCLE_SEC) % 1;
+    // the clock slows near the horizon so golden hour / blue hour last; TOD_NORM keeps the cycle length
+    const env = VC.gfx.env;
+    const h = env && isFinite(env.sunUp) ? Math.abs(env.sunUp) : 1;
+    S.time.tod = (S.time.tod + (rdt / VC.C.DAYCYCLE_SEC) * todRate(h) * TOD_NORM) % 1;
   }
   each((m) => m.update && m.update(dt, rdt));
   if (S) VC.world.flush();

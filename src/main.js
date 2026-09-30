@@ -9,7 +9,7 @@
  */
 const MODULE_ORDER = [
   'audio', 'camera', 'shadows', 'post', 'sky', 'terrain', 'water', 'bldgfx', 'agents', 'particles', 'fx',
-  'worldgen', 'sim', 'econ', 'disasters', 'advisors', 'actions', 'tools', 'input', 'save',
+  'worldgen', 'sim', 'econ', 'disasters', 'advisors', 'goals', 'desk', 'actions', 'tools', 'input', 'save',
   'ui', 'hud', 'panels', 'menu',
 ];
 VC.MODULE_ORDER = MODULE_ORDER;

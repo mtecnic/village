@@ -34,7 +34,9 @@ const STEP = C.STEP;
 /* ------------------------------------------------------------------ */
 /* Colors (linear-ish rgba for the gizmo shader)                        */
 /* ------------------------------------------------------------------ */
-/* Values > 1 are intentional: the scene is linear HDR, so previews glow slightly (and bloom with post). */
+/* Values > 1 are intentional: the scene is linear HDR, so previews glow slightly (and bloom with post).
+ * Contrast on grass: "valid" is cyan / white (never green), "invalid" red; the residential zone preview is
+ * a light mint fill with a bright outline so it separates from the lawn it is painted on. */
 const COL = {
   ok: [0.3, 1.0, 1.45, 0.55],
   bad: [1.6, 0.22, 0.16, 0.6],
@@ -47,9 +49,9 @@ const COL = {
   center: [2.2, 2.2, 2.2, 0.9],
   upgrade: [0.3, 0.15, 0.65, 0.6],
   post: [1.6, 1.6, 1.6, 0.85],
-  zone: { 1: [0.04, 0.75, 0.28, 0.55], 2: [0.04, 0.38, 1.0, 0.55], 3: [1.0, 0.62, 0.04, 0.55] },
-  zoneDim: { 1: [0.04, 0.75, 0.28, 0.16], 2: [0.04, 0.38, 1.0, 0.16], 3: [1.0, 0.62, 0.04, 0.16] },
-  zoneLine: { 1: [0.7, 2.4, 1.1, 1], 2: [0.7, 1.4, 2.6, 1], 3: [2.6, 1.9, 0.6, 1] },
+  zone: { 1: [0.42, 1.35, 0.95, 0.62], 2: [0.04, 0.38, 1.0, 0.55], 3: [1.0, 0.62, 0.04, 0.55] },
+  zoneDim: { 1: [0.42, 1.35, 0.95, 0.2], 2: [0.04, 0.38, 1.0, 0.16], 3: [1.0, 0.62, 0.04, 0.16] },
+  zoneLine: { 1: [1.5, 3.2, 2.3, 1], 2: [0.7, 1.4, 2.6, 1], 3: [2.6, 1.9, 0.6, 1] },
   dezone: [0.9, 0.2, 0.08, 0.5],
   dezoneLine: [2.4, 0.8, 0.5, 1],
   bull: [1.0, 0.3, 0.04, 0.38],
@@ -65,9 +67,9 @@ const COL = {
   level: [0.95, 0.85, 0.35, 0.52],
   hover: [1.0, 1.0, 1.0, 0.06],
   sel: [0.35, 0.9, 1.4, 0.08],
-  ghostOk: [0.08, 0.9, 0.3, 0.42],
+  ghostOk: [0.3, 1.0, 1.45, 0.45],
   ghostBad: [1.1, 0.08, 0.05, 0.5],
-  arrowOk: [0.9, 2.4, 1.1, 1],
+  arrowOk: [1.0, 2.4, 3.0, 1],
   arrowBad: [2.4, 0.7, 0.6, 1],
 };
 const SVC_COL = {
@@ -979,7 +981,8 @@ function drawBuilding(res, g) {
   const cx = M.clamp(x, 0, S.W - 1), cz = M.clamp(z, 0, S.H - 1);
   const y = res.level ? res.level * STEP : topY(cx, cz);
   const ok = res.ok;
-  dlBox(x + 0.02, y + 0.01, z + 0.02, x + w - 0.02, y + 0.1, z + d - 0.02, ok ? COL.ghostOk : COL.ghostBad, true);
+  // footprint pad, slightly larger than the lot so its rim and outline stay visible around the ghost
+  dlBox(x - 0.06, y + 0.01, z - 0.06, x + w + 0.06, y + 0.1, z + d + 0.06, ok ? COL.ghostOk : COL.ghostBad, true);
   // fallback ghost volume when the renderer has no ghost support
   if (!(VC.bldgfx && VC.bldgfx.setGhost)) {
     let hgt = 1;

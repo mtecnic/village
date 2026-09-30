@@ -15,6 +15,14 @@
  *   (DOM / WebGL objects), and renderer fields on buildings (hgt, disLift and keys prefixed gfx, bldgfx, fx, agents, particles, render).
  *   S.buildings is stored as an array of building objects.
  *
+ * SNAPSHOT: snapshot(S) (synchronous) and snapshotGen(S) (the same work as a generator: buildings in chunks
+ *   of ~200, then the other state fields one by one; VC.save's autosave runs it in slices across frames)
+ *   write the binary container directly: each building is JSON-encoded on its own (a native
+ *   JSON.stringify fast path when all its saved fields are plain values, else the generic encoder),
+ *   chunks are UTF-8 encoded as they go and spliced into the state JSON at the end, so there is never
+ *   one giant object tree or JSON string for the whole city. The result is byte-for-byte what the
+ *   decoder expects (same format v1).
+ *
  * STORAGE STRING (localStorage value and exported file)
  *   'VXPZ1:' + base64(gzip(container))      gzip by CompressionStream, or by the built-in JS encoder
  *                                            (LZ77 + fixed Huffman) on browsers without it
@@ -33,7 +41,7 @@
  * max 40 chars) because names are shown in HTML. S.cityId (stable id, see VC.save) must match
  * [A-Za-z0-9_-]{1,64} or is dropped (VC.save creates a new one).
  * API (VC.save.codec): serialize, deserialize, validate, cleanName(name, fallback), meta, snapshot,
- * finish (async gzip), finishSync (JS gzip, for page unload), decodeText, decodeBytes, diff, …
+ * snapshotGen, finish (async gzip), finishSync (JS gzip, for page unload), decodeText, decodeBytes, diff, …
  */
 const CODEC_V = 1;
 const MAGIC = 0x42505856; // 'VXPB' little-endian
@@ -690,14 +698,139 @@ function gzipJS(src) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Snapshot (binary container, optionally in slices)                    */
+/* ------------------------------------------------------------------ */
+const skipCache = new Map();
+/** Is a building field transient (never saved)? Cached per field name. */
+function bldSkip(k) {
+  let v = skipCache.get(k);
+  if (v === undefined) {
+    v = k.charCodeAt(0) === 95 || BLD_SKIP.test(k);
+    skipCache.set(k, v);
+  }
+  return v;
+}
+let fastB = null, fastBad = false;
+/** JSON.stringify replacer for the fast path: drops transient fields, flags anything that needs enc(). */
+function fastReplacer(k, v) {
+  if (this !== fastB) return v; // the root holder
+  if (bldSkip(k)) return undefined;
+  if (k.charCodeAt(0) === 36) { fastBad = true; return undefined; } // '$' keys need escaping
+  switch (typeof v) {
+    case 'number':
+      if (v !== v || v === Infinity || v === -Infinity) fastBad = true;
+      return v;
+    case 'string': case 'boolean': return v;
+    case 'undefined': case 'function': case 'symbol': return undefined; // enc() drops these too
+  }
+  if (v === null) return null;
+  fastBad = true; // objects, arrays, typed arrays, bigint: the generic encoder
+  return undefined;
+}
+/** One building as JSON text: identical to JSON.stringify(encObj(b, cx, BLD_SKIP)). */
+function bldJSON(b, cx) {
+  fastB = b;
+  fastBad = false;
+  let js;
+  try {
+    js = JSON.stringify(b, fastReplacer);
+  } catch (e) {
+    fastBad = true;
+  }
+  fastB = null;
+  if (fastBad) js = JSON.stringify(encObj(b, cx, BLD_SKIP));
+  return js;
+}
+const BLD_MARK = '\u0001vxp:buildings\u0001';
+/**
+ * Snapshot as a generator (yields between chunks; the caller keeps S unchanged meanwhile — VC.save holds
+ * the sim and restarts when the world changed). opts.speed: S.time.speed value to store. Returns
+ * {bin: Uint8Array} (the binary container).
+ */
+function* snapshotGen(S, extra, opts) {
+  if (!S || !S.height || !S.buildings) throw friendly('There is no city to save.');
+  const per = (opts && opts.chunk) || 200;
+  const sink = { parts: [], len: 0 };
+  const cx = { S, sink, stack: new Set() };
+  const te = new TextEncoder();
+  // ---- buildings: JSON per building, UTF-8 per chunk ----
+  const parts = [];
+  let buf = [];
+  for (const b of S.buildings.values()) {
+    buf.push(bldJSON(b, cx));
+    if (buf.length >= per) {
+      parts.push(te.encode(buf.join(',')));
+      buf = [];
+      yield 'buildings';
+    }
+  }
+  if (buf.length) parts.push(te.encode(buf.join(',')));
+  // ---- every other field (typed arrays go to the binary sink) ----
+  const state = {};
+  const t = S.time, sp = opts && opts.speed != null ? opts.speed : null;
+  for (const k in S) {
+    if (k.charCodeAt(0) === 95 || STATE_SKIP[k]) continue;
+    if (k === 'buildings') {
+      state.buildings = BLD_MARK;
+      continue;
+    }
+    let x;
+    if (k === 'time' && sp != null && t && sp !== t.speed) {
+      const keep = t.speed;
+      t.speed = sp;
+      try { x = enc(t, cx); } finally { t.speed = keep; }
+    } else x = enc(S[k], cx);
+    if (x !== undefined) state[k] = x;
+    if (k === 'maps' || ArrayBuffer.isView(S[k])) yield 'state';
+  }
+  const out = { app: 'voxelpolis', v: CODEC_V, game: VC.VERSION, meta: meta(S), state };
+  const ex = extra ? enc(extra, cx) : undefined;
+  if (ex && Object.keys(ex).length) out.extra = ex;
+  const json = JSON.stringify(out);
+  const mark = JSON.stringify(BLD_MARK);
+  const at = json.indexOf(mark);
+  if (at < 0) throw new Error('[save] snapshot marker missing');
+  const head = te.encode(json.slice(0, at) + '['), tail = te.encode(']' + json.slice(at + mark.length));
+  yield 'json';
+  let jl = head.length + tail.length;
+  for (let i = 0; i < parts.length; i++) jl += parts[i].length + (i ? 1 : 0);
+  // ---- container: header | json | pad4 | blob ----
+  const jpad = (4 - (jl & 3)) & 3;
+  const bin = new Uint8Array(16 + jl + jpad + sink.len);
+  const dv = new DataView(bin.buffer);
+  dv.setUint32(0, MAGIC, true);
+  dv.setUint32(4, 1, true);
+  dv.setUint32(8, jl, true);
+  dv.setUint32(12, sink.len, true);
+  let o = 16;
+  bin.set(head, o);
+  o += head.length;
+  for (let i = 0; i < parts.length; i++) {
+    if (i) bin[o++] = 44; // ','
+    bin.set(parts[i], o);
+    o += parts[i].length;
+  }
+  bin.set(tail, o);
+  o += tail.length + jpad;
+  for (const p of sink.parts) {
+    bin.set(p, o);
+    o += p.length;
+  }
+  return { bin };
+}
+
+/* ------------------------------------------------------------------ */
 /* Storage strings / files                                              */
 /* ------------------------------------------------------------------ */
 /**
  * Synchronous snapshot for saving (so later mutations can't leak into an in-flight save).
- * Returns { bin: Uint8Array } — the binary container, gzipped by finish().
+ * Returns { bin: Uint8Array } — the binary container, gzipped by finish(). opts as snapshotGen.
  */
-function snapshot(S, extra) {
-  return { bin: containerEncode(S, extra) };
+function snapshot(S, extra, opts) {
+  const g = snapshotGen(S, extra, opts);
+  let r;
+  while (!(r = g.next()).done);
+  return r.value;
 }
 /**
  * Finishes a snapshot into the storage string: native gzip (CompressionStream) when available, else the
@@ -796,6 +929,6 @@ function diff(a, b, opts = {}) {
 VC.save = VC.save || {};
 VC.save.codec = {
   VERSION: CODEC_V, MIGRATIONS, BLD_SKIP, STATE_SKIP, NAME_MAX,
-  serialize, deserialize, validate, cleanName, meta, migrate, snapshot, finish, finishSync, decodeText, decodeBytes,
+  serialize, deserialize, validate, cleanName, meta, migrate, snapshot, snapshotGen, finish, finishSync, decodeText, decodeBytes,
   containerEncode, containerDecode, gzip, gunzip, gzipJS, crc32, inflateGzip, inflateRaw, canGzip, diff, enc, dec, friendly,
 };

@@ -20,6 +20,12 @@
  *     - when the tab becomes hidden (async), and synchronously (JS gzip, quiet) on beforeunload / pagehide
  *     - for the old city when another state replaces it (new game, load, import, main menu)
  *   A quiet "Autosaved" toast (no sound) shows at most every autosaveToastMs.
+ *   OFF THE CRITICAL PATH: the month / timer autosaves never run inside the sim's month tick. They start
+ *   a frame later and take the snapshot in slices of ~3 ms from the frame loop (codec.snapshotGen) while
+ *   the sim holds its day ticks (VC.sim._.hold), so the city cannot change under it; a world edit in the
+ *   meantime (player, disaster) restarts it (after 3 tries it waits for the next trigger). Compression
+ *   is async (CompressionStream). Autosaves capture NO thumbnail (a canvas capture stalls the GPU
+ *   pipeline): the entry reuses this city's latest thumbnail; manual saves capture one.
  * PAUSE MENU: while it is open (or after it paused the game) a save stores the speed the game resumes at
  *   (VC.menu.resumeSpeed() when available, else the speed before the menu paused), so it never loads paused.
  *
@@ -180,6 +186,13 @@ function writeIndex(arr) {
   }
   return false;
 }
+/** Newest thumbnail stored for a city (any slot), or null. */
+function cityThumb(cityId) {
+  if (!cityId) return null;
+  let best = null;
+  for (const e of readIndex()) if (e.thumb && e.cityId === cityId && (!best || (e.savedAt || 0) > (best.savedAt || 0))) best = e;
+  return best ? best.thumb : null;
+}
 function entryOf(slot) {
   const s = String(slot);
   return readIndex().find((e) => e.slot === s) || null;
@@ -256,16 +269,10 @@ function storedSpeed(S) {
   if (menuPause && menuPause.S === S) return menuPause.from;
   return t.speed;
 }
-/** Synchronous snapshot with the stored speed patched in (restored before returning). */
+/** Synchronous snapshot storing the resume speed (see storedSpeed). */
 function snapshotOf(S, withExtra) {
   if (!S || !S.time) return codec().snapshot(S, null); // throws the friendly "no city" error
-  const t = S.time, keep = t.speed, sp = storedSpeed(S);
-  if (sp !== keep) t.speed = sp;
-  try {
-    return codec().snapshot(S, withExtra === false ? null : collectExtra(S));
-  } finally {
-    t.speed = keep;
-  }
+  return codec().snapshot(S, withExtra === false ? null : collectExtra(S), { speed: storedSpeed(S) });
 }
 /** Writes a storage string. An autosave that hits the quota evicts other cities' oldest autosaves first. */
 function writeSlot(slot, text, auto) {
@@ -297,8 +304,9 @@ function commit(S, slot, display, text, meta, thumb, auto) {
   const cityId = meta.cityId || null;
   const entry = {
     slot, name: display, city: meta.name, cityId, pop: meta.pop, money: meta.money, day: meta.day, savedAt: Date.now(),
-    // no fresh thumbnail (hidden tab, page unload): keep the previous one of the same city
-    thumb: thumb || (prev && prev.thumb && prev.cityId === cityId && cityId ? prev.thumb : null),
+    // no fresh thumbnail (autosave, hidden tab, page unload): keep the previous one of the same city,
+    // else this city's newest thumbnail from any slot
+    thumb: thumb || (prev && prev.thumb && prev.cityId === cityId && cityId ? prev.thumb : null) || cityThumb(cityId),
     mapType: meta.mapType, size: meta.size, difficulty: meta.difficulty, milestone: meta.milestone,
     bytes: text.length, auto, v: codec().VERSION,
   };
@@ -413,23 +421,29 @@ function start(S, slot, quiet) {
 /* ------------------------------------------------------------------ */
 /* Saving                                                               */
 /* ------------------------------------------------------------------ */
-/** Saves state S (normally the running city) to a slot. opts as SV.save plus extra:false (no extras). */
-function saveState(S, slot, name, opts) {
+/**
+ * Saves state S (normally the running city) to a slot. opts as SV.save plus extra:false (no extras).
+ * pre {snap, meta, fp}: a snapshot taken already (the sliced autosave); otherwise it is taken now.
+ */
+function saveState(S, slot, name, opts, pre) {
   slot = normSlot(slot);
   const quiet = opts.quiet != null ? !!opts.quiet : panelOpen();
   if (!S || !S.buildings) return Promise.resolve(fail(slot, 'There is no city to save.', quiet));
   if (S.demo && !opts.force) return Promise.resolve(false);
   const auto = !!opts.auto || isAutoSlot(slot);
   let snap, meta, fp;
-  try {
-    // snapshot synchronously so the running game can't change what gets written
-    if (!S.demo) cityIdOf(S);
-    fp = fingerprint(S);
-    snap = snapshotOf(S, opts.extra);
-    meta = codec().meta(S);
-  } catch (e) {
-    console.error('[save] serialize failed', e);
-    return Promise.resolve(fail(slot, friendlyMsg(e, 'The city could not be saved.'), quiet));
+  if (pre) ({ snap, meta, fp } = pre);
+  else {
+    try {
+      // snapshot synchronously so the running game can't change what gets written
+      if (!S.demo) cityIdOf(S);
+      fp = fingerprint(S);
+      snap = snapshotOf(S, opts.extra);
+      meta = codec().meta(S);
+    } catch (e) {
+      console.error('[save] serialize failed', e);
+      return Promise.resolve(fail(slot, friendlyMsg(e, 'The city could not be saved.'), quiet));
+    }
   }
   const prev = entryOf(slot);
   const display = name ? String(name).slice(0, 60) : isAutoSlot(slot) || slot === 'quick' ? meta.name : (prev && prev.name) || slot;
@@ -485,9 +499,12 @@ function autosaveNow(S, why) {
     lastAutoAt = now();
   }
   if (why !== 'manual' && (!changedSinceSave(S) || isEmptyCity(S))) return Promise.resolve(false);
-  // leaving: the renderer and camera already show the next city (no thumbnail, no camera/module extras)
+  // leaving: the renderer and camera already show the next city (no camera/module extras)
   const leaving = why === 'leave';
-  return saveState(S, autoSlotOf(S), null, { auto: true, quiet: true, thumb: !leaving && why !== 'hidden', extra: leaving ? false : undefined }).then((ok) => {
+  // routine backups of the running, visible game: snapshot in slices from the frame loop
+  const sliced = (why === 'month' || why === 'timer') && S === VC.state && !inc && !(typeof document !== 'undefined' && document.hidden);
+  const p = sliced ? startInc(S) : saveState(S, autoSlotOf(S), null, { auto: true, quiet: true, thumb: false, extra: leaving ? false : undefined });
+  return p.then((ok) => {
     if (ok && (why === 'month' || why === 'timer') && now() - lastAutoToast > SV.autosaveToastMs && !panelOpen()) {
       lastAutoToast = now();
       toast('Autosaved', 'info', '💾', 1800, { sfx: false }); // quiet: no sound for a routine backup
@@ -495,6 +512,71 @@ function autosaveNow(S, why) {
     return ok;
   });
 }
+/* ---- sliced autosave (see header) ---- */
+const INC_SLICE_MS = 3;
+let inc = null; // running sliced snapshot: {S, gen, sig, tries, resolve}
+let pendingAuto = null; // {S, why, frames}: an autosave waiting for the frame after the month tick
+/** What must not change while a sliced snapshot runs (buildings, tiles, trees). */
+function structSig(S) {
+  const v = S.ver || {};
+  return v.bld + '|' + v.terrain + '|' + v.trees + '|' + (S.buildings ? S.buildings.size : 0) + '|' + S.nextId;
+}
+/** Holds the sim's day ticks (renewed every slice; expires by itself if this module stops). */
+function holdSim(S, on) {
+  const X = VC.sim && VC.sim._;
+  if (X) X.hold = on ? { S, until: now() + 1500 } : null;
+}
+function startInc(S) {
+  return new Promise((resolve) => {
+    inc = { S, gen: null, sig: '', tries: 0, resolve };
+    SV.busy++;
+    restartInc();
+  });
+}
+function restartInc() {
+  const j = inc;
+  j.tries++;
+  j.sig = structSig(j.S);
+  j.gen = codec().snapshotGen(j.S, collectExtra(j.S), { speed: storedSpeed(j.S) });
+}
+/** Ends the sliced snapshot; result: false or the save's promise. */
+function endInc(result) {
+  const j = inc;
+  if (!j) return;
+  inc = null;
+  holdSim(j.S, false);
+  SV.busy = Math.max(0, SV.busy - 1);
+  j.resolve(result);
+}
+/** One slice of the sliced snapshot (called from SV.update); hands the result to saveState when done. */
+function stepInc(budgetMs) {
+  const j = inc, S = j.S;
+  if (S !== VC.state || !autoOK(S)) return endInc(false);
+  if (structSig(S) !== j.sig) {
+    // the world changed under the snapshot: start over (or wait for the next trigger)
+    if (j.tries >= 3) return endInc(false);
+    restartInc();
+  }
+  holdSim(S, true);
+  const t0 = now();
+  let r;
+  try {
+    do r = j.gen.next(); while (!r.done && now() - t0 < budgetMs);
+  } catch (e) {
+    console.error('[save] autosave snapshot failed', e);
+    return endInc(false);
+  }
+  if (!r.done || structSig(S) !== j.sig) return; // continue (or restart) next frame
+  let pre;
+  try {
+    pre = { snap: r.value, meta: codec().meta(S), fp: fingerprint(S) };
+  } catch (e) {
+    console.error('[save] autosave failed', e);
+    return endInc(false);
+  }
+  endInc(saveState(S, autoSlotOf(S), null, { auto: true, quiet: true, thumb: false }, pre));
+}
+
 /**
  * Best-effort synchronous autosave for page unload (promises never settle there): JS gzip, no thumbnail,
  * no toast. Returns true when written.
@@ -523,19 +605,24 @@ function onMonth() {
   const S = VC.state;
   if (!autoOK(S) || !VC.running) return;
   if (++monthsSince < SV.autosaveMonths) return;
-  if (now() - lastAutoAt < SV.autosaveMinMs || SV.busy) return; // retried next month
-  autosaveNow(S, 'month');
+  if (now() - lastAutoAt < SV.autosaveMinMs || SV.busy || inc || pendingAuto) return; // retried next month
+  pendingAuto = { S, why: 'month', frames: 1 }; // never inside the sim's month tick: starts next frame
 }
 /** Tab hidden (switching away, minimizing, closing on mobile): back up now while promises still run. */
 function onVisibility() {
   if (document.visibilityState !== 'hidden') return;
   const S = VC.state;
-  if (!autoOK(S) || !VC.running || SV.busy || now() - lastAutoAt < 20000) return;
+  const wasSliced = !!inc || !!pendingAuto;
+  if (inc) endInc(false); // rAF stops in hidden tabs: finish with a synchronous snapshot instead
+  pendingAuto = null;
+  if (!autoOK(S) || !VC.running || SV.busy || (!wasSliced && now() - lastAutoAt < 20000)) return;
   autosaveNow(S, 'hidden');
 }
 /** beforeunload / pagehide (reload, close, navigate away): synchronous, quiet, once. */
 function onUnload() {
   if (now() - unloadAt < 1500) return; // beforeunload and pagehide both fire
+  if (inc) endInc(false);
+  pendingAuto = null;
   const S = VC.state;
   if (!autoOK(S) || !VC.running) return;
   unloadAt = now();
@@ -591,6 +678,8 @@ const SV = (VC.save = Object.assign(VC.save || {}, {
   },
   reset(S) {
     const prev = cur;
+    if (inc) endInc(false);
+    pendingAuto = null;
     cur = S && !S.demo ? S : null;
     // the city being replaced (new game, load, main menu) keeps its progress in its own autosave slot
     if (prev && prev !== S && autoOK(prev)) {
@@ -603,15 +692,25 @@ const SV = (VC.save = Object.assign(VC.save || {}, {
     monthsSince = 0;
     lastAutoAt = now();
   },
-  /** Real-time autosave timer (runs while paused too; saves only when something changed). */
+  /** Sliced autosave steps + real-time autosave timer (runs while paused too; saves only when something changed). */
   update() {
+    if (inc) stepInc(INC_SLICE_MS);
+    else if (pendingAuto && pendingAuto.frames-- <= 0) {
+      const p = pendingAuto;
+      pendingAuto = null;
+      if (p.S === VC.state && autoOK(p.S) && VC.running && !SV.busy) autosaveNow(p.S, p.why);
+    }
     const t = now();
     if (t < nextCheck) return;
     nextCheck = t + 2000;
     const S = VC.state;
-    if (!autoOK(S) || !VC.running || SV.busy || S !== cur) return;
+    if (!autoOK(S) || !VC.running || SV.busy || inc || pendingAuto || S !== cur) return;
     if (t - lastAutoAt < SV.autosaveEveryMs) return;
     autosaveNow(S, 'timer');
+  },
+  /** True while a sliced autosave snapshot is running (the sim holds its day ticks meanwhile). */
+  snapshotting() {
+    return !!inc;
   },
 
   serialize(S) {

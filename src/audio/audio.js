@@ -27,7 +27,7 @@ const A = (VC.audio = Object.assign(VC.audio || {}, {
   bus: null, // {master, in, music, sfx, amb, musicIn, sfxIn, ambIn, musicVerb, sfxVerb, duck}
   RECIPES: {},
   ALIAS: {},
-  stats: { played: 0, deduped: 0, dropped: 0, voices: 0, live: 0, renders: 0, renderMs: 0, jobs: 0 },
+  stats: { played: 0, deduped: 0, dropped: 0, voices: 0, live: 0, renders: 0, renderMs: 0, jobs: 0, names: {} },
   started: false,
 }));
 
@@ -580,10 +580,33 @@ A.buffer = function (name, variant = 0) {
   bufCache.set(key, b);
   return b;
 };
-/** Queues work for idle frames (a few ms per frame). */
-A.job = function (fn) {
-  jobs.push(fn);
+/** Queues work for idle time (a few ms at a time). urgent = run before queued warm-ups. */
+A.job = function (fn, urgent) {
+  if (urgent) jobs.unshift(fn);
+  else jobs.push(fn);
+  pump();
 };
+/** Runs queued jobs for up to `ms` milliseconds (or while an idle deadline allows). */
+function runJobs(ms, deadline) {
+  const t0 = performance.now();
+  while (jobs.length && (deadline ? deadline.timeRemaining() > 1 || deadline.didTimeout : performance.now() - t0 < ms)) {
+    const j = jobs.shift();
+    A.stats.jobs++;
+    try { j(); } catch (e) { console.error('[audio] job', e); }
+    if (deadline && deadline.didTimeout) break; // forced run: one job, then yield
+  }
+}
+let pumping = false;
+/** Drains the job queue in idle periods (requestIdleCallback); update() also runs a slice per frame. */
+function pump() {
+  if (pumping || !jobs.length || typeof window.requestIdleCallback !== 'function') return;
+  pumping = true;
+  window.requestIdleCallback((dl) => {
+    pumping = false;
+    runJobs(0, dl);
+    pump();
+  }, { timeout: 400 });
+}
 A.ready = () => !!(A.ctx && A.ctx.state === 'running' && A.bus);
 /** Queues idle-time rendering of every variant of the named recipes. */
 function warm(names) {
@@ -592,6 +615,7 @@ function warm(names) {
     if (!R) continue;
     for (let v = 0; v < (R.variants || 1); v++) jobs.push(() => A.buffer(A.ALIAS[n] || n, v));
   }
+  pump();
 }
 A.warm = warm;
 /** performance.now() of the last time a sound of this group started (-1e9 if never). */
@@ -659,6 +683,7 @@ A.play = function (name, opts) {
   A.stats.voices++;
   A.stats.live += nodes.length;
   A.stats.played++;
+  A.stats.names[name] = (A.stats.names[name] || 0) + 1;
   activeByName[name] = (activeByName[name] || 0) + 1;
   src.onended = () => {
     for (const n of nodes) try { n.disconnect(); } catch (e) { /* ignore */ }
@@ -772,14 +797,7 @@ A.reset = function (S) {
 A.update = function (dt, rdt) {
   if (!A.ctx || !A.bus || A.ctx.state !== 'running') return;
   applyVolumes(false); // cheap; picks up live slider drags that don't emit 'settings'
-  if (jobs.length) {
-    const t0 = performance.now();
-    while (jobs.length && performance.now() - t0 < 3) {
-      const j = jobs.shift();
-      A.stats.jobs++;
-      try { j(); } catch (e) { console.error('[audio] job', e); }
-    }
-  }
+  if (jobs.length) runJobs(3);
   if (A.music && A.music.update) try { A.music.update(dt, rdt); } catch (e) { if (!A._mErr) console.error('[audio] music', e); A._mErr = true; }
   if (A.amb && A.amb.update) try { A.amb.update(dt, rdt); } catch (e) { if (!A._aErr) console.error('[audio] ambience', e); A._aErr = true; }
 };

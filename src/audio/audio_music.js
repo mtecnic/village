@@ -170,13 +170,13 @@ function ensureInst(name) {
       A.stats.renders++;
       A.stats.renderMs += performance.now() - t0;
       if (list.length === I.base.length) samples[name] = list;
-    });
+    }, true);
   }
 }
 function ensureDrums() {
   if (drums._q) return;
   drums._q = true;
-  for (const k in DRUMS) A.job(() => { drums[k] = A.toBuffer(DRUMS[k](A.dsp)); });
+  for (const k in DRUMS) A.job(() => { drums[k] = A.toBuffer(DRUMS[k](A.dsp)); }, true);
 }
 
 /* ------------------------------------------------------------------ */
@@ -445,6 +445,8 @@ function planSection() {
   };
   sec.motif = makeMotif(sec);
   MU.sec = sec;
+  sec.scale = scaleNotes(sec, 64, 93); // after MU.key is final for this section
+  sec.leadBase = Math.max(0, sec.scale.findIndex((x) => x >= 72));
   MU.secBar = 0;
   MU.bpm = sec.bpm;
   ensureInst(sec.keys);
@@ -543,6 +545,7 @@ function onBar(t) {
   if (MU.secBar % sec.perChord === 0) {
     MU.prevVoicing = MU.voicing;
     MU.voicing = voiceChord(rootPc, ch[1], MU.prevVoicing);
+    MU.arp = arpTones(MU.voicing);
     const soft = mood.night > 0.5 ? 1 : 0;
     const dur = barDur * sec.perChord;
     for (const m of MU.voicing) padNote(m, t + rnd() * 0.03, dur + 0.15, 0.036 + rnd() * 0.008, M.lerp(0.5, 1.6, soft) + rnd() * 0.3, M.lerp(1.4, 2.8, soft));
@@ -603,13 +606,15 @@ const PAT = {
   pulse: { kick: { 0: 0.9, 3: 0.45, 8: 0.8, 11: 0.4 }, hatEvery: 4 },
   shaker: { shaker: true, rim: { 12: 0.25 } },
 };
+let hvK = 1;
+/** Humanized drum velocity. */
+const hv = (x) => x * hvK * (0.85 + rnd() * 0.3);
 function drumStep(step, t) {
   const sec = MU.sec;
   if (!sec.drumsOn) return;
   const p = PAT[sec.drums];
   if (!p) return;
-  const k = 0.75 + 0.25 * sec.arc;
-  const hv = (x) => x * k * (0.85 + rnd() * 0.3);
+  hvK = 0.75 + 0.25 * sec.arc;
   if (p.kick && p.kick[step]) drum('kick', t, hv(p.kick[step]) * 0.55);
   if (p.kick === PAT.lofi.kick && step === 7 && chance(0.25)) drum('kick', t, hv(0.3) * 0.55);
   if (p.brush && p.brush[step]) drum('brush', t, hv(p.brush[step]) * 0.3);
@@ -619,16 +624,16 @@ function drumStep(step, t) {
   if (p.shaker && (sec.drums === 'shaker' ? step % 2 === 0 : true)) drum('shaker', t, hv(step % 4 === 0 ? 0.5 : 0.3) * (sec.drums === 'shaker' ? 0.07 : 0.1));
   if (MU.secBar === sec.bars - 3 && step >= 13 && p.brush && chance(0.5)) drum('brush', t, hv(0.4) * 0.25);
 }
-function arpTones() {
-  const v = MU.voicing || [60, 64, 67, 71];
+/** Arpeggio pool: the pad voicing plus its upper octave, within a comfortable range. */
+function arpTones(v) {
   const out = [];
   for (const m of v) for (const o of [0, 12]) { const x = m + o; if (x >= 57 && x <= 88 && !out.includes(x)) out.push(x); }
   return out.sort((a, b) => a - b);
 }
 function arpStep(step, t, stepDur) {
   const sec = MU.sec;
-  if (!sec.arpOn || !samples[sec.keys]) return;
-  const tones = arpTones();
+  const tones = MU.arp;
+  if (!sec.arpOn || !samples[sec.keys] || !tones) return;
   const n = tones.length;
   const d = sec.density * (0.55 + 0.45 * sec.arc) * (mood.night > 0.6 ? 0.7 : 1);
   let idx = -1, vel = 0.5;
@@ -652,8 +657,7 @@ function leadStep(step, t, stepDur) {
   const s32 = (phraseBar % 2) * 16 + step;
   const answer = phraseBar >= 2;
   if (answer && MU.secBar % 8 >= 4 && chance(0.4)) return; // leave some space
-  const sc = scaleNotes(sec, 64, 93);
-  const base = sc.findIndex((m) => m >= 72);
+  const sc = sec.scale, base = sec.leadBase;
   for (let i = 0; i < sec.motif.length; i++) {
     const nt = sec.motif[i];
     if (nt.s !== s32) continue;
@@ -750,8 +754,24 @@ MU.update = function () {
     }
     MU.mode = want;
   }
-  // a disaster starts mid-section: wrap up within two bars and switch to the tension palette
-  if (MU.mode === 'play' && MU.sec && mood.tension > 0.6 && MU.sec.pool !== 'tension' && MU.sec.bars - MU.secBar > 2) MU.sec.bars = MU.secBar + 2;
+  // the mood changed a lot mid-section (disaster started / ended, night fell / day broke):
+  // wrap up within a couple of bars so the music follows the city
+  const sec = MU.sec;
+  if (MU.mode === 'play' && sec) {
+    const left = sec.bars - MU.secBar;
+    const wrongPool = (mood.tension > 0.6 && sec.pool !== 'tension') ? 2
+      : (sec.pool === 'tension' && mood.tension < 0.3) || (sec.pool === 'day' && mood.night > 0.8) || (sec.pool === 'night' && mood.night < 0.15 && mood.dusk < 0.2 && mood.tension < 0.3) ? 4 : 0;
+    if (wrongPool && left > wrongPool) sec.bars = MU.secBar + wrongPool;
+  }
+  // lo-fi vinyl crackle bed: one looping source, faded per section
+  if (!N.vinylSrc && drums.vinyl) {
+    const src = ctx.createBufferSource();
+    src.buffer = drums.vinyl;
+    src.loop = true;
+    src.connect(N.vinylG);
+    src.start(t + 0.05);
+    N.vinylSrc = src;
+  }
   tick();
 };
 MU.info = function () {

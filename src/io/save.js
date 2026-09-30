@@ -217,7 +217,7 @@ function captureThumb() {
   const G = VC.gfx;
   if (!G || !G.capture || (typeof document !== 'undefined' && document.hidden)) return Promise.resolve(null);
   return new Promise((resolve) => {
-    const t = setTimeout(() => resolve(null), 1200); // rAF stalls in hidden tabs
+    const t = setTimeout(() => resolve(null), 2000); // rAF stalls in hidden tabs
     G.capture(THUMB_W).then(
       (u) => { clearTimeout(t); resolve(typeof u === 'string' && u.startsWith('data:image') && u.length < 80000 ? u : null); },
       () => { clearTimeout(t); resolve(null); }

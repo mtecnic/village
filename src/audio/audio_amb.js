@@ -265,7 +265,7 @@ function bed(key) {
 function startBed(bd) {
   if (bd.src) return;
   if (!bufs[bd.key]) {
-    if (!bd.queued) { bd.queued = true; A.job(() => { bufs[bd.key] = A.toBuffer(BEDS[bd.key].render(A.dsp)); }); }
+    if (!bd.queued) { bd.queued = true; A.job(() => { bufs[bd.key] = A.toBuffer(BEDS[bd.key].render(A.dsp)); }, true); }
     return;
   }
   const src = A.ctx.createBufferSource();
@@ -421,9 +421,14 @@ AMB.reset = function () {
   acc = 1; // resample immediately
   thunderIn = -1;
 };
-AMB.update = function (dt, rdt) {
+let lastT = 0;
+AMB.update = function () {
   const S = VC.state;
   if (!AMB.on || !S || !VC.camera || !A.ctx) return;
+  // real elapsed time (the frame dt is capped at 0.1 s, which would slow ambience on slow machines)
+  const now = performance.now();
+  const rdt = lastT ? Math.min(0.5, (now - lastT) / 1000) : 0.016;
+  lastT = now;
   acc += rdt;
   fireAcc += rdt;
   if (fireAcc > 1) { fireAcc = 0; scanFires(S); }

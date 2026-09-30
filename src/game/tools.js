@@ -183,7 +183,7 @@ function dlRectRuns(r, colorOf, th = 0.06) {
       if (sx < 0 && c) { sx = x; sc = c; sy = y; }
     }
   }
-  if (DL.boxes.length > 4000) DL.boxes.length = 4000; // safety cap for giant drags on rugged terrain
+  if (DL.boxes.length > 1500) DL.boxes.length = 1500; // cap for giant drags on rugged terrain (outline stays)
 }
 /** Rectangle outline following the terrain (one segment per tile edge). */
 function dlRectOutline(r, c) {
@@ -261,7 +261,7 @@ let policyVer = 0;
 let gridA = 0;
 let ghostSig = '';
 let label = null, labelHtml = '', labelShown = false, labelX = -1, labelY = -1;
-let lastToast = 0, lastSfx = 0;
+let lastToast = -1e9, lastSfx = -1e9;
 let camSig = new Float32Array(16), camPx = -1, camPy = -1, camVer = -1;
 let svcCache = { ver: -1, list: [] };
 

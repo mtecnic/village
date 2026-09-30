@@ -5,7 +5,8 @@
  * cursor moves) and a COMMIT that re-validates, charges VC.money and mutates the world through VC.world.
  * All costs are multiplied by VC.money.costMul() (0 in sandbox). Commits emit bus 'built'
  * {kind, x, z, w, d, key, cost, count} (x/z/w/d = bounding box of the edit) and 'sfx' {name, x, z}
- * (unless opts.quiet). Particles are left to the fx module, which reacts to 'built' and 'bldRemove'.
+ * (unless opts.quiet; names: road, zone, dezone, build, pline, bulldoze, demolish, plant, terraform, whoosh = undo).
+ * Particles are left to the fx module, which reacts to 'built' and 'bldRemove'.
  *
  *   roadPath(x0,z0,x1,z1, straight)    -> [{x,z}] L-shaped (longer axis first) or straight (dominant axis)
  *   canBuildRoad(tiles, type)          -> plan {ok, cost, reason, bad:[i], count, bridges, levelCost, status, levels}
@@ -412,7 +413,7 @@ const A = (VC.actions = {
         }
       const zt = VC.ZONE_TOOLS.find((t) => t.code === code);
       built('zone', box, zt ? zt.key : 'dezone', p.cost, p.count, { code, removed: p.remove.length });
-      sfx(code ? 'zone' : 'bulldoze', r.x0 + r.w / 2, r.z0 + r.d / 2, opts);
+      sfx(code ? 'zone' : 'dezone', r.x0 + r.w / 2, r.z0 + r.d / 2, opts);
       return { ok: true, cost: p.cost, count: p.count, removed: p.remove.length };
     });
   },
@@ -572,7 +573,7 @@ const A = (VC.actions = {
       if (big >= 9 && VC.camera && VC.camera.shake) VC.camera.shake(Math.min(0.35, big * 0.02));
       const box = { x: bx0, z: bz0, w: bx1 - bx0 + 1, d: bz1 - bz0 + 1 };
       built('bulldoze', box, 'bulldoze', p.cost, p.count, { buildings: p.buildings.length, roads: p.roads, trees: p.trees, plines: p.plines });
-      sfx('bulldoze', r.x0 + r.w / 2, r.z0 + r.d / 2, opts);
+      sfx(big >= 9 ? 'demolish' : 'bulldoze', r.x0 + r.w / 2, r.z0 + r.d / 2, opts);
       return { ok: true, cost: p.cost, count: p.count, buildings: p.buildings.length, roads: p.roads, trees: p.trees, plines: p.plines };
     });
   },
@@ -625,7 +626,7 @@ const A = (VC.actions = {
       const box = tilesBox(tiles);
       built('pline', box, 'pline', p.cost, p.count);
       const mid = tiles[tiles.length >> 1];
-      sfx('build', mid.x + 0.5, mid.z + 0.5, opts, 0.6);
+      sfx('pline', mid.x + 0.5, mid.z + 0.5, opts);
       return { ok: true, cost: p.cost, count: p.count };
     });
   },
@@ -803,7 +804,7 @@ const A = (VC.actions = {
       VC.money.earn(amt, cat);
       refund += amt;
     }
-    VC.bus.emit('sfx', { name: 'click' });
+    VC.bus.emit('sfx', { name: 'whoosh' });
     return { ok: true, cost: -refund, refund, label: r.label };
   },
   /** Drops the undo history (e.g. after loading a game). */

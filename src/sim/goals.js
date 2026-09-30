@@ -17,9 +17,17 @@
  *   runs (VC.hud.tutorialStep()).
  *
  * POPULATION goals aim at round numbers BETWEEN the milestones (POP_STEPS), never at a milestone itself:
- *   reaching a milestone is already celebrated by the advisors' banner. Problem goals (power, water,
- *   abandoned buildings) keep their title's count live. Cash rewards scale with the city (cash()) with a
- *   floor, so the first goals are worth a wind turbine or a few blocks of road. Ledger category 'goal'.
+ *   reaching a milestone is already celebrated by the advisors' banner; none while the population has
+ *   stalled (under 2% growth in a year, or no room left). Problem goals (power, water, abandoned
+ *   buildings) keep their title's count live. Cash rewards scale with the city (cash()) with a floor of
+ *   about a month of a small town's income, x VC.DIFFICULTY[..].rewardMul. Ledger category 'goal'.
+ * ANTI-FARMING: problem kinds (K.persist) only become goals once the problem has existed for that many
+ *   days (G.seen, checked every PROBLEM_EVERY days); a swap never draws a 'fix' goal; a fixed problem
+ *   must stay fixed for K.hold days before the goal completes (progress shows 99% "hold it"); the budget
+ *   goal needs 2 of the last 3 months in the red and pays at most 1.5x the average deficit; 'Save up'
+ *   does not count money borrowed since the goal started. (Undoing the build that completed a goal is
+ *   refused by VC.actions.) Stale rotations back a kind off (G.stale): 480, 960 … days, optional kinds
+ *   (trees, landmark) never return after two.
  *
  * STATE (plain JSON, saved with the game): S.goals = {
  *   active: [{id, kind, cat, title, desc, icon, target, base, cur, progress 0..1, text, unit,
@@ -28,7 +36,8 @@
  *             (best progress so far and the day it was reached), meta?}],
  *   done: [ids] (capped), log: [{id, kind, title, icon, day}] (last 30), seq, next (day the next goal may
  *   appear), cool: {kind: day} (per-kind cooldowns), count (goals completed), rotDay (last stale-goal
- *   rotation), v }
+ *   rotation), seen: {kind: day the problem was first seen}, stale: {kind: stale rotations}, v }
+ *   (goals also carry holdSince while a fixed problem is being held)
  *
  * API  list() -> active goals (live objects, read-only for callers), claim(id) -> bool, refresh() (debug:
  *   evaluate + fill every free slot now), swap(id) (replace a goal; its kind cools down), focusOf(id) ->
@@ -48,11 +57,13 @@ const FILL_DAYS = 1; // game days between goals while the card is filling up
 const FIRST_DAYS = 3; // a new city gets its first goal after this many days
 const AUTO_CLAIM_DAYS = 30; // unclaimed completed goals are claimed automatically after this ...
 const AUTO_CLAIM_SEC = 15; // ... once the card has also shown them this long (real seconds, see hud_goals.js)
-const STALE_DAYS = 300; // an open goal without any progress for this long rotates out …
+const STALE_DAYS = 150; // an open goal without any progress for this long rotates out …
 const ROTATE_GAP = 30; // … one at a time, at least this many days apart
-const CASH_FLOOR = 2500; // cash rewards never go below this x the goal's multiplier (starter goals: $2,000)
+const CASH_FLOOR = 1000; // cash rewards never go below this x the goal's multiplier (starter goals: $800)
+const PROBLEM_EVERY = 5; // days between checks of how long each city problem has existed (G.seen)
+const HOLD_DAYS = 10; // a fixed problem must stay fixed this long before its goal completes
 /** Population goal targets: round numbers between the milestones (never a milestone's own number). */
-const POP_STEPS = [100, 150, 400, 600, 800, 1500, 2000, 2500, 4000, 5000, 7500, 12500, 15000, 20000, 30000, 35000, 40000, 60000, 75000, 125000, 150000, 250000, 300000, 500000, 750000, 1000000];
+const POP_STEPS = [100, 150, 400, 600, 800, 1500, 2000, 2500, 4000, 5000, 7500, 12500, 15000, 20000, 30000, 35000, 40000, 60000, 75000, 125000, 150000, 175000, 250000, 300000, 350000, 450000, 500000, 750000, 1000000];
 const DONE_CAP = 100, LOG_CAP = 30;
 const ONCE = 1e9; // cooldown for one-time goals
 
@@ -80,6 +91,7 @@ const S_ = () => VC.state;
 const tutorialOn = () => !!(VC.hud && VC.hud.tutorialStep && VC.hud.tutorialStep() >= 0);
 const unlocked = (key) => { try { return VC.world.isUnlocked(key); } catch (e) { return true; } };
 const bldName = (key) => (VC.BLD[key] ? VC.BLD[key].name : key);
+const debtNow = () => { try { return (VC.econ && VC.econ.debt && VC.econ.debt()) || 0; } catch (e) { return 0; } };
 
 /* ------------------------------------------------------------------ */
 /* evaluation context: cheap fields up front, heavy ones lazily, once   */
@@ -181,10 +193,18 @@ function cleanShare() {
   cx._clean = tot > 0 ? clean / tot : 0;
   return cx._clean;
 }
-/** Cash reward scaled to the city size (x mul), with a floor for young towns; two significant digits. */
+/** Difficulty multiplier for cash rewards (VC.DIFFICULTY[..].rewardMul: easy 1.2, normal 1, hard 0.8). */
+function rewardMul(S) {
+  const d = S && VC.DIFFICULTY && VC.DIFFICULTY[S.difficulty];
+  return d && typeof d.rewardMul === 'number' ? d.rewardMul : 1;
+}
+/**
+ * Cash reward scaled to the city size (x mul, x difficulty), with a floor for young towns (about one
+ * month of a small town's income); two significant digits.
+ */
 function cash(mul) {
   mul = mul || 1;
-  return nice(Math.max(M.clamp(600 + Math.max(cx.pop, cx.peak * 0.8) * 0.3, 750, 40000), CASH_FLOOR) * mul);
+  return nice(Math.max(M.clamp(300 + Math.max(cx.pop, cx.peak * 0.8) * 0.3, 500, 40000), CASH_FLOOR) * mul * rewardMul(cx.S));
 }
 function nextMilestone() {
   const L = VC.MILESTONES || [];
@@ -195,7 +215,9 @@ function nextMilestone() {
 function popTarget(c) {
   const base = Math.max(c.pop, c.peak);
   const isMs = (v) => (VC.MILESTONES || []).some((m) => m.pop === v);
-  for (const v of POP_STEPS) if (v >= base * 1.15 && v - base >= 50 && !isMs(v)) return v;
+  // (big cities grow slowly: a smaller step keeps the goal reachable)
+  const step = base >= 100000 ? 1.08 : 1.15;
+  for (const v of POP_STEPS) if (v >= base * step && v - base >= 50 && !isMs(v)) return v;
   let t = niceUp(Math.max(1000, base * 1.4));
   while (isMs(t)) t = niceUp(t * 1.1);
   return t;
@@ -240,9 +262,15 @@ KINDS.first_water = {
   cur: () => counts().water,
   prog: (c, g, v) => (v > 0 ? 1 : 0),
 };
+/** Population has stopped growing (under 2% in the last year) or there is no room left to grow. */
+function popStalled(c) {
+  const h = c.S.history && c.S.history.pop;
+  if (h && h.length >= 12 && h[h.length - 1] < h[h.length - 12] * 1.02) return true;
+  return c.pop >= 5000 && (iss().zonedEmpty || 0) - (iss().zonedNoAccess || 0) < 8;
+}
 KINDS.pop = {
   cat: 'grow', cool: 0,
-  score: (c) => (roads() >= 10 ? 3 : 0),
+  score: (c) => (roads() >= 10 && !popStalled(c) ? 3 : 0),
   make(c) {
     // a round number between the milestones: the milestone itself has its own banner (no double party)
     const target = popTarget(c);
@@ -283,7 +311,7 @@ KINDS.density_high = {
   text: (g, v) => `${Math.max(0, v - g.base)} / ${g.target - g.base}`,
 };
 KINDS.level3 = {
-  cat: 'grow', cool: 360,
+  cat: 'grow', cool: 240,
   score: (c) => (c.pop >= 2500 && counts().grow >= 40 ? 2 : 0),
   make: (c) => ({ title: 'Grow 8 upscale buildings', desc: 'Buildings reach level 3 with high land value: parks, schools, landmarks and clean air nearby.', icon: '✨', target: counts().lvl3 + 8, base: cnt.lvl3, unit: 'step', focus: { overlay: 'landValue' }, reward: { money: cash(1.2) } }),
   cur: () => counts().lvl3,
@@ -295,28 +323,30 @@ KINDS.tourism = {
   score: (c) => (c.pop >= 4000 ? 2 : 0),
   make(c) {
     const t = c.st.tourism || 0;
-    return { title: `Attract ${num(niceUp(Math.max(60, t * 1.5 + 30)))} tourists`, desc: 'Landmarks, big parks and a tourism campaign bring visitors — and their wallets.', icon: '📸', target: niceUp(Math.max(60, t * 1.5 + 30)), base: t, unit: 'num', focus: { group: 'landmarks' }, reward: { money: cash(1.2) } };
+    const target = niceUp(Math.max(60, t * 1.25 + 30));
+    return { title: `Attract ${num(target)} tourists`, desc: 'Landmarks, big parks and a tourism campaign bring visitors — and their wallets.', icon: '📸', target, base: t, unit: 'num', focus: { group: 'landmarks' }, reward: { money: cash(1.2) } };
   },
   cur: (c) => c.st.tourism || 0,
   prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
 };
 KINDS.treasury = {
-  cat: 'grow', cool: 360,
+  cat: 'grow', cool: 240,
   score: (c) => (!c.S.sandbox && c.pop >= 500 && c.net > 0 && c.money < cash(12) ? 1.5 : 0),
   make(c) {
     const target = niceUp(c.money + Math.max(5000, c.net * 4));
-    return { title: `Save up ${money(target)}`, desc: 'A healthy reserve pays for the next big project — and for rainy days.', icon: '🏦', target, base: c.money, unit: 'money', focus: { panel: 'budget' }, reward: { mods: { happiness: 0.015 }, days: 120, label: 'Confident citizens' } };
+    return { title: `Save up ${money(target)}`, desc: 'A healthy reserve pays for the next big project — and for rainy days. (Borrowed money does not count.)', icon: '🏦', target, base: c.money, unit: 'money', focus: { panel: 'budget' }, reward: { mods: { happiness: 0.015 }, days: 120, label: 'Confident citizens' }, meta: { debt0: debtNow() } };
   },
-  cur: (c) => c.money,
+  // money borrowed since the goal started does not count as savings
+  cur: (c, g) => c.money - Math.max(0, debtNow() - ((g.meta && g.meta.debt0) || 0)),
   prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
 };
 KINDS.fix_power = {
-  cat: 'fix', cool: 60,
+  cat: 'fix', cool: 180, persist: 10, hold: HOLD_DAYS,
   score: (c) => (counts().power > 0 && (iss().unpowered || 0) >= 5 ? 8 : 0),
   make(c) {
     const n = iss().unpowered || 0;
     const short = iss().powerShortage;
-    return { title: powerTitle(n), desc: short ? 'Demand exceeds supply — build another power plant.' : 'Some buildings are not connected — link them to the grid with roads or power lines.', icon: '🔌', target: 0, base: n, unit: 'left', focus: { overlay: 'power', locate: 'unpowered', group: 'power' }, reward: { money: cash(0.8) } };
+    return { title: powerTitle(n), desc: short ? 'Demand exceeds supply — build another power plant.' : 'Some buildings are not connected — link them to the grid with roads or power lines.', icon: '🔌', target: 0, base: n, unit: 'left', focus: { overlay: 'power', locate: 'unpowered', group: 'power' }, reward: { money: nice(cash(0.8) * M.clamp(n / 40, 0.3, 1)) } };
   },
   cur: () => iss().unpowered || 0,
   prog: (c, g, v) => 1 - v / Math.max(1, g.base),
@@ -328,11 +358,11 @@ function powerTitle(n) { return `Restore power to ${num(n)} building${n === 1 ? 
 function waterTitle(n) { return `Bring water to ${num(n)} building${n === 1 ? '' : 's'}`; }
 function abandTitle(n) { return `Revive ${num(n)} abandoned building${n === 1 ? '' : 's'}`; }
 KINDS.fix_water = {
-  cat: 'fix', cool: 60,
+  cat: 'fix', cool: 180, persist: 10, hold: HOLD_DAYS,
   score: (c) => (counts().water > 0 && (iss().unwatered || 0) >= 5 ? 7 : 0),
   make(c) {
     const n = iss().unwatered || 0;
-    return { title: waterTitle(n), desc: iss().waterShortage ? 'The pumps can not keep up — add pumps or towers (and make sure they have power).' : 'Some buildings are cut off — connect them with roads to a pump or tower.', icon: '🚰', target: 0, base: n, unit: 'left', focus: { overlay: 'water', locate: 'unwatered', group: 'water' }, reward: { money: cash(0.8) } };
+    return { title: waterTitle(n), desc: iss().waterShortage ? 'The pumps can not keep up — add pumps or towers (and make sure they have power).' : 'Some buildings are cut off — connect them with roads to a pump or tower.', icon: '🚰', target: 0, base: n, unit: 'left', focus: { overlay: 'water', locate: 'unwatered', group: 'water' }, reward: { money: nice(cash(0.8) * M.clamp(n / 40, 0.3, 1)) } };
   },
   cur: () => iss().unwatered || 0,
   prog: (c, g, v) => 1 - v / Math.max(1, g.base),
@@ -341,18 +371,18 @@ KINDS.fix_water = {
   text: (g, v) => `${num(Math.max(0, g.base - v))} / ${num(g.base)} fixed`,
 };
 KINDS.fix_access = {
-  cat: 'fix', cool: 90,
+  cat: 'fix', cool: 240, persist: 30, hold: HOLD_DAYS,
   score: (c) => ((iss().zonedNoAccess || 0) >= 12 ? 7 : 0),
   make(c) {
     const n = iss().zonedNoAccess || 0;
-    return { title: 'Connect zones to roads', desc: `${num(n)} zoned tiles are more than ${C.ROAD_ACCESS} tiles from a street, so nothing can grow there. Add roads (or dezone).`, icon: '🚧', target: Math.floor(n * 0.2), base: n, unit: 'left', focus: { group: 'roads', locate: 'noaccess', tool: 'road_street' }, reward: { money: cash(0.8) } };
+    return { title: 'Connect zones to roads', desc: `${num(n)} zoned tiles are more than ${C.ROAD_ACCESS} tiles from a street, so nothing can grow there. Add roads (or dezone).`, icon: '🚧', target: Math.floor(n * 0.2), base: n, unit: 'left', focus: { group: 'roads', locate: 'noaccess', tool: 'road_street' }, reward: { money: nice(cash(0.8) * M.clamp(n / 60, 0.25, 1)) } };
   },
   cur: () => iss().zonedNoAccess || 0,
   prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
   text: (g, v) => `${num(Math.max(0, v - g.target))} tiles to go`,
 };
 KINDS.fix_abandoned = {
-  cat: 'fix', cool: 120,
+  cat: 'fix', cool: 120, hold: HOLD_DAYS,
   score: (c) => ((c.st.abandoned || 0) >= 4 ? 6 : 0),
   make(c) {
     const n = c.st.abandoned || 0;
@@ -365,25 +395,38 @@ KINDS.fix_abandoned = {
   text: (g, v) => `${num(M.clamp(g.base - v, 0, g.base - g.target))} / ${num(g.base - g.target)} done`,
 };
 KINDS.fix_traffic = {
-  cat: 'fix', cool: 180,
+  cat: 'fix', cool: 180, persist: 30, hold: HOLD_DAYS,
   score: (c) => ((iss().jammedRoads || 0) >= 12 ? 5 : 0),
   make(c) {
     const n = iss().jammedRoads || 0;
-    return { title: 'Unjam the streets', desc: `${num(n)} road tiles are jammed. Build avenues, alternative routes, bus depots — or try bike lanes.`, icon: '🚗', target: Math.floor(n / 3), base: n, unit: 'left', focus: { overlay: 'traffic' }, reward: { mods: { happiness: 0.02 }, days: 120, label: 'Smooth commutes' } };
+    return { title: 'Unjam the streets', desc: `${num(n)} road tiles are jammed — clear at least ${num(n - Math.floor(n * 0.7))} of them. Build avenues, alternative routes, bus depots — or try bike lanes.`, icon: '🚗', target: Math.floor(n * 0.7), base: n, unit: 'left', focus: { overlay: 'traffic' }, reward: { mods: { happiness: 0.02 }, days: 120, label: 'Smooth commutes' } };
   },
   cur: () => iss().jammedRoads || 0,
   prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
   text: (g, v) => `${num(Math.max(0, v - g.target))} jammed tiles to go`,
 };
+/**
+ * Average monthly deficit of the last 3 months when at least 2 of them were in the red and it is not
+ * trivial (>= $200 and 3% of income), else 0. A one-off bad month (or one staged on purpose) does not count.
+ */
+function deficit(c) {
+  const h = c.S.history && c.S.history.net;
+  if (!h || h.length < 3 || c.net >= 0) return 0;
+  let n = 0, sum = 0;
+  for (let i = h.length - 3; i < h.length; i++) if (h[i] < 0) { n++; sum -= h[i]; }
+  const avg = n ? sum / n : 0;
+  return n >= 2 && avg >= Math.max(200, 0.03 * (c.st.income || 0)) ? avg : 0;
+}
 KINDS.budget = {
-  cat: 'fix', cool: 240,
-  score: (c) => (!c.S.sandbox && c.pop >= 100 && c.net < 0 && ((c.S.history && c.S.history.net && c.S.history.net.length) || 0) >= 2 ? 6 : 0),
-  make: (c) => ({ title: 'Balance the budget for 3 months', desc: 'The monthly balance is in the red. Trim department funding, drop pricey policies or raise taxes a little.', icon: '⚖️', target: 3, base: 0, unit: 'months', focus: { panel: 'budget' }, reward: { money: cash(1.5) }, meta: { streak: 0 } }),
+  cat: 'fix', cool: 360,
+  score: (c) => (!c.S.sandbox && c.pop >= 100 && deficit(c) > 0 ? 6 : 0),
+  // the reward never exceeds 1.5x the deficit it fixes: running up deficits to farm it never pays
+  make: (c) => ({ title: 'Balance the budget for 3 months', desc: 'The monthly balance is in the red. Trim department funding, drop pricey policies or raise taxes a little.', icon: '⚖️', target: 3, base: 0, unit: 'months', focus: { panel: 'budget' }, reward: { money: Math.min(cash(1.5), nice(1.5 * deficit(c))) }, meta: { streak: 0 } }),
   cur: (c, g) => (g.meta && g.meta.streak) || 0,
   prog: (c, g, v) => v / g.target,
 };
 KINDS.happiness = {
-  cat: 'fix', cool: 240,
+  cat: 'fix', cool: 240, persist: 30,
   score: (c) => (c.pop >= 300 && (c.st.happiness || 0) < 0.62 ? 4 + (0.62 - c.st.happiness) * 8 : 0),
   make(c) {
     const h = c.st.happiness || 0;
@@ -466,9 +509,9 @@ KINDS.parks = {
   text: (g, v) => `${Math.max(0, Math.min(v - g.base, g.target - g.base))} / ${g.target - g.base}`,
 };
 KINDS.trees = {
-  cat: 'build', cool: ONCE,
+  cat: 'build', cool: ONCE, optional: true,
   score: (c) => (c.pop >= 80 ? 1.5 : 0),
-  make: (c) => ({ title: 'Plant 30 trees', desc: 'Trees soak up pollution and noise — and make every street prettier.', icon: '🌲', target: trees() + 30, base: trees(), unit: 'step', focus: { tool: 'trees', group: 'terrain' }, reward: { mods: { pollution: -0.06 }, days: 180, label: 'Fresh air' } }),
+  make: (c) => ({ title: 'Plant 30 trees', desc: 'Trees soak up pollution and noise — and make every street prettier.', icon: '🌲', target: trees() + 30, base: trees(), unit: 'step', focus: { tool: 'trees', group: 'parks' }, reward: { mods: { pollution: -0.06 }, days: 180, label: 'Fresh air' } }),
   cur: () => trees(),
   prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
   text: (g, v) => `${Math.max(0, Math.min(v - g.base, g.target - g.base))} / ${g.target - g.base}`,
@@ -512,7 +555,7 @@ function landmarkPick(c) {
   return best;
 }
 KINDS.landmark = {
-  cat: 'build', cool: 120,
+  cat: 'build', cool: 120, optional: true,
   score: (c) => (c.pop >= 200 && landmarkPick(c) ? 3 : 0),
   make(c) {
     const d = landmarkPick(c);
@@ -585,6 +628,8 @@ function ensure(S) {
   if (!Array.isArray(G.done)) G.done = [];
   if (!Array.isArray(G.log)) G.log = [];
   if (!G.cool || typeof G.cool !== 'object') G.cool = {};
+  if (!G.seen || typeof G.seen !== 'object') G.seen = {};
+  if (!G.stale || typeof G.stale !== 'object') G.stale = {};
   if (!(G.seq >= 0)) G.seq = 0;
   if (!(G.count >= 0)) G.count = 0;
   if (!isFinite(G.next)) G.next = S.time.day + FIRST_DAYS;
@@ -638,6 +683,16 @@ function evaluate(S) {
     // stale-goal bookkeeping: the best progress so far and when it was reached
     if (!(g.best >= 0)) { g.best = g.progress; g.lastProg = S.time.day; }
     else if (g.progress > g.best + 0.005) { g.best = g.progress; g.lastProg = S.time.day; }
+    if (p >= 1 && K.hold > 0) {
+      // a fixed problem has to STAY fixed for a while (undoing the cause of a staged problem is not enough)
+      if (!(g.holdSince >= 0)) g.holdSince = S.time.day;
+      const left = K.hold - (S.time.day - g.holdSince);
+      if (left > 0) {
+        g.progress = 0.99;
+        g.text = `Fixed — hold it ${left} more day${left === 1 ? '' : 's'}`;
+        continue;
+      }
+    } else if (g.holdSince != null) delete g.holdSince;
     if (p >= 1) complete(S, g);
   }
   lastEvalDay = S.time.day;
@@ -658,11 +713,17 @@ function complete(S, g) {
   if (G.log.length > LOG_CAP) G.log.length = LOG_CAP;
   const K = KINDS[g.kind];
   G.cool[g.kind] = S.time.day + ((K && K.cool) || 0);
+  if (G.stale) delete G.stale[g.kind];
   VC.bus.emit('goalDone', { goal: g });
   VC.bus.emit('goalsChanged', G.active);
 }
-/** Adds the most relevant new goal (or `forceKind`). Returns the goal or null. */
-function generate(S, forceKind) {
+/**
+ * Adds the most relevant new goal (or `forceKind`). opts.noFix: no 'fix' goal (a swap must not turn a
+ * problem created a moment ago into a goal). Problem kinds (K.persist) only come up once the problem
+ * has existed for K.persist days (G.seen, see trackProblems). Returns the goal or null.
+ */
+function generate(S, forceKind, opts) {
+  const noFix = !!(opts && opts.noFix);
   const G = S.goals;
   if (G.active.length >= MAX_ACTIVE && !forceKind) return null;
   prep(S);
@@ -675,9 +736,13 @@ function generate(S, forceKind) {
       const K = KINDS[key];
       if (G.active.some((g) => g.kind === key)) continue;
       if ((G.cool[key] || 0) > day) continue;
+      if (noFix && K.cat === 'fix') continue;
+      if (K.persist && !(G.seen[key] != null && day - G.seen[key] >= K.persist)) continue;
       let s = 0;
       try { s = +K.score(cx) || 0; } catch (e) { s = 0; }
       if (!(s > 0)) continue;
+      // kinds that went stale before are less likely to come back (prefer goals the city can finish)
+      if (G.stale[key]) s -= 1.5 * G.stale[key];
       // variety: a second goal of the same category has to be urgent to win
       if (s < 8 && G.active.some((g) => g.cat === K.cat)) s -= 2.5;
       // ... and two "X coverage to N%" goals at once only when the new one is urgent
@@ -712,10 +777,28 @@ function generate(S, forceKind) {
   }
   return null;
 }
+/**
+ * How long has each city problem (kinds with K.persist) existed? G.seen[kind] = the first check day its
+ * score was > 0, cleared as soon as it is 0 — so a problem created on purpose only becomes a goal after
+ * it has hurt the city for a while.
+ */
+function trackProblems(S) {
+  const G = S.goals, day = S.time.day;
+  prep(S);
+  for (const key in KINDS) {
+    const K = KINDS[key];
+    if (!K.persist) continue;
+    let sc = 0;
+    try { sc = +K.score(cx) || 0; } catch (e) { sc = 0; }
+    if (sc > 0) { if (G.seen[key] == null) G.seen[key] = day; }
+    else delete G.seen[key];
+  }
+}
 function onDay() {
   const S = S_();
   if (!live(S) || tutorialOn()) return;
   const G = S.goals, day = S.time.day;
+  if (day % PROBLEM_EVERY === 0) trackProblems(S);
   // auto-claim forgotten rewards so the slot frees up — only after the card has shown them a while
   // (real seconds, counted by the HUD; without a HUD the game days alone decide)
   const hudOn = !!(VC.hud && VC.hud.register);
@@ -774,7 +857,12 @@ function rotate(S, g) {
   const i = G.active.indexOf(g);
   if (i < 0) return;
   G.active.splice(i, 1);
-  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + 240);
+  // each stale rotation rests the kind twice as long (480, 960, … days); optional goals (trees,
+  // landmarks) that went stale twice do not come back
+  const st = (G.stale[g.kind] = (G.stale[g.kind] || 0) + 1);
+  const K = KINDS[g.kind];
+  const rest = K && K.optional && st >= 2 ? ONCE : Math.min(ONCE, 240 * Math.pow(2, st));
+  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + rest);
   const n = generate(S);
   G.next = S.time.day + (n ? NEXT_DAYS : 2);
   if (!n) VC.bus.emit('goalsChanged', G.active);
@@ -789,7 +877,7 @@ function swap(id) {
   if (i < 0 || G.active[i].done) return false;
   const g = G.active.splice(i, 1)[0];
   G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + 120);
-  const n = generate(S);
+  const n = generate(S, null, { noFix: true });
   G.next = S.time.day + (n ? NEXT_DAYS : 2);
   if (!n) VC.bus.emit('goalsChanged', G.active);
   return true;
@@ -800,6 +888,10 @@ function focusOf(id) {
   const g = list().find((x) => x.id === id);
   if (!S || !g) return null;
   const f = Object.assign({}, g.focus || {});
+  // "Show me" opens the palette the tool really lives in (older saves stored the trees goal under 'terrain')
+  if (f.tool && VC.tools && typeof VC.tools.info === 'function') {
+    try { const ti = VC.tools.info(f.tool); if (ti && ti.group) f.group = ti.group; } catch (e) { /* keep */ }
+  }
   const loc = f.locate;
   delete f.locate;
   if (loc) {

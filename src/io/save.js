@@ -26,6 +26,9 @@
  *   meantime (player, disaster) restarts it (after 3 tries it waits for the next trigger). Compression
  *   is async (CompressionStream). Autosaves capture NO thumbnail (a canvas capture stalls the GPU
  *   pipeline): the entry reuses this city's latest thumbnail; manual saves capture one.
+ * WHOLE DAYS: every snapshot of the running city (save, quick save, sliced / sync autosave, serialize,
+ *   encode / export) first finishes a sim day the frame loop left half-done (VC.sim.finishDay), so a save
+ *   never holds half a day or a month boundary whose billing has not run yet.
  * PAUSE MENU: while it is open (or after it paused the game) a save stores the speed the game resumes at
  *   (VC.menu.resumeSpeed() when available, else the speed before the menu paused), so it never loads paused.
  *
@@ -269,9 +272,19 @@ function storedSpeed(S) {
   if (menuPause && menuPause.S === S) return menuPause.from;
   return t.speed;
 }
+/**
+ * The running city may be in the middle of a staged sim day (a big city's day can span frames; on a
+ * month's last day the billing runs in the day's final slice): finish it first, so a save never holds
+ * half a day or skips a month's billing. Only for the running city (VC.sim.finishDay ignores others).
+ */
+function wholeDay(S) {
+  if (!S || S !== VC.state || !VC.sim || typeof VC.sim.finishDay !== 'function') return;
+  try { VC.sim.finishDay(); } catch (e) { console.error('[save] finishing the sim day failed', e); }
+}
 /** Synchronous snapshot storing the resume speed (see storedSpeed). */
 function snapshotOf(S, withExtra) {
   if (!S || !S.time) return codec().snapshot(S, null); // throws the friendly "no city" error
+  wholeDay(S);
   return codec().snapshot(S, withExtra === false ? null : collectExtra(S), { speed: storedSpeed(S) });
 }
 /** Writes a storage string. An autosave that hits the quota evicts other cities' oldest autosaves first. */
@@ -436,6 +449,7 @@ function saveState(S, slot, name, opts, pre) {
   else {
     try {
       // snapshot synchronously so the running game can't change what gets written
+      wholeDay(S); // (before the fingerprint: finishing the day changes the city)
       if (!S.demo) cityIdOf(S);
       fp = fingerprint(S);
       snap = snapshotOf(S, opts.extra);
@@ -536,6 +550,7 @@ function startInc(S) {
 function restartInc() {
   const j = inc;
   j.tries++;
+  wholeDay(j.S); // whole days only (the hold below then keeps new days from starting)
   j.sig = structSig(j.S);
   j.gen = codec().snapshotGen(j.S, collectExtra(j.S), { speed: storedSpeed(j.S) });
 }
@@ -586,6 +601,7 @@ function saveSync(S, force) {
   if (!force && (!changedSinceSave(S) || isEmptyCity(S))) return false;
   const t0 = now();
   try {
+    wholeDay(S);
     cityIdOf(S);
     const fp = fingerprint(S);
     const meta = codec().meta(S);
@@ -714,7 +730,9 @@ const SV = (VC.save = Object.assign(VC.save || {}, {
   },
 
   serialize(S) {
-    return codec().serialize(S || VC.state, { extra: collectExtra(S || VC.state) });
+    S = S || VC.state;
+    wholeDay(S);
+    return codec().serialize(S, { extra: collectExtra(S) });
   },
   deserialize(obj) {
     return codec().deserialize(obj);

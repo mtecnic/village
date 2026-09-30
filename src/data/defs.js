@@ -40,12 +40,13 @@ C.SEA_Y = C.SEA * C.STEP - 0.12;
  * upkeepMul: recurring building & road upkeep and policy costs (econ; defaults to costMul).
  * grantMul: scale of the state grant young towns receive (econ).
  * demandMul: growth demand scale.
+ * rewardMul: scale of cash rewards the city receives (goals, Mayor's Desk gains, milestone grants).
  */
 VC.DIFFICULTY = {
-  easy: { name: 'Relaxed', money: 150000, costMul: 0.8, upkeepMul: 0.85, grantMul: 1.2, demandMul: 1.2, desc: 'Plenty of cash, forgiving citizens.' },
-  normal: { name: 'Mayor', money: 60000, costMul: 1.0, upkeepMul: 1.0, grantMul: 1, demandMul: 1.0, desc: 'The classic experience.' },
-  hard: { name: 'Tycoon', money: 30000, costMul: 1.25, upkeepMul: 1.1, grantMul: 0.8, demandMul: 0.85, desc: 'Tight budgets, demanding voters.' },
-  sandbox: { name: 'Sandbox', money: 1e9, costMul: 0, upkeepMul: 1, demandMul: 1.3, unlockAll: true, desc: 'Infinite money, everything unlocked.' },
+  easy: { name: 'Relaxed', money: 150000, costMul: 0.8, upkeepMul: 0.85, grantMul: 1.2, demandMul: 1.2, rewardMul: 1.2, desc: 'Plenty of cash, forgiving citizens.' },
+  normal: { name: 'Mayor', money: 60000, costMul: 1.0, upkeepMul: 1.0, grantMul: 1, demandMul: 1.0, rewardMul: 1, desc: 'The classic experience.' },
+  hard: { name: 'Tycoon', money: 30000, costMul: 1.25, upkeepMul: 1.1, grantMul: 0.8, demandMul: 0.85, rewardMul: 0.8, desc: 'Tight budgets, demanding voters.' },
+  sandbox: { name: 'Sandbox', money: 1e9, costMul: 0, upkeepMul: 1, demandMul: 1.3, rewardMul: 1, unlockAll: true, desc: 'Infinite money, everything unlocked.' },
 };
 VC.MAP_SIZES = { small: 96, medium: 128, large: 192, huge: 256 };
 VC.MAP_TYPES = [
@@ -343,9 +344,9 @@ for (const p of VC.POLICIES) VC.POLICY[p.key] = p;
 /* ------------------------------------------------------------------ */
 VC.MILESTONES = [
   { pop: 0, name: 'Hamlet', reward: 0 },
-  { pop: 250, name: 'Village', reward: 5000 },
-  { pop: 1000, name: 'Town', reward: 10000 },
-  { pop: 3000, name: 'Small City', reward: 15000 },
+  { pop: 250, name: 'Village', reward: 4000 },
+  { pop: 1000, name: 'Town', reward: 8000 },
+  { pop: 3000, name: 'Small City', reward: 12000 },
   { pop: 10000, name: 'City', reward: 25000 },
   { pop: 25000, name: 'Large City', reward: 40000 },
   { pop: 50000, name: 'Metropolis', reward: 60000 },

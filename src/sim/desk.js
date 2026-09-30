@@ -26,8 +26,10 @@
  *   history: [{seq, id, title, icon, choice (-1 = ignored), label, out, day, auto}] (last 20),
  *   seen: {eventId: day}, recurring: [{id, label (the choice), title (the event), amount (+ income /
  *   − cost), left (months)}] }
- * Money amounts in the pool are multiples of k = $1,000 + $0.35 per citizen (2 significant digits), so
- * a decision matters in a village and in a metropolis alike.
+ * Money amounts in the pool are multiples of k = $500 + $0.35 per citizen (2 significant digits, max
+ * $80k), so a decision matters in a village and in a metropolis alike; money the city receives is scaled
+ * by VC.DIFFICULTY[..].rewardMul. Gambles (`roll`) are seeded (S.seed, decision seq, choice): saving and
+ * reloading before answering does not re-roll them. Every choice has a price (no strictly dominant answer).
  *
  * API  EVENTS, pending() -> view | null, choose(i) -> {ok, outcome, label, reason?}, trigger(id?) (debug:
  *   puts an event on the desk now, ignoring the cadence; an explicit id also ignores its conditions),
@@ -69,7 +71,17 @@ function nice(v) {
 /** $ scale of a decision for the current city. */
 function scaleK(S) {
   const pop = Math.max((S.stats && S.stats.pop) || 0, (S.peakPop || 0) * 0.8);
-  return nice(M.clamp(1000 + pop * 0.35, 1000, 80000));
+  return nice(M.clamp(500 + pop * 0.35, 500, 80000));
+}
+/** Difficulty multiplier for money the city RECEIVES (VC.DIFFICULTY[..].rewardMul; costs are not scaled). */
+function rewardMul(S) {
+  const d = S && VC.DIFFICULTY && VC.DIFFICULTY[S.difficulty];
+  return d && typeof d.rewardMul === 'number' ? d.rewardMul : 1;
+}
+/** $ of a money amount (x k): gains scaled by the difficulty's rewardMul, costs as they are. */
+function amount(m, k, S) {
+  const v = nice(m * k);
+  return v > 0 ? nice(v * rewardMul(S || S_())) : v;
 }
 const SEASON = ['winter', 'winter', 'spring', 'spring', 'spring', 'summer', 'summer', 'summer', 'autumn', 'autumn', 'autumn', 'winter'];
 
@@ -131,7 +143,7 @@ const EVENTS = [
     when: (c) => c.has('stadium'),
     choices: [
       { label: '🎆 Give them the big stage', fx: { money: -0.6, special: 'fireworks', n: 24, mods: { happiness: 0.03, tourism: 0.2 }, days: 60, news: 'Garage band The Cubic Rhythms sells out the Stadium; experts baffled' }, out: 'Against all odds, the show is legendary. The fireworks finale is visible from space (and from the next town).' },
-      { label: '💵 Rent it at the usual price', fx: { money: 0.8 }, out: 'The band pays in coins from a jar labelled “TOUR FUND”. The concert has 14 attendees.' },
+      { label: '💵 Rent it at the usual price', fx: { money: 0.8, mods: { noise: 0.04 }, days: 30 }, out: 'The band pays in coins from a jar labelled “TOUR FUND”. The concert has 14 attendees and a great many cymbals.' },
       { label: '⚽ Stadiums are for sports', ignore: true, fx: {}, out: 'The band plays the Stadium parking lot anyway. The parking lot has never sounded better.' },
     ],
   },
@@ -190,7 +202,7 @@ const EVENTS = [
     text: 'Kids found a softly glowing rock in a field outside {city}. It hums. Sometimes it hums show tunes. Scientists and a museum are both very interested.',
     when: (c) => c.pop >= 600,
     choices: [
-      { label: '🏛️ Sell it to a museum', fx: { money: 3 }, out: 'The Museum of Suspicious Rocks pays top dollar. The rock hums “Money, Money, Money” on its way out.' },
+      { label: '🏛️ Sell it to a museum', fx: { money: 2, mods: { happiness: -0.01 }, days: 120 }, out: 'The Museum of Suspicious Rocks pays top dollar. The rock hums “Money, Money, Money” on its way out. The kids who found it are inconsolable.' },
       { label: '✨ Put it on display in a park', fx: { mods: { tourism: 0.25, happiness: 0.02 }, days: 360, news: 'Humming space rock “Glowy” becomes {city}’s newest star attraction' }, out: 'Tourists flock to see “Glowy”. It has started taking requests.' },
       { label: '🤷 Leave it in the field', ignore: true, fx: {}, out: 'Nobody touches it. Every night at 3 a.m. it hums a lullaby, and the whole valley sleeps a little better.' },
     ],
@@ -270,7 +282,7 @@ const EVENTS = [
     text: 'The weather radar picked up a repeating signal from deep space: “CUBE. CUBE. CUBE.” Watt from Utilities is very excited and has not slept.',
     when: (c) => c.pop >= 4000,
     choices: [
-      { label: '👽 Broadcast a warm welcome', fx: { mods: { tourism: 0.2 }, days: 150 }, roll: { p: 0.25, fx: { money: 1.5 }, out: 'The aliens reply — with a coupon for a galactic furniture store. The city sells it for a fortune.', note: '🎲 They might reply' }, out: 'No reply yet, but UFO tourism is booming. T-shirts sell out.' },
+      { label: '👽 Broadcast a warm welcome', fx: { money: -0.3, mods: { tourism: 0.2, crime: 0.03 }, days: 150 }, roll: { p: 0.25, fx: { money: 1.5 }, out: 'The aliens reply — with a coupon for a galactic furniture store. The city sells it for a fortune.', note: '🎲 They might reply' }, out: 'No reply yet, but UFO tourism is booming. T-shirts sell out — and UFO chasers camp in every park.' },
       { label: '🤐 Keep it top secret', ignore: true, fx: {}, out: 'The signal stops. Probably nothing. Probably.' },
     ],
   },
@@ -279,7 +291,7 @@ const EVENTS = [
     text: 'Local farmers want to sell square watermelons in the town square every Saturday. They are very proud of the watermelons.',
     when: (c) => c.pop >= 200 && c.pop < 30000,
     choices: [
-      { label: '🥕 Approve the market', fx: { money: 0.2, mods: { health: 0.03, demandC: 0.03, happiness: 0.01 }, days: 240 }, out: 'Saturdays are now the best day of the week. The square watermelons stack beautifully.' },
+      { label: '🥕 Approve the market', fx: { money: 0.2, mods: { health: 0.03, demandC: 0.03, happiness: 0.01, traffic: 0.03, noise: 0.04 }, days: 240 }, out: 'Saturdays are now the best day of the week. The square watermelons stack beautifully — and so do the delivery trucks.' },
       { label: '🛒 Only once a month', fx: { mods: { health: 0.01 }, days: 180 }, out: 'A monthly market it is. People mark it on their calendars in green ink.' },
       { label: '🙅 Not in my square', ignore: true, fx: {}, out: 'The farmers go home. The watermelons are shipped to a city with more appreciation for geometry.' },
     ],
@@ -496,7 +508,7 @@ const EVENTS = [
     text: 'Since “Pets Welcome Everywhere” passed, a tabby named Sir Whiskers has been attending every school board meeting. Now he is officially on the ballot.',
     when: (c) => c.pol('pets'), weight: 2,
     choices: [
-      { label: '🗳️ Let democracy decide', fx: { mods: { happiness: 0.03, tourism: 0.08 }, days: 180, news: 'Cat named Sir Whiskers wins {city} school board seat in a landslide' }, out: 'Sir Whiskers wins in a landslide. His first act: longer nap time. Test scores somehow improve.' },
+      { label: '🗳️ Let democracy decide', fx: { mods: { happiness: 0.03, tourism: 0.08, education: -0.03 }, days: 180, news: 'Cat named Sir Whiskers wins {city} school board seat in a landslide' }, out: 'Sir Whiskers wins in a landslide. His first act: longer nap time. He sleeps through most board meetings.' },
       { label: '🐾 Make him honorary mascot', fx: { mods: { happiness: 0.015 }, days: 120 }, out: 'Sir Whiskers accepts the title, then knocks the certificate off the table.' },
       { label: '📋 Humans only, please', ignore: true, fx: { mods: { happiness: -0.01 }, days: 60 }, out: 'Sir Whiskers withdraws. He is seen glaring at City Hall from a windowsill.' },
     ],
@@ -517,7 +529,7 @@ const EVENTS = [
     when: (c) => c.pol('recycling_law'), weight: 2,
     choices: [
       { label: '🏆 Throw a (zero-waste) party', fx: { money: -0.4, mods: { happiness: 0.02, garbage: -0.05 }, days: 120 }, out: 'A party with reusable everything. Even the confetti gets collected afterwards.' },
-      { label: '💰 Sell the recycled glass', fx: { money: 1.2 }, out: 'A mountain of sorted glass becomes a very tidy sum.' },
+      { label: '💰 Sell the recycled glass', fx: { money: 0.8, mods: { garbage: 0.03 }, days: 60 }, out: 'A mountain of sorted glass becomes a very tidy sum. The bins overflow while crews haul it away.' },
       { label: '📰 Just a press release', ignore: true, fx: { mods: { happiness: 0.005 }, days: 60 }, out: 'The press release is printed on recycled paper. Of course it is.' },
     ],
   },
@@ -564,8 +576,8 @@ const signed = (v) => (v < 0 ? '−' : '+') + VC.fmt.money(Math.abs(v));
 function chipsFor(fx, k, roll) {
   const out = [];
   fx = fx || {};
-  if (fx.money) { const v = nice(fx.money * k); out.push({ t: signed(v), c: v < 0 ? 'bad' : 'gold' }); }
-  if (fx.monthly) { const v = nice(fx.monthly.k * k); out.push({ t: `${signed(v)}/mo × ${fx.monthly.months}`, c: v < 0 ? 'bad' : 'gold' }); }
+  if (fx.money) { const v = amount(fx.money, k); out.push({ t: signed(v), c: v < 0 ? 'bad' : 'gold' }); }
+  if (fx.monthly) { const v = amount(fx.monthly.k, k); out.push({ t: `${signed(v)}/mo × ${fx.monthly.months}`, c: v < 0 ? 'bad' : 'gold' }); }
   if (fx.mods) {
     for (const key in fx.mods) {
       const v = fx.mods[key];
@@ -759,12 +771,12 @@ function applyFx(S, fx, p, e, tag, force, label) {
   if (!fx) return;
   const k = p.k, day = S.time.day;
   if (fx.money) {
-    const v = nice(fx.money * k);
+    const v = amount(fx.money, k, S);
     if (v > 0) VC.money.earn(v, 'desk');
     else VC.money.spend(-v, 'desk', force);
   }
   if (fx.monthly && fx.monthly.months > 0) {
-    S.desk.recurring.push({ id: 'desk:' + p.seq + tag, label: label || e.title, title: e.title, amount: nice(fx.monthly.k * k), left: fx.monthly.months | 0 });
+    S.desk.recurring.push({ id: 'desk:' + p.seq + tag, label: label || e.title, title: e.title, amount: amount(fx.monthly.k, k, S), left: fx.monthly.months | 0 });
   }
   if (fx.mods) addTempMod({ id: 'desk:' + p.seq + tag, source: 'desk', label: e.title, mods: Object.assign({}, fx.mods), until: day + (fx.days || 90) });
   if (fx.demand && S.demand) for (const z in fx.demand) if (z in S.demand) S.demand[z] = M.clamp(S.demand[z] + fx.demand[z], -1, 1);
@@ -800,7 +812,8 @@ function resolve(S, i, auto) {
     label = 'No decision';
   }
   applyFx(S, fx, p, e, ':' + i, !!auto, label);
-  if (ch && ch.roll && Math.random() < ch.roll.p) {
+  // gambles are decided by the city's seed + this decision + the choice (no save / reload re-rolls)
+  if (ch && ch.roll && M.hash(p.seq | 0, 131 + i, S.seed | 0) < ch.roll.p) {
     applyFx(S, ch.roll.fx, p, e, ':' + i + 'r', true, label);
     out = ch.roll.out || out;
   }

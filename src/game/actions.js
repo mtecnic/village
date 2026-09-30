@@ -36,9 +36,11 @@
  *   canTerraform / terraform(x,z,radius, mode 'raise'|'lower'|'level', level)
  *   UNDO: every commit is journaled (tiles touched + buildings added/removed + money spent).
  *     beginGroup(label) / endGroup() merge several commits (brush strokes, multi-place drags) into one step.
- *     canUndo() -> {ok, label, age}, undo() -> {ok, reason, refund}: allowed for UNDO_SEC seconds and only
- *     while every touched tile / added building is still exactly as the action left it. Refunds are booked
- *     under the money category 'refund' (so spending stats / achievements can tell them apart from income).
+ *     canUndo() -> {ok, label, age, locked?}, undo() -> {ok, reason, refund}: allowed for UNDO_SEC seconds and
+ *     only while every touched tile / added building is still exactly as the action left it, and never for a
+ *     step made before a Mayor's Goal completed (bus 'goalDone': it may be what completed the goal — no
+ *     refund on top of the reward; locked: true). Refunds are booked under the money category 'refund' (so
+ *     spending stats / achievements can tell them apart from income).
  *
  * INPUT VALIDATION: every public entry point rejects non-integer / non-finite coordinates ('Invalid position'),
  *   off-map tiles ('Out of bounds'), unknown keys / modes / zone codes, and de-duplicates tile lists, so a bad
@@ -177,6 +179,9 @@ const affordable = (cost) => cost <= 0 || VC.money.canAfford(cost);
 let J = null; // record being written
 let groupDepth = 0;
 const history = [];
+// performance.now() of the last completed Mayor's Goal: a step journaled before it may have completed that
+// goal, so it can no longer be undone (else the refund + the reward would make goals free money)
+let goalLockT = -1;
 
 function jOpen(label) {
   if (J) return false;
@@ -568,11 +573,13 @@ const A = (VC.actions = {
 
   init() {
     VC.bus.on('dirty', () => { dirtyN++; });
+    VC.bus.on('goalDone', () => { goalLockT = performance.now(); });
   },
   reset() {
     history.length = 0;
     J = null;
     groupDepth = 0;
+    goalLockT = -1;
     ZS.key = '';
   },
 
@@ -1172,6 +1179,7 @@ const A = (VC.actions = {
     if (!r) return { ok: false, reason: 'Nothing to undo' };
     const age = (performance.now() - r.t) / 1000;
     if (age > UNDO_SEC) return { ok: false, reason: 'Nothing to undo', label: r.label, age };
+    if (r.t <= goalLockT) return { ok: false, reason: 'Can’t undo — it already counted for a Mayor’s Goal', label: r.label, age, locked: true };
     return { ok: true, label: r.label, age };
   },
   /** Reverts the most recent step if nothing has touched its tiles/buildings since. */

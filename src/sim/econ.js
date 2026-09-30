@@ -27,13 +27,26 @@
  * active list for the UI.
  *
  * WAGES: service departments (police, fire, health, education, transit, parks, waste) pay city
- * wages that rise with population (wageMul: 1 at 4k residents, ~1.8 at 25k, ~2.3 at 100k), while
+ * wages that rise with population (wageMul: 1 at 4k residents, ~1.85 at 25k, ~2.45 at 100k), while
  * service buildings serve a limited number of residents (def.capacity) — big cities need
  * proportionally more of them. Utilities and roads are not affected.
  *
+ * AGING: a catalog building older than AGE_FREE (5) years costs AGE_RATE (2%) more upkeep per extra
+ * year, up to +AGE_MAX (30%) — the running costs of a mature city keep late-game money meaningful.
+ * upkeepOf(building) includes it; ageMul(b) -> the multiplier.
+ *
  * BANKRUPTCY: 6 months below -$10k -> one emergency loan (counts toward MAX_LOANS, capped at twice
- * the credit limit). Bankrupt again while it is outstanding -> STATE TAKEOVER: taxes raised to at
- * least 12%, department funding capped at 80%, paid policies repealed; bus 'econ' {type:'takeover'}.
+ * the credit limit). Bankrupt again while it is outstanding -> STATE TAKEOVER (harsher each time, see
+ * takeover()): taxes raised to at least 12% (+2 per repeat, max 16), department funding capped at 80%
+ * (-10 points per repeat, min 50%), paid and tax-cutting policies repealed, all debt + the deficit restructured into
+ * one 10% state loan (the treasury returns to about +$10k), and 12+ months of STATE ADMINISTRATION
+ * during which those floors / caps are enforced (setTax / setFunding clamp with a toast, paid or
+ * tax-cutting policies and new loans are refused) — receivership() -> {since, until, tax, funding, n} | null. Bus 'econ'
+ * {type:'takeover', count, tax, funding, restructured, until} / {type:'receiverEnd', early}.
+ *
+ * LOANS: a voluntary loan pays a 1% origination fee (ledger 'loanPayment'); paying one off costs the
+ * principal plus the interest accrued since its last instalment (at least one month before the
+ * first) — payoffCost(i) -> {principal, interest, total}. loanOptions() entries carry `fee`.
  *
  * forecast() evaluates the same model live for the budget window (per-building sums are cached
  * per sim day / building version, the final numbers per frame + settings change), so dragging a
@@ -67,14 +80,28 @@ const TAX_K = { R: 5.5, C: 7.0, I: 6.5 };
 const WEALTH_MUL = [0.75, 1.0, 1.3];
 const TOURISM_K = 6; // $ per tourism point per month
 // city wage level for service departments: 1 + WAGE_MAX * (1 - exp(-(pop - WAGE_POP0) / WAGE_SCALE))
-const WAGE_MAX = 1.35, WAGE_POP0 = 4000, WAGE_SCALE = 25000;
+const WAGE_MAX = 1.6, WAGE_POP0 = 4000, WAGE_SCALE = 25000;
+// AGING: a catalog building's upkeep rises AGE_RATE per year once it is AGE_FREE years old, up to
+// +AGE_MAX (old plants, stations and landmarks need renovations) — the running costs of a mature city
+const AGE_FREE = 5, AGE_RATE = 0.02, AGE_MAX = 0.3;
+const YEAR_DAYS = C.DAYS_PER_MONTH * 12;
+/** Upkeep multiplier for a building's age (days). */
+function ageMulOf(age) {
+  const y = (+age || 0) / YEAR_DAYS - AGE_FREE;
+  return y > 0 ? 1 + Math.min(AGE_MAX, y * AGE_RATE) : 1;
+}
 // state grant for young towns: GRANT_MAX * (pop / GRANT_POP) * exp(1 - pop / GRANT_POP) — peaks at
 // GRANT_POP residents, fades out by ~8k (x difficulty grantMul). Bridges the gap between the
 // first round of services and the tax base that pays for them.
 const GRANT_MAX = 450, GRANT_POP = 1500;
 const WAGE_DEPTS = { police: 1, fire: 1, health: 1, education: 1, transit: 1, parks: 1, waste: 1 };
-const TAKEOVER_TAX = 12; // % minimum tax rate imposed by a state takeover
-const TAKEOVER_FUNDING = 0.8; // department funding cap during a takeover
+const TAKEOVER_TAX = 12; // % minimum tax rate imposed by a state takeover (+2 per further takeover, max 16)
+const TAKEOVER_TAX_MAX = 16;
+const TAKEOVER_FUNDING = 0.8; // department funding cap during a takeover (-0.1 per further takeover, min 0.5)
+const TAKEOVER_FUNDING_MIN = 0.5;
+const RECEIVER_MONTHS = 12; // state administration lasts 12 months per takeover (max 36) or until healthy
+const RESTRUCTURE_RATE = 0.1, RESTRUCTURE_CUSHION = 10000; // debt restructuring on a takeover
+const LOAN_FEE = 0.01; // origination fee of a voluntary loan (booked as a loan payment)
 const HISTORY_CAP = 600;
 const HISTORY_KEYS = [
   'pop', 'money', 'happiness', 'income', 'expenses', 'net', 'demandR', 'demandC', 'demandI',
@@ -113,6 +140,7 @@ const CATEGORIES = {
   income: { name: 'Venues (casino, stadium)', icon: '🎟️' },
   reward: { name: 'Milestone rewards', icon: '🏆' },
   goal: { name: 'Goal rewards', icon: '🎯' },
+  relief: { name: 'Disaster relief', icon: '🆘' },
   desk: { name: 'Mayor’s Desk', icon: '📨' },
   deskDeal: { name: 'Mayor’s Desk commitments', icon: '📨' },
   loan: { name: 'Loans received', icon: '🏦' },
@@ -258,7 +286,7 @@ function scan(S, force) {
     const def = VC.BLD[b.key];
     if (!def) continue; // rubble & other non-catalog props
     const dept = def.dept || 'parks';
-    agg.upkeep[dept] = (agg.upkeep[dept] || 0) + (def.upkeep || 0);
+    agg.upkeep[dept] = (agg.upkeep[dept] || 0) + (def.upkeep || 0) * ageMulOf(b.age);
     agg.count[dept] = (agg.count[dept] || 0) + 1;
     if (def.housing && b.pop) agg.base.R[2] += b.pop; // arcology residents pay high-wealth taxes
     if (b.built >= 1) {
@@ -452,6 +480,18 @@ function debt(S) {
   for (const l of S.loans) d += l.remaining;
   return d;
 }
+/**
+ * What paying loan l off today costs: the principal plus the interest accrued since its last
+ * instalment (pro rata by days) — at least one month's interest while it has not paid one yet.
+ */
+function payoffOf(S, l) {
+  const since = Math.max(0, S.time.day - (isFinite(l.billedDay) ? l.billedDay : l.day || 0));
+  const unbilled = !(l.months < l.term);
+  const months = Math.max(unbilled ? 1 : 0, since / C.DAYS_PER_MONTH);
+  const interest = Math.ceil(l.remaining * (l.rate / 12) * Math.min(1, months));
+  const principal = Math.ceil(l.remaining);
+  return { principal, interest, total: principal + interest };
+}
 function creditLimit(S) {
   return 30000 + Math.max(S.peakPop || 0, population(S)) * 6;
 }
@@ -468,12 +508,18 @@ function addLoan(S, amount, rate, months, extra) {
     id: (S.econ.loanSeq = (S.econ.loanSeq || 0) + 1),
     amount, remaining: amount, rate, months, term: months,
     monthly: Math.round(amortized(amount, rate, months) * 100) / 100,
-    day: S.time.day,
+    day: S.time.day, billedDay: S.time.day,
   }, extra || {});
   S.loans.push(l);
   S.econ.loansTaken = (S.econ.loansTaken || 0) + 1;
   S.econ.hadLoan = true;
   VC.money.earn(amount, 'loan');
+  // a voluntary loan costs a 1% origination fee (an operating cost): taking one and paying it back
+  // before the first instalment is never free
+  if (!l.emergency && !S.sandbox) {
+    const fee = Math.round(amount * LOAN_FEE);
+    if (fee > 0) { VC.money.spend(fee, 'loanPayment', true); l.fee = fee; }
+  }
   rev++;
   VC.bus.emit('loanChanged', l);
   if (!l.emergency && !S.demo) VC.bus.emit('sfx', { name: 'cash' }); // emergency loans: the advisor card is the one cue
@@ -532,6 +578,7 @@ function monthly() {
     paid += due.pay;
     l.remaining = Math.max(0, l.remaining - due.principal);
     l.months--;
+    l.billedDay = S.time.day;
     l.paidInterest = (l.paidInterest || 0) + due.interest;
     if (l.months <= 0 || l.remaining < 0.5) done.push(l);
   }
@@ -589,6 +636,7 @@ function monthly() {
 
   sampleHistory(S);
   bankruptcyCheck(S, e);
+  receiverCheck(S, e);
   VC.bus.emit('budgetChanged');
 }
 
@@ -649,31 +697,90 @@ function bankruptcyCheck(S, e) {
 }
 
 /**
- * Second bankruptcy while an emergency loan is still open (or no loan slot left): the state
- * takes over the budget. Taxes go up to TAKEOVER_TAX, funding is capped, paid policies end.
- * The city keeps running; the mayor can undo the measures once the books are healthy.
+ * Second bankruptcy while an emergency loan is still open (or no loan slot left): the state takes
+ * over the budget, harder each time (the n-th takeover):
+ *  - taxes raised to at least TAKEOVER_TAX + 2 (n - 1) % (max 16), department funding capped at
+ *    TAKEOVER_FUNDING - 0.1 (n - 1) (min 50%), paid policies repealed;
+ *  - DEBT RESTRUCTURING: every loan plus the deficit (+ a $10k cushion) become one state loan at 10%
+ *    over 10 years, so the treasury is back in the black (money never sinks without limit);
+ *  - STATE ADMINISTRATION for 12 months per takeover (max 36): the floors / caps stay locked
+ *    (setTax / setFunding clamp, paid policies and new loans are refused) until it ends — early once
+ *    the city holds $25k and has balanced its budget 6 months running.
  */
 function takeover(S, e) {
-  e.takeovers = (e.takeovers || 0) + 1;
+  const n = (e.takeovers = (e.takeovers || 0) + 1);
   e.takeoverDay = S.time.day;
+  const tax = Math.min(TAKEOVER_TAX_MAX, TAKEOVER_TAX + 2 * (n - 1));
+  const fund = Math.max(TAKEOVER_FUNDING_MIN, Math.round((TAKEOVER_FUNDING - 0.1 * (n - 1)) * 100) / 100);
   for (const z of ZONES) {
     const t = S.tax[z];
-    if (t) for (let w = 0; w < 3; w++) t[w] = Math.max(t[w], TAKEOVER_TAX);
+    if (t) for (let w = 0; w < 3; w++) t[w] = Math.max(t[w], tax);
   }
-  for (const d of VC.DEPARTMENTS) if (funding(d.key) > TAKEOVER_FUNDING) S.budget[d.key] = TAKEOVER_FUNDING;
+  for (const d of VC.DEPARTMENTS) if (funding(d.key) > fund) S.budget[d.key] = fund;
   const repealed = [];
   for (const k of Object.keys(S.policies)) {
-    if (levelOf(S, k) > 0 && fullCost(S, k) > 0) { delete S.policies[k]; repealed.push(k); }
+    if (levelOf(S, k) > 0 && (fullCost(S, k) > 0 || cutsTaxes(k))) { delete S.policies[k]; repealed.push(k); }
   }
+  // debt restructuring: consolidate every loan + the deficit into one state loan
+  let restructured = 0;
+  if (S.money < 0) {
+    const old = debt(S);
+    restructured = Math.ceil((old - S.money + RESTRUCTURE_CUSHION) / 5000) * 5000;
+    S.loans = [];
+    addLoan(S, restructured, RESTRUCTURE_RATE, 120, { emergency: true, restructure: true });
+    if (old > 0) VC.money.spend(Math.ceil(old), 'loanPayoff', true);
+    e.emergency = true;
+  }
+  const months = Math.min(3, n) * RECEIVER_MONTHS;
+  e.receiver = { since: S.time.day, until: S.time.day + months * C.DAYS_PER_MONTH, tax, funding: fund, n };
   VC.econ.computeMods();
   rev++;
+  const until = dateOf(e.receiver.until);
   notify(S, {
     key: 'takeover', severity: 'bad', panel: 'budget',
-    title: 'State takeover!',
-    text: `Bankrupt again with the emergency loan still open — the state has taken over our budget: taxes raised to at least ${TAKEOVER_TAX}%, department funding capped at ${Math.round(TAKEOVER_FUNDING * 100)}%` + (repealed.length ? ', and paid policies repealed.' : '.') + ' Cut costs and get back in the black, Mayor.',
-  }, `Bankrupt again! The state took over the budget: taxes ≥ ${TAKEOVER_TAX}%, funding ≤ ${Math.round(TAKEOVER_FUNDING * 100)}%.`);
-  VC.bus.emit('econ', { type: 'takeover', repealed, tax: TAKEOVER_TAX, funding: TAKEOVER_FUNDING, count: e.takeovers });
+    title: n > 1 ? `State takeover #${n}!` : 'State takeover!',
+    text: `Bankrupt again with the emergency loan still open — the state has taken over our budget until ${until}: taxes at least ${tax}%, department funding at most ${Math.round(fund * 100)}%` +
+      (repealed.length ? ', costly policies and tax breaks repealed' : '') +
+      (restructured ? `, and all our debt rolled into one ${VC.fmt.money(restructured)} state loan at ${Math.round(RESTRUCTURE_RATE * 100)}%` : '') +
+      '. Balance the books for six months (with $25k in the bank) and they hand it back' + (n > 1 ? ' — every takeover is harsher than the last.' : '.'),
+  }, `Bankrupt again! State administration until ${until}: taxes ≥ ${tax}%, funding ≤ ${Math.round(fund * 100)}%.`);
+  VC.bus.emit('econ', { type: 'takeover', repealed, tax, funding: fund, count: n, restructured, until: e.receiver.until });
   VC.bus.emit('budgetChanged'); // (no 'policyChanged': it would add a second sound to this one event)
+}
+/** True for a policy that lowers a tax (e.g. Business Tax Breaks): it would undercut the takeover's tax floor. */
+function cutsTaxes(key) {
+  const fx = (VC.POLICY[key] && VC.POLICY[key].effects) || {};
+  return fx.taxR < 0 || fx.taxC < 0 || fx.taxI < 0;
+}
+/** Active state administration {since, until, tax, funding, n} or null. */
+function receiver(S) {
+  const r = S && !S.sandbox && S.econ && S.econ.receiver;
+  return r && S.time.day < r.until ? r : null;
+}
+/** Monthly: the state hands the budget back when its time is up, or early once the city is healthy. */
+function receiverCheck(S, e) {
+  const r = e.receiver;
+  if (!r) return;
+  const healthy = S.money >= 25000 && e.balancedMonths >= 6;
+  if (S.time.day < r.until && !healthy) return;
+  e.receiver = null;
+  rev++;
+  if (!S.demo) toast('The state administrator hands the budget back. Taxes, funding and policies are yours again, Mayor.', 'good', '🏛️');
+  VC.bus.emit('econ', { type: 'receiverEnd', early: healthy && S.time.day < r.until });
+}
+/** "Mar 2031" for a day index. */
+function dateOf(day) {
+  const m = Math.floor(day / C.DAYS_PER_MONTH) % 12;
+  const y = C.START_YEAR + Math.floor(day / (C.DAYS_PER_MONTH * 12));
+  return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m] + ' ' + y;
+}
+let lastRefusal = -1e9;
+/** One toast (at most every 4 s real time) when the state administrator overrides a setting. */
+function refuse(S, text) {
+  const t = performance.now();
+  if (S.demo || t - lastRefusal < 4000) return;
+  lastRefusal = t;
+  toast(text + ` <small>(state administration until ${dateOf(S.econ.receiver.until)})</small>`, 'warn', '🏛️');
 }
 
 /* ------------------------------------------------------------------ */
@@ -733,6 +840,8 @@ VC.econ = {
     const S = S_();
     if (!S) return;
     pct = Math.round(M.clamp(+pct || 0, 0, 20) * 10) / 10;
+    const r = receiver(S);
+    if (r && pct < r.tax) { pct = r.tax; refuse(S, `The state administrator keeps taxes at <b>${r.tax}%</b> or more.`); }
     for (const z of zone == null ? ZONES : [zone]) {
       const t = S.tax[z];
       if (!t) continue;
@@ -751,7 +860,8 @@ VC.econ = {
     return t[M.clamp(wealth | 0, 0, 2)];
   },
   /**
-   * Demand / happiness effect of taxes: +0.35 at 0%, 0 at 9%, -0.8 at 20% (steeper the higher).
+   * Demand / happiness effect of taxes: +0.35 at 0%, 0 at 9%, -0.14 at 12%, -0.4 at 15%, -1 at 20%
+   * (gentle for a small raise, steep beyond ~13%).
    * Uses the effective rate (policy tax modifiers). wealth null = average of the three levels.
    */
   taxEffect(zone, wealth) {
@@ -760,7 +870,7 @@ VC.econ = {
     let r = VC.econ.getTax(zone, wealth == null ? null : wealth);
     r *= Math.max(0, 1 + ((S.mods && S.mods['tax' + zone]) || 0));
     if (r <= 9) return 0.35 * ((9 - r) / 9);
-    return M.clamp(-0.8 * Math.pow((r - 9) / 11, 1.25), -1, 0);
+    return M.clamp(-Math.pow((r - 9) / 11, 1.5), -1, 0);
   },
 
   /* ---------------- budget ---------------- */
@@ -769,6 +879,8 @@ VC.econ = {
     const S = S_();
     if (!S) return;
     f = Math.round(M.clamp(+f || 0, 0, 1.5) * 100) / 100;
+    const r = receiver(S);
+    if (r && f > r.funding) { f = r.funding; refuse(S, `The state administrator caps department funding at <b>${Math.round(r.funding * 100)}%</b>.`); }
     for (const d of dept == null ? VC.DEPARTMENTS.map((x) => x.key) : [dept]) S.budget[d] = f;
     rev++;
     VC.bus.emit('budgetChanged');
@@ -830,6 +942,10 @@ VC.econ = {
     if (want > cur) {
       if (!VC.world.isUnlocked(key)) {
         toast(`${def.name} unlocks at ${VC.fmt.num(def.unlock)} citizens.`, 'warn', '🔒');
+        return false;
+      }
+      if (receiver(S) && (fullCost(S, key) > 0 || cutsTaxes(key))) {
+        refuse(S, `The state administrator approves no paid policies or tax breaks.`);
         return false;
       }
       const cost = Math.round(fullCost(S, key) * want);
@@ -973,9 +1089,11 @@ VC.econ = {
       const monthly = Math.round(amortized(t.amount, rate, t.months));
       let reason = '';
       if (!S.sandbox && pop < t.pop) reason = `Requires ${VC.fmt.num(t.pop)} citizens`;
+      else if (receiver(S)) reason = 'The state administrator signs no new loans';
       else if (S.loans.length >= MAX_LOANS) reason = `At most ${MAX_LOANS} loans at once`;
       else if (!S.sandbox && d + t.amount > lim) reason = `Exceeds credit limit (${VC.fmt.money(lim)})`;
-      return { amount: t.amount, rate, months: t.months, monthly, total: monthly * t.months, available: !reason, reason };
+      const fee = S.sandbox ? 0 : Math.round(t.amount * LOAN_FEE);
+      return { amount: t.amount, rate, months: t.months, monthly, total: monthly * t.months, fee, available: !reason, reason };
     });
   },
   /** Takes a loan (amount from loanOptions, or an option object). Returns the loan or false. */
@@ -989,6 +1107,7 @@ VC.econ = {
       toast('Loan denied: ' + opt.reason + '.', 'warn', '🏦');
       return false;
     }
+    // (opt.fee: the 1% origination fee is booked by addLoan)
     return addLoan(S, opt.amount, opt.rate, opt.months);
   },
   /** Pays off loan i (index into S.loans) in full if affordable. */
@@ -996,14 +1115,28 @@ VC.econ = {
     const S = S_();
     const l = S && S.loans[i];
     if (!l) return false;
-    const cost = Math.ceil(l.remaining);
-    if (!VC.money.spend(cost, 'loanPayoff')) return false; // capital, not operating cost
+    const p = payoffOf(S, l);
+    if (!S.sandbox && !VC.money.canAfford(p.total)) { VC.money.spend(p.total, 'loanPayoff'); return false; } // the one 'noMoney'
+    VC.money.spend(p.principal, 'loanPayoff', true); // capital, not operating cost
+    if (p.interest > 0) VC.money.spend(p.interest, 'loanPayment', true); // accrued interest: operating cost
+    l.paidInterest = (l.paidInterest || 0) + p.interest;
     S.loans.splice(i, 1);
     if (!S.loans.length) S.econ.debtFreeDay = S.time.day;
     rev++;
     VC.bus.emit('loanChanged', null);
     VC.bus.emit('sfx', { name: 'cash' });
     return true;
+  },
+  /** What repaying loan i today costs: {principal, interest (accrued, >= 1 month before the first instalment), total}. */
+  payoffCost(i) {
+    const S = S_();
+    const l = S && S.loans[i];
+    return l ? payoffOf(S, l) : null;
+  },
+  /** State administration after a takeover: {since, until (day), tax (min %), funding (max), n} or null. */
+  receivership() {
+    const r = receiver(S_());
+    return r ? Object.assign({}, r) : null;
   },
   /** Total outstanding principal. */
   debt() {
@@ -1059,11 +1192,16 @@ VC.econ = {
    */
   upkeepOf(keyOrB) {
     const S = S_();
-    const key = keyOrB && typeof keyOrB === 'object' ? keyOrB.key : keyOrB;
+    const b = keyOrB && typeof keyOrB === 'object' ? keyOrB : null;
+    const key = b ? b.key : keyOrB;
     const def = VC.BLD[key];
     if (!S || !def || !def.upkeep) return 0;
     const dept = def.dept || 'parks';
-    return Math.round(def.upkeep * funding(dept) * costMul(S) * (WAGE_DEPTS[dept] ? wageMul(S) : 1));
+    return Math.round(def.upkeep * (b ? ageMulOf(b.age) : 1) * funding(dept) * costMul(S) * (WAGE_DEPTS[dept] ? wageMul(S) : 1));
+  },
+  /** Upkeep multiplier from a building's age (1 while young, up to 1 + AGE_MAX): see AGING in the header. */
+  ageMul(b) {
+    return ageMulOf(b && typeof b === 'object' ? b.age : b);
   },
   /** Tax rates (%) actually billed last month (day-weighted averages): {taxRates:{R:[..]…}, days}. */
   taxBilled() {

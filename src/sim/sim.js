@@ -13,6 +13,8 @@
  *   frame on slow machines): a big city's day may span two frames, the month's bookkeeping gets its own
  *   slice, only one heavy pass runs (and finishes) per frame, and at high speed the passes run every
  *   N days such that they stay >= 1-2 s real time apart. tickDay() still does a whole day synchronously.
+ *   finishDay() completes a staged day now (save snapshots and city switches call it, so a save never
+ *   holds half a day or a month boundary whose billing has not run); dayPending() tells if one is open.
  * DAILY: construction, occupancy (move-ins / job filling), stats; for a quarter of the buildings
  *   ((id + day) & 3): happiness, garbage, abandonment, downgrade, level-up, fire ignition. Fire
  *   spread/extinguish, growth slice (1/4 of the map in a fixed random order), abandoned 12+ months
@@ -28,6 +30,10 @@
  * REDEVELOPMENT: repainting a developed lot with another density of the same zone type (up- or
  *   downzoning) makes the building redevelop to that density over the next weeks (upzoning needs
  *   demand and growth budget; the lot replays its construction).
+ * HAPPINESS & TAXES: a building's city-wide `happy` bonus counts once per building type (its best copy),
+ *   buildings together add at most BLD_HAPPY_MAX and buildings + policies + temporary modifiers at most
+ *   HAPPY_MOD_MAX. The tax term is applied AFTER the 100% ceiling, so taxes bite in a city maxed out on
+ *   services, and residential taxes above 9% also empty homes directly (X.taxLeave, TAX_LEAVE).
  * TRAFFIC: long congested commutes and jammed home streets cost happiness; jammed access roads
  *   lower shop/factory job fill; road funding below 60% adds a 'Road condition' penalty.
  * WEATHER: the sim keeps its own deterministic weather X.wx (VC.sim.weather()), derived from the
@@ -51,6 +57,7 @@ const C = VC.C, M = VC.M, F = VC.F;
 const ZK = [null, 'R', 'C', 'I'];
 
 const LABOR = 0.5; // share of residents who work
+const TAX_LEAVE = 0.12; // homes emptied per unit of residential tax penalty (ownTax < 0): 12% -> 2.5%, 20% -> 9%
 const LV_REQ = { 1: [0, 0, 80, 120], 2: [0, 0, 75, 110] }; // land value needed for level 2 / 3
 const EDU_REQ = [0, 0, 70, 140]; // industry: education coverage needed for level 2 / 3
 const GROW_DAYS = 5; // growables take 5..10 days to build
@@ -178,6 +185,9 @@ function progressConstruction(S, days) {
 /* ------------------------------------------------------------------ */
 /* happiness                                                             */
 /* ------------------------------------------------------------------ */
+const SVC_W = 0.4; // weight of good residential service coverage (above the basic need)
+const BLD_HAPPY_MAX = 0.08; // cap on the city-wide happiness bonus of buildings (landmarks, plants …)
+const HAPPY_MOD_MAX = 0.15; // cap on buildings + policies + temporary modifiers together
 /**
  * Target happiness 0..1 of a growable. When `out` is an array, pushes named factors
  * {label, value -1..1 (display scale), raw (additive contribution)}.
@@ -190,7 +200,7 @@ function evalHappy(S, b, out) {
   const ec = Math.min(1, m.edu[i] / 255 + (S.mods.education || 0) * 0.5);
   const rt = b.simRoad >= 0 ? m.traffic[b.simRoad] / 255 : 0;
   const tax = X.taxW[zt] ? X.taxW[zt][b.wealth | 0] : 0;
-  let h = 0.55;
+  let h = 0.55, tx = 0;
   if (b.simRoad < 0) h += fac(out, 'No road access', -0.3);
   if (zt === 1) {
     h += fac(out, 'Power', b.powered ? 0.04 : -0.32);
@@ -200,10 +210,10 @@ function evalHappy(S, b, out) {
     h += fac(out, 'Noise', -noi * 0.22);
     // missing services mostly block upgrades; good coverage makes people genuinely happy
     const sv = 0.22 * pc + 0.22 * fc + 0.22 * hc + 0.22 * ec + 0.12 * gc - (0.15 + 0.1 * (b.level - 1) + 0.05 * (den - 1));
-    h += fac(out, 'Services', sv > 0 ? sv * 0.45 : sv * 0.25);
+    h += fac(out, 'Services', sv > 0 ? sv * SVC_W : sv * 0.25);
     h += fac(out, 'Parks', (pk - 0.12) * 0.14);
     h += fac(out, 'Land value', (lv - 0.3) * 0.25);
-    h += fac(out, 'Taxes', tax * 0.35);
+    tx = fac(out, 'Taxes', tax * 0.35);
     // congestion-inflated travel time (street tiles) beyond a 12-tile commute, and jams at the door
     h += fac(out, 'Commute', b.simCommute < 0 ? -0.12 : -Math.min(0.12, Math.max(0, (b.simCommute - 12) / 100)));
     h += fac(out, 'Street traffic', -rt * 0.15);
@@ -219,7 +229,7 @@ function evalHappy(S, b, out) {
     const sv = 0.35 * pc + 0.35 * fc + 0.3 * gc - 0.2;
     h += fac(out, 'Services', sv > 0 ? sv * 0.3 : sv * 0.2);
     h += fac(out, 'Customers', clamp(S.demand.C, -1, 1) * 0.12 + (lv - 0.3) * 0.2);
-    h += fac(out, 'Taxes', tax * 0.4);
+    tx = fac(out, 'Taxes', tax * 0.4);
     h += fac(out, 'Workers', -(1 - X.fill) * 0.35);
     h += fac(out, 'Traffic', -rt * 0.1);
     if (X.roadPen) h += fac(out, 'Road condition', -X.roadPen * 0.5);
@@ -232,7 +242,7 @@ function evalHappy(S, b, out) {
     const sv = 0.5 * fc + 0.3 * pc + 0.2 * gc - 0.2;
     h += fac(out, 'Services', sv > 0 ? sv * 0.25 : sv * 0.15);
     h += fac(out, 'Trade', clamp(S.demand.I, -1, 1) * 0.15);
-    h += fac(out, 'Taxes', tax * 0.4);
+    tx = fac(out, 'Taxes', tax * 0.4);
     h += fac(out, 'Workers', -(1 - X.fill) * 0.4);
     if (b.level >= 2) h += fac(out, 'Skilled workforce', ((ec + X.cityEdu) * 0.5 - 0.3) * 0.2);
     h += fac(out, 'Freight traffic', -rt * 0.12);
@@ -240,7 +250,9 @@ function evalHappy(S, b, out) {
     if (b.simGarbage > 0.05) h += fac(out, 'Garbage', -b.simGarbage * 0.06);
     h += fac(out, 'Policies & landmarks', X.happyMod * 0.4);
   }
-  return clamp(h, 0, 1);
+  // taxes apply AFTER the ceiling: a city stacked with services and landmarks still feels a tax rise
+  // (and a tax cut cannot lift anyone past 100%)
+  return clamp(Math.min(h, 1) + tx, 0, 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -251,7 +263,7 @@ function newTot() {
     pop: 0, capR: 0, capRBuilt: 0, capC: 0, capCBuilt: 0, capI: 0, capIBuilt: 0, jobsSvc: 0, jobsFilled: 0,
     growables: 0, catalog: 0, rubble: 0, abandoned: 0, constructing: 0, burning: 0,
     happyS: 0, happyW: 0, eduS: 0, healthS: 0, crimeS: 0, polS: 0, polW: 0, lvS: 0, svcS: 0,
-    tourismRaw: 0, happyMod: 0, parks: 0, seaports: 0, airports: 0,
+    tourismRaw: 0, happyMod: 0, happyKeys: {}, parks: 0, seaports: 0, airports: 0,
     unpowered: 0, unwatered: 0, noAccess: 0, noCommute: 0, garbage: 0,
   };
 }
@@ -376,7 +388,12 @@ function* dailyBuildings(S, sim, live) {
         // amenities need their budget (and power, if they use any) to draw crowds
         const run = Math.min(1, X.effC[def.dept || 'parks'] != null ? X.effC[def.dept || 'parks'] : 1) * (b.powered ? 1 : 0.5);
         tot.tourismRaw += (def.tourism || 0) * run;
-        tot.happyMod += (def.happy || 0) * run;
+        if (def.happy) {
+          // a city-wide bonus counts once per building type (its best-running copy): a second water
+          // plant, library or statue adds nothing to every home's mood
+          const hk = tot.happyKeys, v = def.happy * run, prev = hk[key] || 0;
+          if (v > prev) { tot.happyMod += v - prev; hk[key] = v; }
+        }
       }
       if (jobs) {
         tot.jobsSvc += jobs;
@@ -396,7 +413,7 @@ function* dailyBuildings(S, sim, live) {
         // arcology: residents move in like a giant residential building
         b.cap = def.housing;
         if (sim) {
-          const occ = clamp(0.55 + 0.4 * (X.happyAvg || 0.6) + 0.3 * X.rAppeal - leave, 0.2, 1) * (b.powered ? 1 : 0.3) * (b.watered ? 1 : 0.5);
+          const occ = clamp(clamp(0.55 + 0.4 * (X.happyAvg || 0.6) + 0.3 * X.rAppeal - leave, 0.2, 1) - X.taxLeave[2], 0.1, 1) * (b.powered ? 1 : 0.3) * (b.watered ? 1 : 0.5);
           const target = Math.floor(def.housing * occ);
           if (b.pop < target) b.pop += Math.ceil((target - b.pop) * 0.04);
           else if (b.pop > target) b.pop -= Math.ceil((b.pop - target) * 0.05);
@@ -453,7 +470,8 @@ function* dailyBuildings(S, sim, live) {
     if (sim) {
       /* occupancy (daily) */
       if (zt === 1) {
-        let occ = clamp(0.5 + 0.45 * b.happy + 0.3 * X.rAppeal - leave, 0.15, 1);
+        // (high taxes also empty homes directly: families move away however nice the city is)
+        let occ = Math.max(0.1, clamp(0.5 + 0.45 * b.happy + 0.3 * X.rAppeal - leave, 0.15, 1) - X.taxLeave[b.wealth | 0]);
         if (!b.powered) occ *= 0.35;
         if (!b.watered && (b.den >= 2 || b.level >= 2)) occ *= 0.5;
         if (b.simRoad < 0) occ *= 0.3;
@@ -611,7 +629,7 @@ function updateStats(S) {
   const svcTerm = 0.65 * (1 - svcW) + Math.min(1, svc * 1.4) * svcW;
   st.approval = clamp(0.55 * st.happiness + 0.25 * (0.5 + taxAvg * 0.5) + 0.2 * svcTerm, 0, 1);
   if (pop > S.peakPop) S.peakPop = pop;
-  X.happyMod = (mods.happiness || 0) + t.happyMod;
+  X.happyMod = clamp((mods.happiness || 0) + Math.min(BLD_HAPPY_MAX, t.happyMod), -0.5, HAPPY_MOD_MAX);
 }
 
 /* ------------------------------------------------------------------ */
@@ -708,12 +726,15 @@ function stepDay(budgetMs) {
   for (;;) {
     if (pc.lastYield) pc.paused += performance.now() - pc.lastYield;
     let r;
+    X.dayBusy = true; // (finishDay from a bus listener inside this very day must not re-enter it)
     try {
       r = g.next();
     } catch (e) {
       X.dayJob = null;
       pc.lastYield = 0;
       throw e;
+    } finally {
+      X.dayBusy = false;
     }
     const tn = performance.now();
     sliceStat('day', r.done ? 'end' : r.value, tn - (pc.lastYield > t0 ? pc.lastYield : t0));
@@ -741,6 +762,7 @@ function refreshCity(S) {
   if (!X.taxZ) {
     X.taxZ = [0, 0, 0, 0];
     X.taxW = [null, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    X.taxLeave = [0, 0, 0];
   }
   for (let z = 1; z <= 3; z++) {
     const zk = ZK[z];
@@ -750,6 +772,8 @@ function refreshCity(S) {
     try { e = VC.econ && VC.econ.taxEffect ? VC.econ.taxEffect(zk) : null; } catch (err) { e = null; }
     X.taxZ[z] = typeof e === 'number' && isFinite(e) && e !== 0 ? clamp(e, -1, 1) : own;
   }
+  // share of homes (per wealth) left empty by residential taxes above the neutral 9%
+  for (let w = 0; w < 3; w++) X.taxLeave[w] = Math.max(0, -X.taxW[1][w]) * TAX_LEAVE;
   const mo = Math.floor(S.time.day / C.DAYS_PER_MONTH) % 12;
   X.seasonFire = mo >= 5 && mo <= 7 ? 1.4 : mo === 11 || mo <= 1 ? 0.7 : 1;
   // department effectiveness (funding, strikes) cached for the day
@@ -1388,6 +1412,8 @@ Object.assign(SIM, {
     // staged work of the previous city is dropped; the heavy passes start their cadence today
     X.job = null;
     X.dayJob = null;
+    X.dayJobS = null;
+    X.dayBusy = false;
     X.hold = null;
     X.want = { net: false, maps: false, traffic: false };
     X.jobDone = {};
@@ -1500,6 +1526,7 @@ Object.assign(SIM, {
           X.acc -= 1;
           n++;
           X.dayJob = dayGen(S, true);
+          X.dayJobS = S;
         }
         if (!stepDay(budget - (performance.now() - t0))) break;
         if (performance.now() - t0 >= budget) break;
@@ -1519,14 +1546,29 @@ Object.assign(SIM, {
     const S = VC.state;
     if (!S) return;
     if (!X.ready) SIM.reset(S);
-    // a day the frame loop is still working on finishes first
-    if (X.dayJob) {
-      const g = X.dayJob;
-      X.dayJob = null;
-      X.dayClock.lastYield = 0;
-      runSync(g);
-    }
+    SIM.finishDay(); // a day the frame loop is still working on finishes first
     runSync(dayGen(S, false));
+  },
+
+  /**
+   * Finishes the day the frame loop is still working on (a staged day can span frames), synchronously —
+   * including that day's month bookkeeping ('month' / 'year'). Call it before anything that must see whole
+   * days: save snapshots, replacing the running city. A staged day of a city that is no longer VC.state is
+   * dropped (its bus events would reach the new city). Returns true when a day was finished.
+   */
+  finishDay() {
+    const g = X.dayJob;
+    if (!g || X.dayBusy) return false; // (called from inside the running day: it finishes by itself)
+    X.dayJob = null;
+    if (X.dayClock) X.dayClock.lastYield = 0;
+    if (X.dayJobS && X.dayJobS !== VC.state) { X.dayJobS = null; return false; }
+    X.dayJobS = null;
+    runSync(g);
+    return true;
+  },
+  /** True while the frame loop is in the middle of a staged sim day (see finishDay). */
+  dayPending() {
+    return !!X.dayJob;
   },
 
   /* ---------------- fires ---------------- */

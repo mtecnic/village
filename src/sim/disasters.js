@@ -46,7 +46,15 @@
  *
  * SAVE/LOAD: active entries are persisted through VC.save.register('disasters') (plain JSON: Sets become
  * arrays, building references become ids) and resume after loading.
- * Persistent stats: S.disasterStats (= VC.disasters.stats) {count, byType, survived, destroyed, abducted, nextDay}.
+ * Persistent stats: S.disasterStats (= VC.disasters.stats) {count, byType, survived, destroyed, abducted, nextDay, relief}.
+ *
+ * FAIRNESS: random disasters strike after FIRST_YEARS and then every GAP_YEARS (per difficulty); tornadoes,
+ * meteors and Cubezilla need a big enough city (TYPE_MIN_POP). A random tornado's damage scales with the
+ * city's size (e.sizeF) and stops at 5% of its buildings (e.cap); any tornado destroys at most 2 power /
+ * water buildings. A random Cubezilla skips the far neighbourhood in cities under 20k and leaves once it has
+ * flattened 6% (e.sated, phase 'leave'). (Disasters the player triggers are not capped.) When a RANDOM
+ * disaster ends, the state pays relief: half the price of the public buildings lost + $50 per lost lot
+ * (ledger 'relief'; the 'end' event and the summary toast carry it).
  * Random disasters need S.disastersEnabled && VC.settings.disasters !== false; flipping the Settings
  * toggle also flips S.disastersEnabled of the running city (one switch from the player's view).
  */
@@ -63,8 +71,15 @@ const TYPES = [
 const TYPE = Object.create(null); // no prototype: trigger('toString') must not find anything
 for (const t of TYPES) TYPE[t.key] = t;
 // Relative odds of each random disaster (tornadoes in spring/summer, fires in summer, see seasonWeight).
-const ODDS = { fire: 30, tornado: 20, meteor: 12, earthquake: 16, ufo: 11, monster: 11 };
+const ODDS = { fire: 20, tornado: 20, meteor: 12, earthquake: 20, ufo: 11, monster: 11 };
 const RANDOM_MIN_POP = 2000;
+// the big ones only strike cities that can take them (random disasters; the Disasters window can still
+// trigger anything)
+const TYPE_MIN_POP = { tornado: 4000, meteor: 8000, monster: 15000 };
+// years until the first random disaster of a city / between random disasters, per difficulty
+const FIRST_YEARS = { easy: [5, 7], normal: [4, 5], hard: [3, 4] };
+const GAP_YEARS = { easy: [5, 8], normal: [3, 5], hard: [3, 4] };
+const RELIEF_SHARE = 0.5, RELIEF_PER_LOT = 50; // disaster relief: 50% of lost public buildings + $50 a lot
 const YEAR = C.DAYS_PER_MONTH * 12;
 
 let rnd = M.rng(1);
@@ -185,8 +200,15 @@ function shakeAt(x, z, amount, range = 40) {
 function wreck(b, e, opts = {}) {
   const S = S_();
   if (!b || !S.buildings.has(b.id)) return false;
+  // a capped disaster (tornado, monster: scaled to the city's size) stops flattening once it has taken its share
+  if (e && e.cap > 0 && (e.destroyed || 0) >= e.cap) return false;
   const wasRubble = b.key === 'rubble';
   const { x, z, w, d } = b;
+  if (e && !wasRubble) {
+    const def = VC.BLD[b.key];
+    if (def) e.lossValue = (e.lossValue || 0) + (def.cost || 0);
+    else if (b.key === 'grow') e.lossLots = (e.lossLots || 0) + 1;
+  }
   W_().removeBuilding(b, REASON().DISASTER);
   if (opts.rubble !== false && !wasRubble) {
     try {
@@ -313,6 +335,13 @@ H.tornado = {
     e.hits = new Set();
     e.tiles = new Set();
     e.phase = 'active';
+    // a random tornado's damage scales with the city (a small town loses fewer lots); utilities are
+    // sturdy either way (see update: at most 2 per tornado, so it never erases a utility cluster)
+    if (e.random) {
+      e.sizeF = M.clamp((S.stats.pop || 0) / 20000, 0.35, 1);
+      e.cap = Math.max(8, Math.round(standing() * 0.05));
+    }
+    e.utilHits = 0;
     return true;
   },
   update(e, gd) {
@@ -343,11 +372,17 @@ H.tornado = {
         e.hits.add(id);
         const b = S.buildings.get(id);
         if (!b || b.key === 'rubble') continue;
-        // small / low buildings are more likely to be flattened
-        const pD = b.key === 'grow' ? 0.45 + 0.2 * (1 - (b.level || 1) / 3) : 0.4;
+        // small / low buildings are more likely to be flattened; power plants, pumps and towers are
+        // sturdy (at most 2 per tornado)
+        const def = VC.BLD[b.key];
+        const util = !!(def && (def.power > 0 || def.water > 0));
+        const sf = Number.isFinite(e.sizeF) ? e.sizeF : 1;
+        let pD = (b.key === 'grow' ? 0.45 + 0.2 * (1 - (b.level || 1) / 3) : 0.4) * sf;
+        let pF = 0.28;
+        if (util) { pD = (e.utilHits || 0) >= 2 ? 0 : 0.15 * sf; pF = 0.1; }
         const roll = rnd();
-        if (roll < pD) wreck(b, e);
-        else if (roll < pD + 0.28) burn(b, e);
+        if (roll < pD) { if (wreck(b, e) && util) e.utilHits = (e.utilHits || 0) + 1; }
+        else if (roll < pD + pF) burn(b, e);
       }
   },
   startText: () => 'Tornado warning! A twister is tearing across the land.',
@@ -684,10 +719,12 @@ H.monster = {
     }
     e.x = sx; e.z = sz;
     e.y = groundAt(sx, sz);
-    // route: city centre -> a far-flung neighbourhood -> out the far side
+    // route: city centre -> a far-flung neighbourhood (only in big cities) -> out the far side
     const far = randomBuilding((b) => notRubble(b) && Math.hypot(b.x - cx, b.z - cz) > 8);
     const wp = [[cx + (rnd() - 0.5) * 6, cz + (rnd() - 0.5) * 6]];
-    if (far) wp.push(centerOf(far));
+    if (far && (!e.random || (S.stats.pop || 0) >= 20000)) wp.push(centerOf(far));
+    // a random Cubezilla loses interest once it has flattened its share of the city (6%, at least 12)
+    if (e.random) e.cap = Math.max(12, Math.round(standing() * 0.06));
     const last = wp[wp.length - 1];
     const ax = last[0] - sx, az = last[1] - sz, al = Math.hypot(ax, az) || 1;
     wp.push([last[0] + (ax / al) * S.W * 1.5, last[1] + (az / al) * S.H * 1.5]); // exit, clipped by inMap
@@ -726,6 +763,16 @@ H.monster = {
       if (e.waypoints.length === 1) e.phase = 'leave';
     }
     if (e.phase === 'enter' && inMap(e.x, e.z) && !W_().isWater(Math.floor(e.x), Math.floor(e.z))) e.phase = 'rampage';
+    if (!e.sated && e.cap > 0 && (e.destroyed || 0) >= e.cap) {
+      // had its fill: head straight out, away from the city centre, flattening nothing more
+      e.sated = true;
+      const [cx, cz] = cityCenter();
+      let ax = e.x - cx, az = e.z - cz, al = Math.hypot(ax, az);
+      if (al < 1) { ax = Math.cos(e.dir); az = Math.sin(e.dir); al = 1; }
+      e.waypoints = [[e.x + (ax / al) * S.W * 1.5, e.z + (az / al) * S.H * 1.5]];
+      e.phase = 'leave';
+      e.breath = null;
+    }
     if (e.waypoints.length <= 1 && !inMap(e.x, e.z, 3)) { e.done = true; return; }
     if (td > 90) { e.done = true; return; }
     // footfalls every half tile: stomp everything under the feet
@@ -736,9 +783,11 @@ H.monster = {
       if (inMap(e.x, e.z)) {
         shakeAt(e.x, e.z, 0.35, 30);
         if (foot % 2 === 0) sfx('stomp', e.x, e.z);
-        for (const { b } of buildingsNear(e.x, e.z, e.radius, notRubble)) {
-          if (rnd() < 0.8) wreck(b, e);
-          else burn(b, e);
+        if (!e.sated) {
+          for (const { b } of buildingsNear(e.x, e.z, e.radius, notRubble)) {
+            if (rnd() < 0.8) wreck(b, e);
+            else burn(b, e);
+          }
         }
         const tx = Math.floor(e.x), tz = Math.floor(e.z);
         for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) trample(tx + dx, tz + dz, 0.8);
@@ -792,10 +841,12 @@ function randomType() {
   const S = S_();
   const m = Math.floor(S.time.day / C.DAYS_PER_MONTH) % 12;
   const summer = m >= 5 && m <= 7, spring = m >= 2 && m <= 4;
+  const pop = S.stats.pop || 0;
   let tot = 0;
   const w = {};
   for (const t of TYPES) {
     let v = ODDS[t.key] || 10;
+    if (pop < (TYPE_MIN_POP[t.key] || 0)) v = 0;
     if (t.key === 'tornado') v *= spring || summer ? 1.6 : 0.5;
     if (t.key === 'fire') v *= summer ? 1.5 : 0.8;
     w[t.key] = v;
@@ -805,8 +856,17 @@ function randomType() {
   for (const t of TYPES) if ((r -= w[t.key]) <= 0) return t.key;
   return 'fire';
 }
-function scheduleNext(S, minYears = 3, maxYears = 5) {
-  stats().nextDay = S.time.day + Math.round(YEAR * (minYears + rnd() * (maxYears - minYears)));
+/** Schedules the next random disaster (first = the city's first one), spaced per difficulty. */
+function scheduleNext(S, first) {
+  const T = first ? FIRST_YEARS : GAP_YEARS;
+  const [a, b] = T[S.difficulty] || T.normal;
+  stats().nextDay = S.time.day + Math.round(YEAR * (a + rnd() * (b - a)));
+}
+/** Standing (non-rubble) buildings: the base for size-scaled damage caps. */
+function standing() {
+  const S = S_();
+  const st = S.stats || {};
+  return Math.max(0, st.buildings || S.buildings.size);
 }
 /** After random disasters get switched on, give the player 6-12 months of peace (nextDay may be long overdue). */
 function grace(S) {
@@ -819,13 +879,13 @@ function onDay() {
   const S = S_();
   if (!S || !D.randomEnabled()) return;
   const st = stats();
-  if (st.nextDay == null) scheduleNext(S, 2, 4);
+  if (st.nextDay == null) scheduleNext(S, true);
   if (S.time.day < st.nextDay) return;
   if (D.active.length || (S.stats.pop || 0) <= RANDOM_MIN_POP) {
     st.nextDay = S.time.day + (D.active.length ? 30 : 90);
     return;
   }
-  if (D.trigger(randomType(), null, null, { random: true })) scheduleNext(S);
+  if (D.trigger(randomType(), null, null, { random: true })) scheduleNext(S, false);
   else st.nextDay = S.time.day + 30;
 }
 
@@ -925,7 +985,7 @@ const D = (VC.disasters = {
     if (st.abducted == null) st.abducted = 0;
     for (const t of TYPES) if (st.byType[t.key] == null) st.byType[t.key] = 0;
     D.stats = st;
-    if (st.nextDay == null) scheduleNext(S, 2, 4);
+    if (st.nextDay == null) scheduleNext(S, true);
   },
 
   update(dt) {
@@ -1042,11 +1102,28 @@ const D = (VC.disasters = {
   focusPoint,
   /** Ends every active disaster immediately (debug / new game). */
   clear() {
-    for (const e of D.active.splice(0)) finish(e);
+    for (const e of D.active.splice(0)) finish(e, true);
   },
 });
 
-function finish(e) {
+/**
+ * Disaster relief for a RANDOM disaster (never one the player triggered): the state pays back half the
+ * price of the public buildings it destroyed plus a little per lost lot (clearing the rubble). Booked
+ * under ledger category 'relief'. Returns the amount.
+ */
+function relief(e) {
+  const S = S_();
+  if (!S || S.demo || S.sandbox || !e.random) return 0;
+  let mul = 1;
+  try { mul = VC.money.costMul(); } catch (err) { mul = 1; }
+  const v = Math.round(((e.lossValue || 0) * mul * RELIEF_SHARE + (e.lossLots || 0) * RELIEF_PER_LOT) / 100) * 100;
+  if (!(v > 0)) return 0;
+  VC.money.earn(v, 'relief');
+  const st = stats();
+  st.relief = (st.relief || 0) + v;
+  return v;
+}
+function finish(e, cleared) {
   const st = stats();
   st.survived[e.type] = (st.survived[e.type] || 0) + 1;
   if (e.lifting && e.lifting.b) delete e.lifting.b.disLift;
@@ -1055,6 +1132,9 @@ function finish(e) {
   const h = H[e.type];
   let text = '';
   try { text = h.endText(e); } catch (err) { text = `${e.name} is over.`; }
+  const aid = cleared ? 0 : relief(e);
+  if (aid) text += ` The state sends <b>${VC.fmt.money(aid)}</b> in disaster relief.`;
+  e.relief = aid;
   toast(text, e.destroyed > 5 ? 'warn' : 'info', e.icon);
-  emit(e, 'end', { destroyed: e.destroyed || 0, burned: e.burned || 0, abducted: e.abducted || 0 });
+  emit(e, 'end', { destroyed: e.destroyed || 0, burned: e.burned || 0, abducted: e.abducted || 0, relief: aid });
 }

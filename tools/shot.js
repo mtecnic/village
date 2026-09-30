@@ -10,6 +10,7 @@
  *     --out <png>          screenshot path (default /tmp/vp_shot.png); "none" = no screenshot
  *     --w <px> --h <px>    viewport (default 1280x720)
  *     --steps <json>       array of {eval, wait, out} run sequentially on the same page
+ *     --gl                 capture the WebGL canvas only via VC.gfx.capture (fast; no HTML UI)
  *     --quiet              only print errors
  * Always prints: page console errors/warnings, uncaught exceptions, VC.errors, and eval results.
  * Exit code 1 if any page error occurred.
@@ -26,6 +27,7 @@ const html = path.resolve(opt('html', path.join(__dirname, '..', 'Voxelpolis.htm
 const query = opt('query', 'autostart=1&seed=12345&size=96');
 const W = +opt('w', 1280), H = +opt('h', 720);
 const quiet = has('quiet');
+const glOnly = has('gl');
 let steps = opt('steps', null);
 steps = steps ? JSON.parse(steps) : [{ eval: opt('eval', null), wait: +opt('wait', 2500), out: opt('out', '/tmp/vp_shot.png') }];
 
@@ -62,7 +64,16 @@ steps = steps ? JSON.parse(steps) : [{ eval: opt('eval', null), wait: +opt('wait
     }
     await page.waitForTimeout(s.wait == null ? 2500 : s.wait);
     if (s.out && s.out !== 'none') {
-      await page.screenshot({ path: s.out, timeout: 180000 });
+      if (glOnly || s.gl) {
+        const b64 = await page.evaluate(async (w) => {
+          const p = VC.gfx.capture(w, 'image/png');
+          VC.gfx.render(0, 0.016, true);
+          const url = await p;
+          return url ? url.split(',')[1] : null;
+        }, W);
+        if (b64) require('fs').writeFileSync(s.out, Buffer.from(b64, 'base64'));
+        else console.log('[harness] gl capture failed');
+      } else await page.screenshot({ path: s.out, timeout: 180000 });
       if (!quiet) console.log('[harness] screenshot -> ' + s.out);
     }
   }

@@ -15,6 +15,8 @@
  * Movement uses game-scaled time (frozen while paused). Everything spawns around the camera target.
  */
 const M = VC.M, C = VC.C;
+/** Vector length without Math.hypot (V8's hypot allocates its argument list; this is on per-frame paths). */
+const hyp = (x, z) => Math.sqrt(x * x + z * z);
 const TAU = Math.PI * 2;
 const FLAP = [0, 1, 2, 1];
 const DX4 = [1, -1, 0, 0], DZ4 = [0, 0, 1, -1];
@@ -24,6 +26,7 @@ let S = null, W = 0, H = 0;
 let rnd = M.rng(3);
 let clock = 0;
 const T12 = new Float32Array(12);
+const T16 = new Float32Array(16), PV7 = new Float32Array(7); // typed scratch for the per-bird loop
 const P3 = [0, 0, 0];
 
 const planes = [], helis = [], boats = [], flocks = [], balloons = [];
@@ -36,7 +39,7 @@ const A = (VC.fxAir = {
   reset(st) {
     S = st;
     W = st.W; H = st.H;
-    rnd = M.rng((st.seed ^ 0x51a7) >>> 0);
+    rnd = VC.fxgl.rng((st.seed ^ 0x51a7) >>> 0);
     planes.length = helis.length = boats.length = flocks.length = balloons.length = 0;
     scanT = 0;
     ferryRoute = null;
@@ -86,20 +89,24 @@ const A = (VC.fxAir = {
     updateBalloons(dt);
   },
 
+  /**
+   * Adds everything to the model batch B (it culls per pass, so aircraft / boats outside the view still cast
+   * their shadows into it) and the light sprites of what the camera sees to G.
+   */
   render(B, G, cam, night) {
     const FXg = VC.fxgl, F = FXg.frustum;
-    const lod = (x, y, z) => Math.hypot(x - cam.pos[0], y - cam.pos[1], z - cam.pos[2]) > 60; // (one closure per frame)
     const t = VC.agents ? VC.agents.clock : clock;
-    for (const p of planes) {
-      if (!F.sphere(p.x, p.y, p.z, 4)) continue;
-      FXg.pose(T12, p.m, p.x, p.y, p.z, p.h, p.pitch, p.roll, p.scale);
-      B.add(p.m, lod(p.x, p.y, p.z), T12, FXg.F.BEACON | (p.onGround ? 0 : FXg.F.LIGHTS), 0, FXg.WHITE, p.seed);
-      planeLights(G, p, night, t);
+    const cp = cam.pos;
+    for (let k = 0; k < planes.length; k++) {
+      const p = planes[k];
+      poseAdd(B, p, FXg.F.BEACON | (p.onGround ? 0 : FXg.F.LIGHTS), cp);
+      if (F.sphere(p.x, p.y, p.z, 4)) planeLights(G, p, night, t);
     }
-    for (const h of helis) {
-      if (!F.sphere(h.x, h.y, h.z, 2)) continue;
+    for (let k = 0; k < helis.length; k++) {
+      const h = helis[k];
       FXg.pose(T12, h.m, h.x, h.y, h.z, h.h, h.pitch, h.roll, 1);
-      B.addWithParts(h.m, lod(h.x, h.y, h.z), T12, FXg.F.BEACON | (h.police ? FXg.F.SIREN : 0), 0, FXg.WHITE, h.seed, t, h.rotor);
+      B.addWithParts(h.m, far(cp, h.x, h.y, h.z), T12, FXg.F.BEACON | (h.police ? FXg.F.SIREN : 0), 0, FXg.WHITE, h.seed, t, h.rotor);
+      if (!F.sphere(h.x, h.y, h.z, 2)) continue;
       if (night > 0.2 && h.state !== 0) {
         // searchlight
         const gy = VC.fxgl.surfaceY(h.x, h.z);
@@ -108,11 +115,10 @@ const A = (VC.fxAir = {
         G.add(h.x + Math.cos(h.h) * 0.4, gy + 0.05, h.z + Math.sin(h.h) * 0.4, 1.3, 1, 0.95, 0.85, 0.9 * night, 1, 0, 1, 0);
       }
     }
-    for (const b of boats) {
-      if (!F.sphere(b.x, b.y, b.z, b.r)) continue;
-      FXg.pose(T12, b.m, b.x, b.y, b.z, b.h, b.pitch, b.roll, 1);
-      B.add(b.m, lod(b.x, b.y, b.z), T12, FXg.F.BEACON, 0, FXg.WHITE, b.seed);
-      if (night > 0.2) {
+    for (let k = 0; k < boats.length; k++) {
+      const b = boats[k];
+      poseAdd(B, b, FXg.F.BEACON, cp);
+      if (night > 0.2 && F.sphere(b.x, b.y, b.z, b.r)) {
         const top = b.y + b.m.sy * b.m.vox * 0.85;
         G.add(b.x, top, b.z, 0.12, 1, 0.95, 0.85, 1.6 * night, 0, 0, 1, 0.6);
         const fx = Math.cos(b.h), fz = Math.sin(b.h), rx = -fz, rz = fx, w = b.m.sx * b.m.vox * 0.45;
@@ -121,28 +127,48 @@ const A = (VC.fxAir = {
         if (b.kind >= 2) G.add(b.x + fx * 0.2, C.SEA_Y + 0.02, b.z + fz * 0.2, b.r * 0.7, 1, 0.85, 0.6, 0.35 * night, 1, b.h, 1.8, 0);
       }
     }
-    for (const f of flocks) {
-      if (!F.sphere(f.x, f.y, f.z, f.rad + 1)) continue;
-      const m0 = f.models;
-      for (let k = 0; k < f.n; k++) {
-        const o = k * 8, d = f.b;
-        const fr = FLAP[Math.floor(t * f.flap + d[o + 6] * 4) & 3];
-        const m = d[o + 7] > 0.5 ? m0[1] : m0[fr];
-        FXg.pose(T12, m, d[o], d[o + 1], d[o + 2], d[o + 3], d[o + 4], d[o + 5], f.scale * M.clamp(f.fade + 1, 0, 1));
-        B.add(m, true, T12, 0, 0, f.tint, 0);
-      }
-    }
-    for (const b of balloons) {
+    // (flocks stay within ~120 of the camera target; the batch culls per pass)
+    for (let n = 0; n < flocks.length; n++) renderFlock(flocks[n], B, t);
+    for (let k = 0; k < balloons.length; k++) {
+      const b = balloons[k];
+      b.roll = Math.sin(t * 0.7 + b.seed * 9) * 0.03;
+      b.scale = Math.max(0.01, b.fade);
+      poseAdd(B, b, 0, cp);
       if (!F.sphere(b.x, b.y + 1.5, b.z, 3)) continue;
-      FXg.pose(T12, b.m, b.x, b.y, b.z, b.h, 0, Math.sin(t * 0.7 + b.seed * 9) * 0.03, Math.max(0.01, b.fade));
-      B.add(b.m, lod(b.x, b.y, b.z), T12, 0, 0, FXg.WHITE, b.seed);
       const burn = b.burn > 0 ? 1 : 0;
-      FXg.xfPoint(T12, b.m.sx * 0.5, 5, b.m.sz * 0.5, P3);
+      FXg.xfPoint(T16, b.m.sx * 0.5, 5, b.m.sz * 0.5, P3);
       G.add(P3[0], P3[1], P3[2], 0.25 + burn * 0.5, 1, 0.55, 0.15, (0.4 + burn * 3) * (0.3 + night), 0, 0, 1, 0.4);
       if (burn) G.add(P3[0], P3[1] + 1.5, P3[2], 1.6, 1, 0.5, 0.15, 0.5 * (0.2 + night), 0, 0, 1, 0);
     }
   },
 });
+
+/** Adds the birds of flock f (typed scratch in and out: no boxed doubles per bird). */
+function renderFlock(f, B, t) {
+  const FXg = VC.fxgl, m0 = f.models, d = f.b, n = f.n, flap = f.flap;
+  PV7[6] = f.scale * M.clamp(f.fade + 1, 0, 1);
+  T16[12] = 0; T16[13] = 0; T16[14] = f.tint; T16[15] = 0;
+  for (let k = 0; k < n; k++) {
+    const o = k * 8;
+    const m = d[o + 7] > 0.5 ? m0[1] : m0[FLAP[Math.floor(t * flap + d[o + 6] * 4) & 3]];
+    PV7[0] = d[o]; PV7[1] = d[o + 1]; PV7[2] = d[o + 2]; PV7[3] = d[o + 3]; PV7[4] = d[o + 4]; PV7[5] = d[o + 5];
+    FXg.poseV(T16, m, PV7);
+    B.addX(m, true, T16);
+  }
+}
+/** Poses agent o ({m, x, y, z, h, pitch, roll, scale, seed}) and adds it to B (coarse LOD beyond 60). */
+function poseAdd(B, o, flags, cp) {
+  PV7[0] = o.x; PV7[1] = o.y; PV7[2] = o.z; PV7[3] = o.h; PV7[4] = o.pitch; PV7[5] = o.roll; PV7[6] = o.scale;
+  VC.fxgl.poseV(T16, o.m, PV7);
+  T16[12] = flags; T16[13] = 0; T16[14] = VC.fxgl.WHITE; T16[15] = o.seed;
+  const dx = o.x - cp[0], dy = o.y - cp[1], dz = o.z - cp[2];
+  B.addX(o.m, dx * dx + dy * dy + dz * dz > 3600, T16);
+}
+/** Coarse LOD beyond 60 world units from the camera position cp. */
+function far(cp, x, y, z) {
+  const dx = x - cp[0], dy = y - cp[1], dz = z - cp[2];
+  return dx * dx + dy * dy + dz * dz > 3600;
+}
 
 /* ------------------------------------------------------------------ */
 /* World scanning                                                        */
@@ -174,7 +200,7 @@ function isWater(x, z) {
   return true;
 }
 function waterLine(x0, z0, x1, z1) {
-  const n = Math.ceil(Math.hypot(x1 - x0, z1 - z0) * 2);
+  const n = Math.ceil(hyp(x1 - x0, z1 - z0) * 2);
   for (let k = 0; k <= n; k++) if (!isWater(x0 + ((x1 - x0) * k) / n, z0 + ((z1 - z0) * k) / n)) return false;
   return true;
 }
@@ -188,7 +214,7 @@ function scan() {
     if (b.key === 'airport' && !airport) airport = b;
     else if (b.key === 'seaport' && !seaport) seaport = b;
     else if (b.key === 'hospital' || b.key === 'police_hq' || b.key === 'fire_hq') {
-      const d = Math.hypot(b.x - cam.tx, b.z - cam.tz);
+      const d = hyp(b.x - cam.tx, b.z - cam.tz);
       if (d < 90) heliBase.push({ b, d });
     }
   }
@@ -250,13 +276,20 @@ function updatePlanes(dt) {
     if (p.done || p.t > 200 || Math.abs(p.x - W / 2) > W + 120 || Math.abs(p.z - H / 2) > H + 120) planes.splice(k, 1);
   }
 }
+/** A plane with every field declared (one hidden class for crossings and airport movements). */
+function newPlane(o) {
+  const p = { ap: false, m: null, x: 0.5, y: 0.5, z: 0.5, h: 0.5, pitch: 0.5, roll: 0.5, speed: 0.5, t: 0.5, contrail: 0.5, scale: 1, seed: rnd(), onGround: false, rw: null, ux: 0, uz: 0, takeoff: false, phase: null, done: false };
+  p.x = p.y = p.z = p.h = p.pitch = p.roll = p.speed = p.t = p.contrail = 0;
+  for (const k in o) p[k] = o[k];
+  return p;
+}
 function startCrossing() {
   const a = rnd() * TAU;
   const R = Math.max(W, H) * 0.5 + 60;
   const cx = W / 2 + (rnd() - 0.5) * W * 0.5, cz = H / 2 + (rnd() - 0.5) * H * 0.5;
   const m = planeModel();
   if (!m) return;
-  planes.push({ ap: false, m, x: cx - Math.cos(a) * R, z: cz - Math.sin(a) * R, y: 28 + rnd() * 10, h: a, pitch: 0, roll: 0, speed: 9, t: 0, contrail: 0, scale: 1, seed: rnd(), onGround: false });
+  planes.push(newPlane({ ap: false, m, x: cx - Math.cos(a) * R, z: cz - Math.sin(a) * R, y: 28 + rnd() * 10, h: a, speed: 9, scale: 1, onGround: false }));
 }
 function runway(b) {
   const alongX = b.w >= b.d;
@@ -271,12 +304,12 @@ function startAirportMove(b, takeoff) {
   const s = rnd() < 0.5 ? 1 : -1; // runway direction
   const ux = r.ux * s, uz = r.uz * s;
   const h = Math.atan2(uz, ux);
-  const p = { ap: true, m, rw: r, ux, uz, h, pitch: 0, roll: 0, t: 0, scale: 0.8, seed: rnd(), takeoff };
+  const p = newPlane({ ap: true, m, rw: r, ux, uz, h, scale: 0.8, takeoff });
   if (takeoff) {
-    Object.assign(p, { phase: 'roll', x: r.cx - ux * r.L, z: r.cz - uz * r.L, y: r.y, speed: 0, onGround: true });
+    p.phase = 'roll'; p.x = r.cx - ux * r.L; p.z = r.cz - uz * r.L; p.y = r.y; p.speed = 0; p.onGround = true;
   } else {
     const D = 110;
-    Object.assign(p, { phase: 'approach', x: r.cx - ux * (r.L + D), z: r.cz - uz * (r.L + D), y: r.y + D * 0.075, speed: 6.5, onGround: false });
+    p.phase = 'approach'; p.x = r.cx - ux * (r.L + D); p.z = r.cz - uz * (r.L + D); p.y = r.y + D * 0.075; p.speed = 6.5; p.onGround = false;
   }
   planes.push(p);
 }
@@ -339,7 +372,7 @@ function spawnHeli(b) {
   const v = police ? 0 : b.key === 'hospital' ? 1 : 3;
   const m = VC.models.get('helicopter', v % ((def && def.variants) || 1));
   if (!m) return;
-  const bm = VC.models.forBuilding(b);
+  const bm = VC.fxgl.cachedModel(b); // (never builds a model synchronously; b.hgt is set once it exists)
   const roof = VC.world.topY(b.x, b.z) + ((bm && bm.height) || b.hgt || 1) + 0.05;
   const cx = b.x + b.w / 2, cz = b.z + b.d / 2;
   helis.push({ base: b, m, police, x: cx, z: cz, y: roof, roof, cx, cz, h: rnd() * TAU, pitch: 0, roll: 0, state: 0, timer: 4 + rnd() * 12, ang: rnd() * TAU, rad: 5 + rnd() * 4, alt: 5 + rnd() * 3, rotor: 0, seed: rnd() });
@@ -364,7 +397,7 @@ function updateHelis(dt) {
       const want = Math.atan2(dz, dx);
       let da = ((want - h.h + Math.PI) % TAU + TAU) % TAU - Math.PI;
       h.h += M.clamp(da, -1.2 * dt, 1.2 * dt);
-      const sp = Math.min(2.4, Math.hypot(dx, dz) * 1.5);
+      const sp = Math.min(2.4, hyp(dx, dz) * 1.5);
       h.x += Math.cos(h.h) * sp * dt;
       h.z += Math.sin(h.h) * sp * dt;
       const gy = VC.fxgl.surfaceY(h.x, h.z);
@@ -374,7 +407,7 @@ function updateHelis(dt) {
       if (h.timer <= 0) { h.state = 3; }
     } else if (h.state === 3) {
       // return to the pad and land
-      const dx = h.cx - h.x, dz = h.cz - h.z, d = Math.hypot(dx, dz);
+      const dx = h.cx - h.x, dz = h.cz - h.z, d = hyp(dx, dz);
       if (d > 0.2) {
         const want = Math.atan2(dz, dx);
         let da = ((want - h.h + Math.PI) % TAU + TAU) % TAU - Math.PI;
@@ -411,7 +444,10 @@ function newBoat(kind, x, z, h) {
   const m = boatModel(kind);
   if (!m) return null;
   const draft = ((m.meta && m.meta.draft) || 1) * m.vox;
-  const b = { kind, m, x, z, y: C.SEA_Y - draft, draft, h, pitch: 0, roll: 0, speed: 0, vmax: [0.55, 1.2, 0.8, 0.9][kind], tx: x, tz: z, wait: 0, seed: rnd(), r: Math.max(m.sx, m.sz) * m.vox * 0.6 + 0.3, wake: 0 };
+  // every field of every boat kind is declared here: one hidden class for all boats (the per-frame loops
+  // stay monomorphic; megamorphic loads of double fields would box a HeapNumber each)
+  const b = { kind, m, x, z, y: C.SEA_Y - draft, draft, h, pitch: 0.5, roll: 0.5, scale: 1, speed: 0.5, vmax: [0.55, 1.2, 0.8, 0.9][kind], tx: x, tz: z, wait: 0.5, seed: rnd(), r: Math.max(m.sx, m.sz) * m.vox * 0.6 + 0.3, wake: 0.5, stuck: 0.5, wakeSide: 1, leg: 0, toPort: false, trail: null, docked: 0.5, leaving: false, offshore: false, retry: 0.5 };
+  b.pitch = 0; b.roll = 0; b.speed = 0; b.wait = 0; b.wake = 0; b.stuck = 0; b.docked = 0; b.retry = 0; // (double fields from the start)
   boats.push(b);
   return b;
 }
@@ -428,7 +464,7 @@ function manageBoats() {
   // despawn far small boats
   for (let k = boats.length - 1; k >= 0; k--) {
     const b = boats[k];
-    if (b.kind <= 1 && Math.hypot(b.x - cam.tx, b.z - cam.tz) > 110) boats.splice(k, 1);
+    if (b.kind <= 1 && hyp(b.x - cam.tx, b.z - cam.tz) > 110) boats.splice(k, 1);
   }
   const small = boats.filter((b) => b.kind <= 1).length;
   const want = Math.min(7, Math.round(waterTiles / 350) + 1);
@@ -462,7 +498,7 @@ function findFerryRoute() {
     if (L < 9 || L >= 60 || ex < 0 || ez < 0 || ex >= W || ez >= H) continue;
     const ax = x + 0.5 + dx * 0.9, az = z + 0.5 + dz * 0.9, bx = x + 0.5 + dx * (L - 1.9), bz = z + 0.5 + dz * (L - 1.9);
     if (!waterLine(ax - dz * 0.6, az - dx * 0.6, bx - dz * 0.6, bz - dx * 0.6) || !waterLine(ax + dz * 0.6, az + dx * 0.6, bx + dz * 0.6, bz + dx * 0.6)) continue;
-    const score = L - Math.hypot(ax - cam.tx, az - cam.tz) * 0.1;
+    const score = L - hyp(ax - cam.tx, az - cam.tz) * 0.1;
     if (score > bs) { bs = score; best = { ax, az, bx, bz }; }
   }
   ferryRoute = best;
@@ -552,7 +588,7 @@ function updateBoats(dt) {
     let wantSpeed = b.vmax;
     if (b.wait > 0) { b.wait -= dt; wantSpeed = 0; }
     if (b.kind === BOAT_KIND.FERRY && ferryRoute) {
-      const d = Math.hypot(b.tx - b.x, b.tz - b.z);
+      const d = hyp(b.tx - b.x, b.tz - b.z);
       if (d < 0.6 && b.wait <= 0) {
         b.leg ^= 1;
         b.tx = b.leg ? ferryRoute.bx : ferryRoute.ax;
@@ -572,19 +608,21 @@ function updateBoats(dt) {
         if (b.docked <= 0) b.leaving = true;
       } else if (b.leaving) {
         // retrace the inbound trail
-        while (b.trail.length && Math.hypot((b.trail[b.trail.length - 1] % W) + 0.5 - b.x, ((b.trail[b.trail.length - 1] / W) | 0) + 0.5 - b.z) < 1.5) b.trail.pop();
+        while (b.trail.length && hyp((b.trail[b.trail.length - 1] % W) + 0.5 - b.x, ((b.trail[b.trail.length - 1] / W) | 0) + 0.5 - b.z) < 1.5) b.trail.pop();
         if (!b.trail.length) { boats.splice(k, 1); continue; }
         const i = b.trail[Math.max(0, b.trail.length - 3)];
         b.tx = (i % W) + 0.5; b.tz = ((i / W) | 0) + 0.5;
       } else { boats.splice(k, 1); continue; }
     } else if (b.offshore) {
-      if (Math.hypot(b.tx - b.x, b.tz - b.z) < 2) { boats.splice(k, 1); continue; }
+      if (hyp(b.tx - b.x, b.tz - b.z) < 2) { boats.splice(k, 1); continue; }
     } else {
-      // pleasure boats: new random target when reached / blocked
-      if (Math.hypot(b.tx - b.x, b.tz - b.z) < 1 || b.stuck > 3) {
+      // pleasure boats: new random target when reached / blocked (a failed search waits a moment before the
+      // next one: on small or winding waters it used to retry up to ~450 water probes every frame)
+      if (b.retry > 0) b.retry -= dt;
+      else if (hyp(b.tx - b.x, b.tz - b.z) < 1 || b.stuck > 3) {
         const p = randomWaterNear(b.x, b.z, 25);
         if (p && waterLine(b.x, b.z, p[0], p[1])) { b.tx = p[0]; b.tz = p[1]; b.stuck = 0; }
-        else b.stuck = (b.stuck || 0) + 1;
+        else { b.stuck = (b.stuck || 0) + 1; b.retry = 0.4 + rnd() * 0.4; }
         if (rnd() < 0.2) b.wait = 2 + rnd() * 4;
       }
     }
@@ -611,7 +649,7 @@ function updateBoats(dt) {
     b.pitch = Math.sin(tw * 0.8 + 1) * 0.025 * (b.kind >= 2 ? 0.3 : 1);
     b.roll = Math.sin(tw * 0.6) * 0.04 * (b.kind >= 2 ? 0.3 : 1) + (b.kind === BOAT_KIND.SAIL ? 0.12 * wx : 0);
     // wake: flat foam patches spreading in a V from the stern
-    if (VC.particles && b.speed > 0.15 && Math.hypot(b.x - cam.tx, b.z - cam.tz) < 70) {
+    if (VC.particles && b.speed > 0.15 && hyp(b.x - cam.tx, b.z - cam.tz) < 70) {
       b.wake -= dt;
       if (b.wake <= 0) {
         b.wake = 0.1 / Math.max(0.3, b.speed);
@@ -655,7 +693,8 @@ function flockTarget(f, cam) {
   return null;
 }
 function newFlock(gull, cam) {
-  const f = { gull, n: gull ? 5 + Math.floor(rnd() * 4) : 7 + Math.floor(rnd() * 7), models: birdModels(), x: 0, y: 0, z: 0, vx: 0, vz: 0, tx: 0, tz: 0, circle: 0, rad: 2, scale: gull ? 1.25 : 0.9, flap: gull ? 5 : 9, tint: gull ? VC.fxgl.WHITE : VC.fxgl.tint(0.32, 0.3, 0.3), fade: 0, leave: false };
+  const f = { gull, n: gull ? 5 + Math.floor(rnd() * 4) : 7 + Math.floor(rnd() * 7), models: birdModels(), x: 0.5, y: 0.5, z: 0.5, vx: 0.5, vz: 0.5, tx: 0, tz: 0, circle: 0.5, rad: 2, scale: gull ? 1.25 : 0.9, flap: gull ? 5 : 9, tint: gull ? VC.fxgl.WHITE : VC.fxgl.tint(0.32, 0.3, 0.3), fade: 0.5, leave: false, seedA: 0.5, b: null, p: null };
+  f.x = f.y = f.z = f.vx = f.vz = f.circle = f.fade = f.seedA = 0; // (double fields from the start: one hidden class)
   const t = flockTarget(f, cam);
   if (!t) return null;
   const a = rnd() * TAU;
@@ -686,9 +725,10 @@ function updateBirds(dt) {
   }
   for (let k = flocks.length - 1; k >= 0; k--) {
     const f = flocks[k];
-    if (!ok || Math.hypot(f.x - cam.tx, f.z - cam.tz) > 120) f.leave = true;
+    const cx = f.x - cam.tx, cz = f.z - cam.tz;
+    if (!ok || cx * cx + cz * cz > 14400) f.leave = true;
     // flock centre steering
-    const dx = f.tx - f.x, dz = f.tz - f.z, d = Math.hypot(dx, dz);
+    const dx = f.tx - f.x, dz = f.tz - f.z, d = Math.sqrt(dx * dx + dz * dz);
     const sp = f.gull ? 2.2 : 3;
     if (f.leave) {
       f.vx = M.damp(f.vx, Math.cos(f.seedA || 0) * 4, 1, dt);
@@ -719,27 +759,35 @@ function updateBirds(dt) {
     f.x += f.vx * dt;
     f.z += f.vz * dt;
     // birds orbit the centre
-    const circling = f.circle > 0 ? 1 : 0.35;
-    f.rad = 0;
-    for (let b = 0; b < f.n; b++) {
-      const p = f.p, o = b * 4, q = b * 8, B = f.b;
-      p[o] += p[o + 2] * dt * (0.8 + circling);
-      const r = p[o + 1] * (1 + circling * (f.gull ? 2 : 1.2));
-      const ox = Math.cos(p[o]) * r, oz = Math.sin(p[o]) * r;
-      const bob = Math.sin(clock * 1.7 + p[o + 3]) * 0.35;
-      B[q] = f.x + ox;
-      B[q + 1] = f.y + bob + Math.sin(p[o] * 2) * 0.2;
-      B[q + 2] = f.z + oz;
-      // heading = orbit tangent + flock velocity
-      const tvx = -Math.sin(p[o]) * r * p[o + 2] * (0.8 + circling) + f.vx;
-      const tvz = Math.cos(p[o]) * r * p[o + 2] * (0.8 + circling) + f.vz;
-      B[q + 3] = Math.atan2(tvz, tvx);
-      B[q + 4] = Math.cos(clock * 1.7 + p[o + 3]) * 0.2;
-      B[q + 5] = -0.35 * Math.sign(p[o + 2]) * circling;
-      B[q + 7] = f.gull && Math.sin(clock * 0.5 + p[o + 3]) > 0.2 ? 1 : 0; // gulls glide
-      f.rad = Math.max(f.rad, r);
-    }
+    orbitBirds(f, dt, f.circle > 0 ? 1 : 0.35);
   }
+}
+/**
+ * Per-bird orbit around the flock centre. Kept apart from the rarely taken branches of updateBirds (new
+ * flocks / targets deoptimize it now and then) so this per-bird loop stays optimized: no garbage per bird.
+ */
+function orbitBirds(f, dt, circling) {
+  const p = f.p, B = f.b, n = f.n, gull = f.gull, cl = clock;
+  const fx = f.x, fy = f.y, fz = f.z, fvx = f.vx, fvz = f.vz;
+  const spin = 0.8 + circling, spread = 1 + circling * (gull ? 2 : 1.2);
+  let rad = 0;
+  for (let b = 0; b < n; b++) {
+    const o = b * 4, q = b * 8;
+    p[o] += p[o + 2] * dt * spin;
+    const a = p[o], w = p[o + 2];
+    const r = p[o + 1] * spread;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    B[q] = fx + ca * r;
+    B[q + 1] = fy + Math.sin(cl * 1.7 + p[o + 3]) * 0.35 + Math.sin(a * 2) * 0.2;
+    B[q + 2] = fz + sa * r;
+    // heading = orbit tangent + flock velocity
+    B[q + 3] = Math.atan2(ca * r * w * spin + fvz, -sa * r * w * spin + fvx);
+    B[q + 4] = Math.cos(cl * 1.7 + p[o + 3]) * 0.2;
+    B[q + 5] = w < 0 ? 0.35 * circling : w > 0 ? -0.35 * circling : 0;
+    B[q + 7] = gull && Math.sin(cl * 0.5 + p[o + 3]) > 0.2 ? 1 : 0; // gulls glide
+    if (r > rad) rad = r;
+  }
+  f.rad = rad;
 }
 
 /* ------------------------------------------------------------------ */
@@ -757,7 +805,9 @@ function updateBalloons(dt) {
       const m = VC.models.get('balloon', Math.floor(rnd() * ((def && def.variants) || 1)));
       if (m) {
         const x = cam.tx - Math.cos(a) * 55 + (rnd() - 0.5) * 30, z = cam.tz - Math.sin(a) * 55 + (rnd() - 0.5) * 30;
-        balloons.push({ m, x, z, y: VC.fxgl.surfaceY(x, z) + 14 + rnd() * 10, h: rnd() * TAU, seed: rnd(), burn: 0, burnT: 2, fade: 0, alt: 14 + rnd() * 10 });
+        const bl = { m, x, z, y: VC.fxgl.surfaceY(x, z) + 14 + rnd() * 10, h: rnd() * TAU, seed: rnd(), burn: 0.5, burnT: 2, fade: 0.5, alt: 14 + rnd() * 10, pitch: 0, roll: 0.5, scale: 0.5 };
+        bl.burn = 0; bl.fade = 0; bl.roll = 0; bl.scale = 0.01; // (double fields from the start)
+        balloons.push(bl);
       }
     }
   }
@@ -782,7 +832,7 @@ function updateBalloons(dt) {
         VC.particles.emit('fire', P3[0], P3[1], P3[2], { vx: 0, vy: 1.5, vz: 0, size: 0.14, life: 0.3 });
       }
     }
-    const far = Math.hypot(b.x - cam.tx, b.z - cam.tz) > 100 || !nice;
+    const far = hyp(b.x - cam.tx, b.z - cam.tz) > 100 || !nice;
     b.fade = far ? b.fade - dt * 0.5 : Math.min(1, b.fade + dt * 0.5);
     if (b.fade < 0) balloons.splice(k, 1);
   }

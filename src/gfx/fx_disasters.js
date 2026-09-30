@@ -15,6 +15,9 @@
  * Per-entry visual state lives in a Map keyed by entry id and is dropped when the entry ends.
  */
 const M = VC.M, C = VC.C;
+/** Vector lengths without Math.hypot (V8's hypot allocates its argument list; these are on per-frame paths). */
+const hyp = (x, z) => Math.sqrt(x * x + z * z);
+const hyp3 = (x, y, z) => Math.sqrt(x * x + y * y + z * z);
 const TAU = Math.PI * 2;
 const T12 = new Float32Array(12), P3 = [0, 0, 0], Q3 = [0, 0, 0];
 const states = new Map();
@@ -24,6 +27,7 @@ const DEBRIS_COLS = [[0.55, 0.52, 0.48], [0.62, 0.32, 0.22], [0.45, 0.32, 0.2], 
 
 const D = (VC.fxDis = {
   init() {
+    rnd = VC.fxgl.rng(11); // (typed-state PRNG: no boxed state per call)
     initGL();
   },
   reset() {
@@ -60,6 +64,24 @@ const D = (VC.fxDis = {
 function surf(x, z) {
   return VC.fxgl.surfaceY(x, z);
 }
+/** VC.models.get memoized per (key, variant): no cache-key strings per frame. */
+const modelMemo = Object.create(null);
+function mget(key, v) {
+  const a = modelMemo[key] || (modelMemo[key] = []);
+  let m = a[v];
+  if (m === undefined) m = a[v] = VC.models.get(key, v) || null;
+  return m;
+}
+/** Glowing eye positions (model voxels): meta.eyes, else an estimate near the front top (memoized). */
+const eyeMemo = new WeakMap();
+function eyesOf(m) {
+  let e = eyeMemo.get(m);
+  if (!e) {
+    e = (m.meta && m.meta.eyes) || [[m.sx * 0.4, m.sy * 0.85, m.sz * 0.9], [m.sx * 0.6, m.sy * 0.85, m.sz * 0.9]];
+    eyeMemo.set(m, e);
+  }
+  return e;
+}
 function P() {
   return VC.particles;
 }
@@ -85,7 +107,7 @@ H.tornado = function (e, st, dt, S, B, G) {
     st.deb = new Float32Array(n * 8); // angle, radius, height, vh, angVel, size, colIdx, spin
     for (let k = 0; k < n; k++) resetDebris(st.deb, k, true);
   }
-  const deb = st.deb, cube = VC.models.get('fx_cube');
+  const deb = st.deb, cube = mget('fx_cube', 0);
   for (let k = 0; k < deb.length / 8; k++) {
     const o = k * 8;
     deb[o + 2] += deb[o + 3] * dt;
@@ -106,7 +128,7 @@ H.tornado = function (e, st, dt, S, B, G) {
   const Pt = P();
   if (Pt && dt > 0) {
     const cam = VC.camera;
-    const near = Math.hypot(e.x - cam.tx, e.z - cam.tz) < 120;
+    const near = hyp(e.x - cam.tx, e.z - cam.tz) < 120;
     if (near) {
       st.acc = (st.acc || 0) + dt * 45 * I;
       while (st.acc >= 1) {
@@ -139,10 +161,10 @@ H.meteor = function (e, st, dt, S, B, G) {
   const ix = e.ix != null ? e.ix : e.x, iz = e.iz != null ? e.iz : e.z;
   const iy = e.iy != null ? e.iy : surf(ix, iz);
   if (incoming) {
-    const m = VC.models.get('meteor');
+    const m = mget('meteor', 0);
     const sx = e.sx != null ? e.sx : mx, sy = e.sy != null ? e.sy : my + 50, sz = e.sz != null ? e.sz : mz;
     const dx = ix - sx, dy = iy - sy, dz = iz - sz;
-    const hd = Math.atan2(dz, dx), pt = Math.atan2(dy, Math.hypot(dx, dz));
+    const hd = Math.atan2(dz, dx), pt = Math.atan2(dy, hyp(dx, dz));
     if (m) {
       VC.fxgl.pose(T12, m, mx, my - m.sy * m.vox * 0.8, mz, hd + t * 2.1, t * 3.3, t * 2.7, 1.7);
       B.add(m, false, T12, VC.fxgl.F.HOT | VC.fxgl.F.UNLIT, 2.2, VC.fxgl.WHITE, 0.3);
@@ -150,7 +172,7 @@ H.meteor = function (e, st, dt, S, B, G) {
     // head glow + streak of fading glows along the recent path
     G.add(mx, my, mz, 3.2, 1, 0.55, 0.2, 5, 0, 0, 1, 0.6);
     G.add(mx, my, mz, 9, 1, 0.35, 0.08, 1.2, 0, 0, 1, 0);
-    const len = Math.hypot(dx, dy, dz) || 1;
+    const len = hyp3(dx, dy, dz) || 1;
     for (let k = 1; k <= 14; k++) {
       const b = k * 1.6;
       const f = 1 - k / 15;
@@ -162,7 +184,7 @@ H.meteor = function (e, st, dt, S, B, G) {
     // fire + smoke trail between the previous and the current position
     if (Pt && dt > 0) {
       const px = st.px != null ? st.px : mx, py = st.py != null ? st.py : my, pz = st.pz != null ? st.pz : mz;
-      const segLen = Math.hypot(mx - px, my - py, mz - pz);
+      const segLen = hyp3(mx - px, my - py, mz - pz);
       const n = Math.min(12, Math.ceil(segLen / 0.9));
       for (let k = 0; k < n; k++) {
         const f = (k + rnd()) / n;
@@ -241,14 +263,14 @@ H.earthquake = function (e, st, dt, S, B, G) {
 
 /* ---------------- UFO ---------------- */
 H.ufo = function (e, st, dt, S, B, G) {
-  const m = VC.models.get('ufo');
+  const m = mget('ufo', 0);
   const I = M.clamp(e.intensity == null ? 1 : e.intensity, 0, 1);
   const bob = Math.sin(t * 1.7) * 0.25;
   const y = (e.y || surf(e.x, e.z) + 10) + bob;
   // tilt toward the direction of motion
   const vx = st.lx != null && dt > 0 ? (e.x - st.lx) / dt : 0, vz = st.lz != null && dt > 0 ? (e.z - st.lz) / dt : 0;
   st.lx = e.x; st.lz = e.z;
-  const sp = Math.min(1, Math.hypot(vx, vz) / 4);
+  const sp = Math.min(1, hyp(vx, vz) / 4);
   st.tilt = M.damp(st.tilt || 0, sp * 0.25, 3, dt || 0.016);
   const mh = Math.atan2(vz, vx) || e.dir || 0;
   st.spin = (st.spin || 0) + dt * 2.2;
@@ -293,7 +315,7 @@ H.ufo = function (e, st, dt, S, B, G) {
   const L = e.lifting;
   if (L && L.b && !(VC.bldgfx && VC.bldgfx.handlesLift)) {
     const b = L.b;
-    const bm = VC.models.forBuilding(b);
+    const bm = VC.fxgl.cachedModel(b);
     const lift = b.disLift != null ? b.disLift : L.lift || 0;
     if (bm && lift > 0.001) {
       VC.fxgl.poseBuilding(T12, b, bm, lift, lift * 0.35 + Math.sin(t * 2) * 0.05 * Math.min(1, lift));
@@ -309,7 +331,7 @@ H.monster = function (e, st, dt, S, B, G) {
   const def = VC.models.defs.monster;
   const nv = (def && def.variants) || 1;
   const frame = Math.floor((e.step || 0) * 4) & 3;
-  const m = VC.models.get('monster', frame % nv);
+  const m = mget('monster', frame % nv);
   if (!m) return;
   const I = M.clamp(e.intensity == null ? 1 : e.intensity, 0, 1);
   const tx = Math.floor(e.x), tz = Math.floor(e.z);
@@ -323,7 +345,7 @@ H.monster = function (e, st, dt, S, B, G) {
   VC.fxgl.pose(T12, m, e.x, st.y + bob, e.z, st.h, 0, Math.sin((e.step || 0) * Math.PI * 2) * 0.04, scale);
   B.add(m, false, T12, 0, 0.1 * (e.roar || 0), VC.fxgl.WHITE, 0.7);
   // glowing eyes (model meta.eyes, else an estimate near the front top)
-  const eyes = (m.meta && m.meta.eyes) || [[m.sx * 0.4, m.sy * 0.85, m.sz * 0.9], [m.sx * 0.6, m.sy * 0.85, m.sz * 0.9]];
+  const eyes = eyesOf(m);
   const glow = 1.5 + (e.roar || 0) * 4;
   for (const ey of eyes) {
     VC.fxgl.xfPoint(T12, ey[0], ey[1], ey[2], P3);
@@ -369,7 +391,7 @@ H.monster = function (e, st, dt, S, B, G) {
     VC.fxgl.xfPoint(T12, m.sx * 0.5, m.sy * 0.74, m.sz * 0.98, P3);
     const tyy = surf(br.x, br.z) + 1;
     const dx = br.x - P3[0], dy = tyy - P3[1], dz = br.z - P3[2];
-    const len = Math.hypot(dx, dy, dz) || 1;
+    const len = hyp3(dx, dy, dz) || 1;
     const bt = br.t || 0;
     const env = bt < 1.2 ? M.smoothstep(0, 0.15, bt) : 1 - M.smoothstep(1.2, 1.5, bt);
     const n = Math.ceil(len / 0.45);

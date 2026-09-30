@@ -338,7 +338,7 @@ const I2_ARCH = [
       sawtooth(g, 0, 1 + H, 0, w, d, roofC, P.GLASS_CYAN, 4);
       // chimney(s) with stripes
       const nch = c.L >= 2 && W >= 16 ? 2 : 1;
-      for (let k = 0; k < nch; k++) K.stack(g, w + 0.5 - (k ? 0 : 0), 1, 2.5 + k * 5, 1.3, 16 + c.L * 6 - k * 4, c.Wl === 2 ? P.CHIMNEY : P.CHIMNEY_RED, P.WHITE, 'smoke', 1);
+      for (let k = 0; k < nch; k++) K.stack(g, w + 0.5, 1, 2.5 + k * 5, 1.3, c.sh(16 + c.L * 6 - k * 4), c.Wl === 2 ? P.CHIMNEY : P.CHIMNEY_RED, P.WHITE, 'smoke', 1);
       // loading doors + trucks
       dock(c, 0, d, w, Math.max(1, (w / 6) | 0));
       for (let k = 0; k < Math.max(1, (w / 6) | 0); k++) g.box(2 + k * 6, 1, d - 1, 3, 4, 1, P.CONCRETE_L);
@@ -383,7 +383,7 @@ const I2_ARCH = [
       g.box(W - 4, 1, D - 4, 3, 3, 3, P.CONCRETE_D);
       g.box(W - 4, 4, D - 4, 3, 1, 3, P.METAL_D);
       K.pipe(g, 'z', 1, D - 5, 2, W - 3, P.PIPE);
-      if (c.L >= 2) { K.stack(g, W - 1.5, 1, D - 1.5, 0.8, 14, P.METAL_D, 0, 'fire', 0.6); g.set(W - 2, 16, D - 2, P.FIRE); }
+      if (c.L >= 2) { const fh = c.sh(14); K.stack(g, W - 1.5, 1, D - 1.5, 0.8, fh, P.METAL_D, 0, 'fire', 0.6); g.set(W - 2, fh + 2, D - 2, P.FIRE); }
       K.lamp(g, 0, 1, D - 1, 4, P.LAMP_WHITE, P.METAL_D, 0.6);
     },
   },
@@ -424,7 +424,7 @@ const I2_ARCH = [
       if (w >= 12) K.tank(g, 6.5, 2 + H, 2.5, 1.5, 4, P.TANK_WHITE, accent);
       K.hvac(g, w - 5, 2 + H, 1, 3, 3);
       g.hcyl('x', 3, w - 6, 3 + H, d - 2.5, 0.8, P.PIPE);
-      K.stack(g, w - 1.5, 2 + H, d - 2.5, 1, 8 + c.L * 3, P.METAL, 0, c.Wl === 2 ? 'steam' : 'smoke', 0.8);
+      K.stack(g, w - 1.5, 2 + H, d - 2.5, 1, c.sh(8 + c.L * 3), P.METAL, 0, c.Wl === 2 ? 'steam' : 'smoke', 0.8);
       // side conveyor + dock
       dock(c, 0, d, w, 2);
       if (D - d >= 5) trucks(c, 2, d + 1, 2, 4);
@@ -449,7 +449,7 @@ const I2_ARCH = [
       // monitor (raised ridge vent)
       g.box(2, H + 3, (d >> 1) - 1, w - 4, 2, 2, P.METAL_D);
       g.box(2, H + 3, (d >> 1) - 1, w - 4, 1, 2, P.GLASS_DARK);
-      for (let k = 0; k < (W >= 16 ? 3 : 2); k++) K.stack(g, w + 1.5, 1, 1.5 + k * 3, 1, 14 + c.L * 5 - k * 2, P.CHIMNEY, P.CHIMNEY_RED, 'smoke', 1);
+      for (let k = 0; k < (W >= 16 ? 3 : 2); k++) K.stack(g, w + 1.5, 1, 1.5 + k * 3, 1, c.sh(14 + c.L * 5 - k * 2), P.CHIMNEY, P.CHIMNEY_RED, 'smoke', 1);
       // slag heap & ingots
       g.ellipsoid(W - 3, 1, D - 3, 2.2, 1.6, 1.8, P.CONCRETE_DD);
       g.box(0, 1, D - 3, 3, 1, 2, P.RUST); g.box(0, 2, D - 3, 2, 1, 2, P.METAL_D);
@@ -503,7 +503,7 @@ const I2_ARCH = [
       g.line(3, 3, D - 3, Math.round(pr + 2), 11, Math.round(pr + 1), P.YELLOW);
       g.box(Math.round(pr + 1), 8, Math.round(pr + 1), 1, 3, 1, P.BLACK);
       g.cyl(Math.round(pr + 1) + 0.5, 7, Math.round(pr + 1) + 0.5, 1.2, 1, P.METAL_D);
-      K.stack(g, W - 1.5, 1, 1.5, 0.9, 10 + c.L * 3, P.METAL_D, 0, 'smoke', 0.6);
+      K.stack(g, W - 1.5, 1, 1.5, 0.9, c.sh(10 + c.L * 3), P.METAL_D, 0, 'smoke', 0.6);
       perimeter(c, 4, 3);
       g.meta.top = top;
     },
@@ -548,10 +548,9 @@ const I3_HEAVY = [
       const g = c.g, W = c.W, D = c.D;
       yardSlab(c);
       hazardLine(g, 0, D - 1, W);
-      const s = W / 24;
       // distillation columns
       const cols = W >= 16 ? 4 : 2;
-      for (let k = 0; k < cols; k++) column(g, 2.5 + k * 3.2, 1, 3.5, 1.3, 14 + c.L * 6 + (k % 2) * 6, k % 2 ? P.METAL : P.TANK_WHITE);
+      for (let k = 0; k < cols; k++) column(g, 2.5 + k * 3.2, 1, 3.5, 1.3, c.sh(14 + c.L * 6 + (k % 2) * 6), k % 2 ? P.METAL : P.TANK_WHITE);
       // pipe racks
       for (let y of [3, 5]) K.pipe(g, 'x', 0, W, y, 6, P.PIPE);
       for (let x = 0; x < W; x += 4) g.box(x, 1, 6, 1, 5, 1, P.METAL_D);
@@ -559,7 +558,7 @@ const I3_HEAVY = [
       // tanks in the back half
       if (D >= 16) for (let k = 0; k < Math.floor(W / 8); k++) K.tank(g, 4 + k * 8, 1, D - 6, 3, 5 + c.L, P.TANK_WHITE, P.HAZARD_Y);
       // flare stack
-      const fx = W - 1.5, fz = 1.5, fh = Math.round((22 + c.L * 8) * Math.max(0.7, s));
+      const fx = W - 1.5, fz = 1.5, fh = c.sh(22 + c.L * 8);
       K.stack(g, fx, 1, fz, 0.8, fh, P.METAL_D, P.RED, 'fire', 1.2);
       g.set(Math.floor(fx), fh + 2, Math.floor(fz), P.FIRE);
       g.light(fx, fh + 2.5, fz, [1, 0.55, 0.15], 1.6, true);
@@ -572,10 +571,20 @@ const I3_HEAVY = [
     build(c) {
       const g = c.g, W = c.W, D = c.D;
       yardSlab(c);
-      const n = W >= 24 ? 2 : 1, r = W >= 16 ? Math.min(6, W / (2 * n) - 1) : 3.5;
+      if (W < 16 || D < 16) {
+        // compact: one small tower at the back, pump house + stack at the front
+        const r = Math.min(W, D) * 0.32;
+        coolingTower(g, W / 2, 1, r + 0.5, r, Math.round(r * 3.4 + c.L * 2));
+        g.box(0, 1, D - 3, W - 2, 3, 3, P.CONCRETE);
+        g.box(0, 4, D - 3, W - 2, 1, 3, P.METAL_D);
+        g.box(1, 2, D - 1, W - 4, 1, 1, P.WIN);
+        K.stack(g, W - 1, 1, D - 1.5, 0.8, 8 + c.L * 3, P.CHIMNEY, P.CHIMNEY_RED, 'smoke', 0.7);
+        return;
+      }
+      const n = W >= 24 ? 2 : 1, r = W >= 24 ? Math.min(6, W / (2 * n) - 1) : 4;
       for (let k = 0; k < n; k++) coolingTower(g, W / (2 * n) * (2 * k + 1), 1, r + 1, r, Math.round(r * 3.2 + c.L * 3));
       // turbine hall
-      const hz = Math.ceil(r * 2 + 3), hd = Math.max(3, D - hz - 2);
+      const hz = Math.ceil(r * 2 + 3), hd = Math.max(3, D - hz - 3);
       g.box(0, 1, hz, W, 6 + c.L, hd, P.CONCRETE);
       K.facade(g, 0, 1, hz, W, 6 + c.L, hd, (u, v, f, len) => (u % 4 === 2 && v >= 2 && v <= 4 ? P.WIN : v === 5 + c.L ? P.STEEL_BLUE : 0));
       g.box(0, 7 + c.L, hz, W, 1, hd, P.METAL_D);
@@ -591,7 +600,7 @@ const I3_HEAVY = [
       const g = c.g, W = c.W, D = c.D;
       yardSlab(c);
       // blast furnace: tall tapered cylinder with bustle pipe and skip hoist
-      const bx = 4.5, bz = 4.5, H = 16 + c.L * 6;
+      const bx = Math.min(4.5, W / 2 - 0.5), bz = Math.min(4.5, D / 2 - 0.5), H = c.sh(16 + c.L * 6);
       for (let k = 0; k < H; k++) g.cyl(bx, 1 + k, bz, 3 - (k / H) * 1.6, 1, k % 6 === 5 ? P.RUST : P.METAL_D);
       g.cyl(bx, 1 + H, bz, 1.2, 4, P.METAL_D);
       g.emit(bx, 6 + H, bz, 'smoke', 1.2);
@@ -603,7 +612,7 @@ const I3_HEAVY = [
       shed(c, 0, sz, W, D - sz - 1, { wall: P.RUST, roof: P.METAL_D, doors: 2, h: 6, rib: P.METAL_D });
       g.box(1, 1, sz - 1, 3, 2, 1, P.FIRE);
       g.light(2.5, 2, sz - 0.5, [1, 0.45, 0.1], 1.2, true);
-      for (let k = 0; k < 2; k++) K.stack(g, W - 1.5 - k * 3, 1, 1.5, 1, 20 + c.L * 6, P.CHIMNEY, P.CHIMNEY_RED, 'smoke', 1);
+      for (let k = 0; k < 2; k++) K.stack(g, W - 1.5 - k * 3, 1, 1.5, 1, c.sh(20 + c.L * 6), P.CHIMNEY, P.CHIMNEY_RED, 'smoke', 1);
       g.ellipsoid(W - 4, 1, sz - 3, 2.4, 1.8, 2, P.CONCRETE_DD); // coke pile
     },
   },
@@ -619,11 +628,11 @@ const I3_HEAVY = [
         for (const [a, b] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) g.box(Math.floor(cx + a * sr * 0.6), 1, Math.floor(cz + b * sr * 0.6), 1, Math.ceil(sr), 1, P.METAL_D);
         g.sphere(cx, sr + 2, cz, sr, c.pk(0, [P.TANK_WHITE, P.WHITE, P.METAL]));
       }
-      for (let k = 0; k < 3; k++) column(g, 3 + k * 3, 1, D - 7, 1, 10 + c.L * 4 + k * 2, P.METAL);
+      for (let k = 0; k < 3; k++) column(g, 3 + k * 3, 1, D - 7, 1, c.sh(10 + c.L * 4 + k * 2), P.METAL);
       for (let y = 3; y <= 9; y += 3) K.pipe(g, 'x', 0, W, y, D - 4, y === 6 ? P.CONTAINER_G : P.PIPE);
       for (let x = 0; x < W; x += 5) { g.box(x, 1, D - 4, 1, 9, 1, P.METAL_D); g.line(x, 9, D - 4, x, 9, 8, P.PIPE); }
-      K.stack(g, W - 2, 1, D - 9, 1, 18 + c.L * 5, P.METAL_D, P.HAZARD_Y, 'smoke', 0.8);
-      g.emit(3, 11 + c.L * 4, D - 7, 'steam', 0.8);
+      K.stack(g, W - 2, 1, Math.max(1.5, D - 9), 1, c.sh(18 + c.L * 5), P.METAL_D, P.HAZARD_Y, 'smoke', 0.8);
+      g.emit(3, c.sh(10 + c.L * 4) + 2, D - 7, 'steam', 0.8);
       K.lamp(g, W - 1, 1, D - 1, 5, P.LAMP_WHITE, P.METAL_D, 0.8);
       hazardLine(g, 0, D - 1, W);
     },

@@ -53,7 +53,14 @@ K.crop = function (g) {
 K.finish = function (g, style, extra) {
   g.meta.style = style;
   if (extra) Object.assign(g.meta, extra);
-  return K.crop(g);
+  const o = K.crop(g);
+  // keep glow sprites / emitters inside the model bounds (they may sit on a voxel's outer face)
+  for (const l of o.lights.concat(o.emitters)) {
+    l.x = M.clamp(l.x, 0, o.sx);
+    l.z = M.clamp(l.z, 0, o.sz);
+    l.y = M.clamp(l.y, 0, o.sy + 2);
+  }
+  return o;
 };
 
 /** Fills the lot slab (y = 0). */
@@ -617,8 +624,8 @@ K.billboard = function (g, x, y, z, w, h, rng, face = 0, posts = 2) {
     }
   }
   const rgb = K.glowRGB(bg);
-  if (face === 0) g.light(x + w / 2, y + h / 2, z + 1.5, rgb, 0.5 + w * 0.1);
-  else g.light(x + 1.5, y + h / 2, z + w / 2, rgb, 0.5 + w * 0.1);
+  if (face === 0) g.light(x + w / 2, y + h / 2, z + 1.2, rgb, 0.5 + w * 0.1);
+  else g.light(x + 1.2, y + h / 2, z + w / 2, rgb, 0.5 + w * 0.1);
 };
 
 /* ------------------------------------------------------------------ */
@@ -739,6 +746,31 @@ K.roofPool = function (g, x, y, z, w, d, deck = P.WHITE) {
   K.ring(g, x, y + 1, z, w, d, P.GLASS_CYAN);
   g.box(x + 1, y + 1, z, w - 2, 1, 1, 0);
 };
+/**
+ * Dresses a large flat roof [x,x+w) x [z,z+d) at height y (first free layer) with equipment
+ * laid out on a ~6-voxel grid: HVAC, water tanks, skylights, garden patches, solar or
+ * vents. Deterministic from seed; `rich` favours gardens & solar. Leaves a 1-voxel margin.
+ */
+K.roofDress = function (g, x, y, z, w, d, seed, rich = false, tanks = true) {
+  const cw = 5, nx = Math.max(1, Math.floor((w - 1) / cw)), nz = Math.max(1, Math.floor((d - 1) / cw));
+  for (let j = 0; j < nz; j++)
+    for (let i = 0; i < nx; i++) {
+      const cx = x + 1 + i * cw, cz = z + 1 + j * cw, h = M.hashU(i, j, seed);
+      const kind = h % (rich ? 7 : 6);
+      if (cx + 4 > x + w || cz + 4 > z + d) continue;
+      switch (kind) {
+        case 0: K.hvac(g, cx, y, cz, 3, 2); break;
+        case 1: if (tanks) K.waterTank(g, cx, y, cz, (h >> 4) & 1 ? P.WOOD : P.WOOD_D); else K.hvac(g, cx, y, cz, 2, 3); break;
+        case 2: g.box(cx, y, cz, 4, 1, 3, P.GLASS_CYAN); g.box(cx, y, cz + 1, 4, 1, 1, P.METAL); break; // skylight
+        case 3: g.box(cx, y, cz, 1, 2, 1, P.METAL_D); g.box(cx + 2, y, cz + 1, 1, 2, 1, P.METAL_D); break; // vents
+        case 4: K.ac(g, cx, y, cz, 'x'); K.ac(g, cx, y, cz + 2, 'x'); g.box(cx + 3, y, cz, 1, 1, 3, P.PIPE); break;
+        case 5: g.box(cx, y, cz, 2, 3, 2, P.CONCRETE_D); g.set(cx, y + 1, cz + 1, P.METAL_D); break; // stair hatch
+        default: // garden patch (rich) or solar
+          if ((h >> 5) & 1) { g.box(cx, y, cz, 4, 1, 4, P.GRASS); g.set(cx + 1, y + 1, cz + 1, P.HEDGE); g.set(cx + 2, y + 1, cz + 2, P.FLOWER_P); }
+          else K.solar(g, cx, y, cz, 4, 4);
+      }
+    }
+};
 /** Mechanical penthouse with vents; returns top y. */
 K.penthouse = function (g, x, y, z, w, h, d, c = P.CONCRETE_D) {
   g.box(x, y, z, w, h, d, c);
@@ -781,6 +813,10 @@ function lotCtx(key, rng, v, p, H) {
     ids: [],
   };
   for (let i = 0; i < 16; i++) c.ids.push(id.int(0, 1 << 20));
+  /** Height scale for tall industrial elements: 0.58 on 1-tile lots, 0.82 on 2, 1 on 3+. */
+  c.hs = Math.min(1, Math.sqrt(Math.min(c.W, c.D) / 24));
+  /** Scales a height by c.hs (rounded, at least 3). */
+  c.sh = (h) => Math.max(3, Math.round(h * c.hs));
   c.occ = new Uint8Array(c.W * c.D);
   /** Identity pick #k from a list, or from lists[wealth] when given per-wealth lists. */
   c.pk = (k, lists) => {
@@ -1012,17 +1048,26 @@ K.crane = function (g, x, y, z, h, jib, dir = 1, c = P.YELLOW, load = true) {
   }
   return ty + 7;
 };
-/** Scaffold frame around the box [x,x+w) x [z,z+d) from y to y+h (1 voxel outside). */
-K.scaffold = function (g, x, y, z, w, h, d, c = P.ORANGE) {
+/**
+ * Scaffold frame 1 voxel outside the box [x,x+w) x [z,z+d) from y to y+h.
+ * faces: bitmask 1 front (+Z), 2 right (+X), 4 back, 8 left.
+ */
+K.scaffold = function (g, x, y, z, w, h, d, c = P.ORANGE, faces = 15) {
   for (let yy = y; yy < y + h; yy++) {
     const deck = (yy - y) % 3 === 2;
     for (let i = -1; i <= w; i++) {
-      const post = i === -1 || i === w || i % 3 === 0;
-      if (deck || post) { g.set(x + i, yy, z - 1, deck ? P.WOOD_L : c); g.set(x + i, yy, z + d, deck ? P.WOOD_L : c); }
+      const post = i === -1 || i === w || i % 4 === 0;
+      if (!deck && !post) continue;
+      const col = deck ? P.WOOD_L : c;
+      if (faces & 1) g.set(x + i, yy, z + d, col);
+      if (faces & 4) g.set(x + i, yy, z - 1, col);
     }
     for (let j = 0; j < d; j++) {
-      const post = j % 3 === 0;
-      if (deck || post) { g.set(x - 1, yy, z + j, deck ? P.WOOD_L : c); g.set(x + w, yy, z + j, deck ? P.WOOD_L : c); }
+      const post = j % 4 === 0;
+      if (!deck && !post) continue;
+      const col = deck ? P.WOOD_L : c;
+      if (faces & 2) g.set(x + w, yy, z + j, col);
+      if (faces & 8) g.set(x - 1, yy, z + j, col);
     }
   }
 };
@@ -1045,16 +1090,28 @@ VC.models.define('construction', {
     const bx = 2, bz = 2, bw = W - 4 - (big > 1 ? 2 : 0), bd = D - 5;
     const floors = v === 0 ? 1 + big : 2 + big * 2;
     const fh = 3, core = floors * fh;
+    // open concrete frame: columns on a 3-voxel grid, slabs per floor; the top slab is half poured
     for (let f = 0; f < floors; f++) {
-      const y = 1 + f * fh;
-      g.box(bx, y + fh - 1, bz, bw, 1, bd, P.CONCRETE); // slab
-      for (let i = 0; i < bw; i += 3) for (let j = 0; j < bd; j += Math.max(1, bd - 1)) g.box(bx + i, y, bz + j, 1, fh - 1, 1, P.CONCRETE_D);
-      g.box(bx + bw - 1, y, bz + bd - 1, 1, fh - 1, 1, P.CONCRETE_D);
+      const y = 1 + f * fh, top = f === floors - 1;
+      g.box(bx, y + fh - 1, bz, top ? Math.ceil(bw / 2) : bw, 1, bd, P.CONCRETE);
+      if (f < floors - 2) {
+        // lower floors are closed in (work progresses bottom-up): solid block with brick infill
+        // on the back & sides (the front stays behind the scaffold) — solid avoids hidden faces
+        g.box(bx, y, bz, bw, fh - 1, bd, P.CONCRETE_D);
+        K.facade(g, bx, y, bz, bw, fh - 1, bd, (u, vv) => (u % 3 ? (vv === 1 && u % 3 === 1 ? P.WIN : P.BRICK) : 0), 15);
+      } else {
+        // open frame: perimeter columns every 3, interior every 6
+        for (let i = 0; i < bw; i += 3) for (let j = 0; j < bd; j += 3) {
+          const edge = i === 0 || j === 0 || i + 3 >= bw || j + 3 >= bd;
+          if (edge || (i % 6 === 0 && j % 6 === 0)) g.box(bx + i, y, bz + j, 1, fh - 1, 1, P.CONCRETE_D);
+        }
+        for (let i = 0; i < bw; i += 3) g.box(bx + i, y, bz + bd - 1, 1, fh - 1, 1, P.CONCRETE_D);
+      }
     }
-    // stair / elevator core and rebar on top
+    for (let i = 0; i < bw; i += 3) for (let j = 0; j < bd; j += 6) g.box(bx + i, core, bz + j, 1, 2, 1, P.RUST); // rebar
+    // stair / elevator core
     g.box(bx + 1, 1, bz + 1, 2, core + 2, 2, P.CONCRETE_L);
-    for (let i = 0; i < bw; i += 2) g.set(bx + i, core + 1, bz, P.RUST);
-    if (v === 1 || big > 1) K.scaffold(g, bx, 1, bz, bw, core, bd);
+    K.scaffold(g, bx, 1, bz, bw, core, bd, P.ORANGE, v === 1 || big > 1 ? 9 : 1);
     // material piles in the front yard
     const fy = D - 2;
     K.crates(g, 1, 1, fy - 1, 2, 1, 1, P.WOOD_L);

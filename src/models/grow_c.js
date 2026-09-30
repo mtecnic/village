@@ -335,8 +335,11 @@ const C2_ARCH = [
       y += (F - 1) * 4;
       g.box(t.x, y, t.z, t.w, 1, t.d, P.CONCRETE_D);
       K.ring(g, t.x, y + 1, t.z, t.w, t.d, wall);
-      K.hvac(g, t.x + 1, y + 1, t.z + 1, Math.min(4, t.w - 2), Math.min(4, t.d - 2));
-      if (t.w >= 8) K.penthouse(g, t.x + t.w - 4, y + 1, t.z + 1, 3, 3, 3);
+      if (t.w >= 14 && t.d >= 12) K.roofDress(g, t.x + 1, y + 1, t.z + 1, t.w - 2, t.d - 3, c.ids[6], c.Wl === 2, false);
+      else {
+        K.hvac(g, t.x + 1, y + 1, t.z + 1, Math.min(4, t.w - 2), Math.min(4, t.d - 2));
+        if (t.w >= 8) K.penthouse(g, t.x + t.w - 4, y + 1, t.z + 1, 3, 3, 3);
+      }
       if (c.L >= 2) K.sign(g, t.x + 1, y + 1, t.z + t.d - 1, t.w - 2, 2, c.pk(1, [P.SIGN_WHITE, P.NEON_BLUE, P.NEON_CYAN, P.NEON_RED]), 0, c.rng, 0, true);
     },
   },
@@ -369,6 +372,7 @@ const C2_ARCH = [
       g.light(1.5, 6 + bh / 2, bd + 0.8, K.glowRGB(neon), 1.1);
       if (c.L >= 2 && W >= 8) K.billboard(g, 2, topY + 3, bd - 3, Math.min(W - 4, 10), 4, c.rng, 0, 2);
       else roofJunk(c, 1, topY + 1, 1, W - 2, bd - 2, 2);
+      if (W >= 16 && bd >= 12) K.roofDress(g, 1, topY + 1, 1, W - 2, bd - 6, c.ids[6], c.Wl === 2, false);
     },
   },
   {
@@ -554,6 +558,12 @@ const C2_ARCH = [
       const top = 4 + F * fh;
       g.box(0, top, 0, W, 1, bd, P.CONCRETE_L);
       K.ring(g, 0, top + 1, 0, W, bd, P.CONCRETE);
+      // open top deck: bay stripes + a few cars
+      for (let z = 1; z + 3 < bd; z += 4)
+        for (let x = 1; x + 2 < W - 3; x += 3) {
+          g.set(x + 2, top, z, P.ROAD_MARK);
+          if (M.hash(x, z, c.v + 17) < 0.4) K.car(g, x, top + 1, z, 'z', K.carColor(c.rng));
+        }
       K.lamp(g, 1, top + 1, 1, 3, P.LAMP_WHITE, P.METAL_D, 0.7);
       if (W >= 8) K.lamp(g, W - 2, top + 1, bd - 2, 3, P.LAMP_WHITE, P.METAL_D, 0.7);
       // stair tower with the P sign

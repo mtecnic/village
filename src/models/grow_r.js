@@ -652,9 +652,10 @@ const R2_ARCH = [
         if (r === 3) return trim;
         return 0;
       });
-      // cornice
+      // cornice around a tar roof
       const top = 1 + F * 4;
       g.box(0, top, z0, W, 1, bd + 1, trim);
+      g.box(1, top, z0 + 1, W - 2, 1, bd - 2, P.ROOF_GREY);
       for (let x = 0; x < W; x += 2) g.set(x, top - 1, fz, trim);
       K.ring(g, 0, top + 1, z0, W, bd, brick);
       // fire escape (front)
@@ -671,10 +672,13 @@ const R2_ARCH = [
       // steps + lamps
       g.box(du - (W >= 16 ? 1 : 0), 0, fz, W >= 16 ? 2 : 1, 1, 1, P.STONE);
       K.wallLight(g, du + 1, 3, fz, P.LAMP, 0.4);
-      // roof: water tank, hatch
-      if (bd >= 6) K.waterTank(g, c.bit(4) ? W - 5 : 1, top + 1, z0 + 1, c.Wl === 2 ? P.WOOD : P.WOOD_D);
-      g.box(c.bit(4) ? 1 : W - 3, top + 1, z0 + bd - 3, 2, 2, 2, P.CONCRETE_D);
-      if (c.L === 3 && W >= 16) K.ac(g, W >> 1, top + 1, z0 + 2);
+      // roof: water tank + hatch on small lots, a dressed roof on big ones
+      if (W >= 16 && bd >= 12) K.roofDress(g, 1, top + 1, z0 + 1, W - 2, bd - 2, c.ids[6], c.Wl === 2);
+      else {
+        if (bd >= 6) K.waterTank(g, c.bit(4) ? W - 5 : 1, top + 1, z0 + 1, c.Wl === 2 ? P.WOOD : P.WOOD_D);
+        g.box(c.bit(4) ? 1 : W - 3, top + 1, z0 + bd - 3, 2, 2, 2, P.CONCRETE_D);
+        if (c.L === 3 && W >= 16) K.ac(g, W >> 1, top + 1, z0 + 2);
+      }
       frontStrip(c, fz, [du]);
       if (z0 > 1) backGarden(c, z0);
     },
@@ -840,6 +844,7 @@ const R2_ARCH = [
       g.box(0, top, z0, W, 1, bd, P.CONCRETE_DD);
       g.box(1, top + 1, z0 + 1, 3, 3, 3, wall); // elevator housing
       for (let k = 0; k < 2 + c.L; k++) { const x = 5 + k * 2; if (x < W - 1) { g.box(x, top + 1, z0 + 2, 1, 3, 1, P.METAL_D); g.set(x, top + 4, z0 + 2, P.METAL); } }
+      if (W >= 16 && bd >= 10) K.roofDress(g, 1, top + 1, z0 + 5, W - 2, bd - 6, c.ids[6], c.Wl === 2, false);
       // satellite dishes
       for (let k = 0; k < 3 + c.L; k++) { const u = 1 + ((M.hashU(k, 7, c.v) >> 4) % (W - 2)), fl = 1 + ((M.hashU(k, 9, c.v) >> 4) % Math.max(1, F - 1)); g.set(u, 2 + fl * 3, fz, P.WHITE); }
       g.box(0, 0, fz, W, 1, D - fz, P.SIDEWALK);
@@ -874,7 +879,8 @@ const R2_ARCH = [
         g.light(W / 2, top + 4, z0 + bd - 0.5, [1, 0.8, 0.5], 0.9);
         if (c.Wl === 2) K.planter(g, W - 3, top + 2, z0 + 1, 2, bd - 3);
       }
-      if (bd >= 7 && c.L >= 2) K.waterTank(g, W - 5, top + 2, z0 + 1, P.WOOD);
+      if (c.Wl === 0 && W >= 16 && bd >= 12) K.roofDress(g, 1, top + 1, z0 + 1, W - 2, bd - 2, c.ids[6], false);
+      else if (bd >= 7 && c.L >= 2) K.waterTank(g, W - 5, top + 2, z0 + 1, P.WOOD);
       g.box(0, 0, fz, W, 1, D - fz, P.SIDEWALK);
       g.box(W >> 1, 1, fz - 1, 1, 3, 1, P.STEEL_BLUE);
       K.wallLight(g, (W >> 1) + 1, 4, fz, P.LAMP, 0.45);

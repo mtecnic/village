@@ -14,7 +14,10 @@
  *   traffic lights two poles on opposite corners of every street/avenue intersection (>= 3 links); one
  *                  shows the X-axis aspect, the other (rotated) the Z-axis aspect. The aspect follows
  *                  VC.agents.signal(x, z) (0 X green, 1 X yellow, 2 Z green, 3 Z yellow) or a local
- *                  11 s cycle, by switching model variants (0 red, 1 green, 2 yellow) + glowing heads.
+ *                  11 s cycle, by switching model variants + glowing heads: the nature model's 4 variants
+ *                  (main head / pole head: red/green, green/red, yellow/red, red/yellow) through
+ *                  VC.natureKit.signalVariant(phase, rot), so both heads of a pole always agree with the phase;
+ *                  the local fallback model has 3 (0 red, 1 green, 2 yellow).
  *   hydrants       sparse, on street sidewalks between lamps (if a 'hydrant' model exists).
  *   pylons         on power-line tiles at ends, corners, junctions and every 3rd tile of straight runs
  *                  (not on roads / buildings / water), oriented across the line (45 deg at corners).
@@ -23,8 +26,12 @@
  * Models 'streetlamp', 'traffic_light', 'pylon' come from the nature models; simple fallbacks are
  * registered in init() only if those keys are missing.
  *
+ * Props end at their LOD-1 mesh (no 1/4-res tier) and are culled well before they shrink below a pixel
+ * (VC.bldgfx skip table); lamp and signal glows are sprites and stay visible farther out.
+ *
  * API (VC.props): init(), reset(S), update(dt, rdt) / tick(dt, rdt) (VC.bldgfx sets props.driven and calls
- *   tick), rebuild(x0, z0, x1, z1) (queue a rect), stats.
+ *   tick), rebuild(x0, z0, x1, z1) (queue a rect), stats, lampReach (world units the lamp head overhangs the
+ *   road from the pole at a lamp spot, ~0.2: the terrain's light pools belong that far toward the road).
  */
 const M = VC.M, C = VC.C;
 const DX = [1, -1, 0, 0], DZ = [0, 0, 1, -1];
@@ -36,6 +43,7 @@ const PR = (VC.props = {
   name: 'props',
   order: 150,
   stats: { lamps: 0, lights: 0, pylons: 0, hydrants: 0, wires: 0, queued: 0 },
+  lampReach: 0.2,
 
   init() {
     if (inited || !VC.bldgfx || !VC.bldgfx.eng || !VC.gfx.gl) return;
@@ -224,14 +232,26 @@ function resolveModels() {
   mw.lamp2 = E.mw(getModel('streetlamp', 1), K.PROP) || mw.lamp;
   const pools = !(VC.terrain && VC.terrain.lampSpots);
   for (const w of [mw.lamp, mw.lamp2]) if (w) w.pool = pools;
-  mw.tl = [0, 1, 2].map((v) => E.mw(getModel('traffic_light', v), K.PROP));
+  // head overhang toward the road (model front = +Z), averaged over the lamp styles
+  let reach = 0, nr = 0;
+  for (const w of [mw.lamp, mw.lamp2]) {
+    const m = w && w.m, h = m && m.meta && m.meta.head;
+    if (h) { reach += (h[2] - m.sz / 2) * m.vox; nr++; }
+  }
+  if (nr) PR.lampReach = +(reach / nr).toFixed(3);
+  const def = VC.models.defs.traffic_light;
+  const nv = Math.min(4, (def && def.variants) || 3);
+  tlKit = nv >= 4 && VC.natureKit && VC.natureKit.signalVariant ? VC.natureKit.signalVariant : null;
+  mw.tl = [];
+  for (let v = 0; v < nv; v++) mw.tl.push(E.mw(getModel('traffic_light', v), K.PROP));
   for (const w of mw.tl) if (w) w.noStaticLights = true; // aspect changes: glow heads are dynamic sprites
   mw.pylon = E.mw(getModel('pylon', 0), K.PROP);
   if (mw.pylon) E.setSkip(mw.pylon, 3.2, 1.6, 1.3);
   mw.hydrant = E.mw(getModel('hydrant', 0), K.PROP);
   if (mw.hydrant) E.setSkip(mw.hydrant, 0.55, 0.25, 0);
-  for (const w of mw.tl) if (w) E.setSkip(w, 1.5, 0.5, 0);
+  for (const w of mw.tl) if (w) E.setSkip(w, 1.0, 0.45, 0);
 }
+let tlKit = null; // VC.natureKit.signalVariant when the 4-variant nature model is in use
 
 /* ------------------------------------------------------------------ */
 /* Placement                                                            */
@@ -426,31 +446,44 @@ function phaseAt(x, z) {
   const t = (signalClock + M.hash(x, z, 77) * 11) % 11;
   return t < 4.8 ? 0 : t < 5.5 ? 1 : t < 10.3 ? 2 : 3;
 }
+const TL_COL = [1, 0.3, 0.2];
+/**
+ * Switches every traffic light to the variant of its intersection phase and adds the glowing heads of the nearby
+ * visible ones as dynamic sprites (written straight into the engine's sprite array: no per-light allocations).
+ */
 function updateSignals(rdt) {
   signalClock += rdt * (VC.state && VC.state.time.speed ? 1 : 0.35);
   if (!tls.size) return;
-  const cam = VC.camera.pos;
+  const cam = VC.camera.pos, cx = cam[0], cz = cam[2];
   const D = E.data();
   const night = (VC.gfx.env && VC.gfx.env.night) || 0;
+  const k = 0.5 + 0.5 * night;
+  const kit = tlKit, TL = mw.tl, SF = E.SLOT_F;
   for (const r of tls) {
     const ph = phaseAt(r.x, r.z);
-    const v = r.zAxis ? (ph === 2 ? 1 : ph === 3 ? 2 : 0) : ph === 0 ? 1 : ph === 1 ? 2 : 0;
-    const w = mw.tl[v] || mw.tl[0];
+    // nature model: variant by (phase, quarter turn); fallback model: 0 red, 1 green, 2 yellow for this pole's axis
+    const v = kit ? kit(ph, r.zAxis ? 1 : 0) : r.zAxis ? (ph === 2 ? 1 : ph === 3 ? 2 : 0) : ph === 0 ? 1 : ph === 1 ? 2 : 0;
+    const w = TL[v] || TL[0];
     if (v !== r.v) {
       r.v = v;
       E.setModel(r.slot, w);
     }
     // glowing lamp heads nearby
-    if (!w || !w.lights || !E.cellSeen(r.x, r.z)) continue;
-    const o = r.slot * E.SLOT_F;
-    const dx = D[o] - cam[0], dz = D[o + 2] - cam[2];
+    const L = w && w.lights;
+    if (!L || !E.cellSeen(r.x, r.z)) continue;
+    const o = r.slot * SF;
+    const dx = D[o] - cx, dz = D[o + 2] - cz;
     if (dx * dx + dz * dz > 110 * 110) continue;
     const yaw = D[o + 3], sc = D[o + 4] * D[o + 14], c = Math.cos(yaw), s = Math.sin(yaw);
-    for (const l of w.lights) {
-      const lx = (l.x - D[o + 12]) * sc, lz = (l.z - D[o + 13]) * sc;
-      const col = l.color || [1, 0.3, 0.2];
-      const k = 0.5 + 0.5 * night;
-      E.dynSprite(D[o] + lx * c + lz * s, D[o + 1] + l.y * sc, D[o + 2] - lx * s + lz * c, (l.size || 0.5) * 0.3, col[0] * k, col[1] * k, col[2] * k, 1);
+    const px = D[o], py = D[o + 1], pz = D[o + 2], mx = D[o + 12], mz = D[o + 13];
+    let q = E.dynReserve(L.length);
+    const A = E.dynArray();
+    for (let i = 0; i < L.length; i++, q += 8) {
+      const l = L[i];
+      const lx = (l.x - mx) * sc, lz = (l.z - mz) * sc;
+      const col = l.color || TL_COL;
+      A[q] = px + lx * c + lz * s; A[q + 1] = py + l.y * sc; A[q + 2] = pz - lx * s + lz * c; A[q + 3] = (l.size || 0.5) * 0.3;
+      A[q + 4] = col[0] * k; A[q + 5] = col[1] * k; A[q + 6] = col[2] * k; A[q + 7] = 1;
     }
   }
 }

@@ -30,13 +30,18 @@
  *     gen(rng, variant, params) { ... return grid; },   // build and return a VoxelGrid
  *     parts: [{ model:'wind_rotor', pivot:[x,y,z], partPivot:[x,y,z], axis:'x'|'y'|'z', speed: radPerSec }],
  *     sized: false,                        // true: forBuilding passes params {fw, fd} (e.g. 'rubble')
+ *     lodMinFill: 3,                       // LOD-1 downsample keeps blocks with >= this many voxels (1 for poles)
+ *     openFoliage: false,                  // true (deciduous trees): also builds model.winter, meshes whose wood
+ *                                          // faces touching leaves exist too (a hidden branch skeleton shows when
+ *                                          // the renderer drops the leaves); the summer meshes stay lean
  *   })
  *   PARTS: an animated sub-model. pivot = attachment point in the PARENT grid (voxels);
  *   partPivot = rotation center in the PART grid (voxels). Renderer draws the part with
  *   world = parentTransform * T(pivot) * Rot(axis, time*speed [* wind for anim 'wind']) * T(-partPivot).
  *   VC.models.get(key, variant, params) -> Model (generated, meshed, uploaded on first use; cached)
  *   Model = { key, variant, params, sx, sy, sz, vox, height, quads, vao, vbo, lod:{quads,vao,vbo},
- *             emitters:[{x,y,z,type}], lights:[{x,y,z,color,size}], parts }
+ *             emitters:[{x,y,z,type}], lights:[{x,y,z,color,size}], parts,
+ *             winter?:{quads,vao,vbo,lod} (openFoliage models: meshes with the wood under the leaves) }
  *
  * BUILDING MODEL CONVENTIONS:
  *   - A building of unrotated footprint fw x fd tiles is a grid of exactly (fw*8) x H x (fd*8) voxels.
@@ -102,7 +107,7 @@ const E = MAT.EMISSIVE | MAT.NOSNOW, N = MAT.NIGHTLIGHT | MAT.NOSNOW;
   // nature
   ['GRASS', '#5a9a3a'], ['GRASS_D', '#3e7a2a'], ['GRASS_L', '#7ab84a'],
   ['LEAF', '#3e8a34', MAT.FOLIAGE], ['LEAF_D', '#2a6a2a', MAT.FOLIAGE], ['LEAF_L', '#6aaa3a', MAT.FOLIAGE], ['LEAF_Y', '#a8b83a', MAT.FOLIAGE],
-  ['PINE', '#2a5a3a', MAT.FOLIAGE], ['PINE_D', '#1e4a30', MAT.FOLIAGE], ['BIRCH_LEAF', '#8ac04a', MAT.FOLIAGE], ['PALM', '#4a9a3a', MAT.FOLIAGE],
+  ['PINE', '#2f6a44', MAT.FOLIAGE], ['PINE_D', '#255a3a', MAT.FOLIAGE], ['BIRCH_LEAF', '#8ac04a', MAT.FOLIAGE], ['PALM', '#4a9a3a', MAT.FOLIAGE],
   ['HEDGE', '#3a7a34', MAT.FOLIAGE], ['TRUNK', '#6a4a2a'], ['TRUNK_BIRCH', '#e0dccc'],
   ['FLOWER_R', '#e83a4a'], ['FLOWER_Y', '#f8d83a'], ['FLOWER_P', '#e87ab8'], ['FLOWER_V', '#9a5ad8'], ['FLOWER_W', '#f4f4f4'],
   ['SOIL', '#6a4a30'], ['SAND', '#dcc890'], ['ROCK', '#7e7a74'],
@@ -332,8 +337,10 @@ VC.VoxelGrid = VoxelGrid;
 /**
  * Greedy mesher with per-vertex AO. Returns { data: Uint8Array (8 B/vertex), quads }.
  * scale multiplies output positions (for LOD grids).
+ * open (optional Uint8Array(256), e.g. foliageLUT()): palette indices that are see-through for the OTHER voxels —
+ * a non-open voxel also gets faces (and open-sky AO) where it touches open voxels (branches inside a crown).
  */
-function mesh(g, scale = 1) {
+function mesh(g, scale = 1, open = null) {
   const sx = g.sx, sy = g.sy, sz = g.sz, v = g.v;
   const D = [sx, sy, sz];
   const ST = [1, sx * sz, sx]; // index strides for x, y, z
@@ -345,6 +352,9 @@ function mesh(g, scale = 1) {
   const cu = new Int32Array(4), cw = new Int32Array(4), cao = new Int32Array(4);
   const ORD_POS = [0, 1, 2, 3], ORD_NEG = [0, 3, 2, 1];
   const pos = [0, 0, 0];
+  // AO occluders: any voxel, or (wood faces of openFoliage models) only non-open voxels
+  const occAny = (q) => v[q] !== 0;
+  const occWood = (q) => { const t = v[q]; return t !== 0 && open[t] === 0; };
   for (let d = 0; d < 3; d++) {
     const u = (d + 1) % 3, w = (d + 2) % 3;
     const Du = D[u], Dw = D[w], Dd = D[d];
@@ -362,15 +372,19 @@ function mesh(g, scale = 1) {
             const base = i * sd + a * su + b * sw;
             const c = v[base];
             let m = 0;
-            if (c && !(nIn && v[base + dir * sd])) {
+            const nv = nIn ? v[base + dir * sd] : 0;
+            // see-through: wood (non-open) under leaves (open) is meshed, with AO that ignores the leaves
+            const seeThru = open !== null && c !== 0 && open[c] === 0;
+            if (c && (!nv || (seeThru && open[nv] !== 0))) {
               let a0 = 3, a1 = 3, a2 = 3, a3 = 3;
               if (nIn) {
                 const nb = base + dir * sd;
                 const aL = a > 0, aR = a + 1 < Du, bD = b > 0, bU = b + 1 < Dw;
-                const l = aL && v[nb - su] !== 0, r = aR && v[nb + su] !== 0;
-                const dn = bD && v[nb - sw] !== 0, up = bU && v[nb + sw] !== 0;
-                const ld = aL && bD && v[nb - su - sw] !== 0, rd = aR && bD && v[nb + su - sw] !== 0;
-                const ru = aR && bU && v[nb + su + sw] !== 0, lu = aL && bU && v[nb - su + sw] !== 0;
+                const occ = seeThru ? occWood : occAny;
+                const l = aL && occ(nb - su), r = aR && occ(nb + su);
+                const dn = bD && occ(nb - sw), up = bU && occ(nb + sw);
+                const ld = aL && bD && occ(nb - su - sw), rd = aR && bD && occ(nb + su - sw);
+                const ru = aR && bU && occ(nb + su + sw), lu = aL && bU && occ(nb - su + sw);
                 a0 = l && dn ? 0 : 3 - (l + dn + ld);
                 a1 = r && dn ? 0 : 3 - (r + dn + rd);
                 a2 = r && up ? 0 : 3 - (r + up + ru);
@@ -448,8 +462,11 @@ function downsample(g, f = 2, minFill = 3) {
           n++;
           const k = (counts.get(c) || 0) + 1;
           counts.set(c, k);
-          // prefer emissive/window colors slightly so night lighting survives LOD
-          const w = k + (PAL[c * 4 + 3] & (MAT.WINDOW | MAT.EMISSIVE) ? 0.5 : 0);
+          // emissive voxels weigh 3x, so 1-voxel neon edges survive LOD (as 2-voxel strips); night lights are
+          // preferred; windows get a small nudge only (a strong window preference turns whole LOD facades into
+          // windows that sparkle at night)
+          const fl = PAL[c * 4 + 3];
+          const w = fl & MAT.EMISSIVE ? k * 3 + 0.5 : k + (fl & MAT.NIGHTLIGHT ? 0.5 : fl & MAT.WINDOW ? 0.25 : 0);
           if (w > bestN) { bestN = w; best = c; }
         }
         if (n >= minFill || (n > 0 && y === 0)) o.v[x + nx * (z + nz * y)] = best;
@@ -460,10 +477,22 @@ function downsample(g, f = 2, minFill = 3) {
 /* ------------------------------------------------------------------ */
 /* VC.voxel API                                                          */
 /* ------------------------------------------------------------------ */
+let folLut = null, folVer = -1;
+/** Uint8Array(256): 1 for FOLIAGE palette entries (the `open` set of mesh() for openFoliage models). */
+function foliageLUT() {
+  if (folVer !== palVersion) {
+    folLut = new Uint8Array(256);
+    for (let i = 1; i < 256; i++) folLut[i] = PAL[i * 4 + 3] & MAT.FOLIAGE ? 1 : 0;
+    folVer = palVersion;
+  }
+  return folLut;
+}
+
 VC.voxel = {
   palette: PAL,
   mesh,
   downsample,
+  foliageLUT,
   get palVersion() {
     return palVersion;
   },
@@ -579,6 +608,12 @@ VC.models = {
     if (VC.gfx.gl) {
       Object.assign(m, VC.voxel.upload(full));
       m.lod = VC.voxel.upload(lodMesh);
+      if (def.openFoliage) {
+        // winter meshes: the same grids with the wood under the leaves meshed too (drawn while crowns are bare)
+        const open = foliageLUT();
+        m.winter = VC.voxel.upload(mesh(g, 1, open));
+        m.winter.lod = VC.voxel.upload(mesh(lodGrid, 2, open));
+      }
     }
     cache.set(ck, m);
     const dt = performance.now() - t0;
@@ -619,6 +654,7 @@ VC.models = {
     for (const m of cache.values()) {
       if (gl && m.vbo) { gl.deleteBuffer(m.vbo); gl.deleteVertexArray(m.vao); }
       if (gl && m.lod) { gl.deleteBuffer(m.lod.vbo); gl.deleteVertexArray(m.lod.vao); }
+      if (gl && m.winter) for (const w of [m.winter, m.winter.lod]) if (w) { gl.deleteBuffer(w.vbo); gl.deleteVertexArray(w.vao); }
     }
     cache.clear();
   },

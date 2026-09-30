@@ -221,6 +221,7 @@ VC.debug = {
         let zt = d < 1 ? 2 : bz === blocks - 1 ? 3 : 1;
         if (bx === 0 && bz === 0) { place('coal_plant', x0, z0); place('water_tower', x0 + 4, z0); continue; }
         if (bx === blocks - 1 && bz === 0) { place('police_station', x0, z0); place('fire_station', x0 + 3, z0); place('school', x0, z0 + 3); place('small_park', x0 + 3, z0 + 3); continue; }
+        if (bx === 0 && bz === blocks - 1) { place('coal_plant', x0, z0); place('water_tower', x0 + 4, z0); place('water_tower', x0 + 4, z0 + 1); place('water_tower', x0 + 4, z0 + 2); place('clinic', x0, z0 + 3); continue; }
         const den = d < 1 ? 3 : d < 2 ? 2 : 1;
         for (let zz = z0; zz < z0 + 5; zz++) for (let xx = x0; xx < x0 + 5; xx++) W.setZone(xx, zz, VC.zcode(zt, den));
         if (opts.grow !== false) {

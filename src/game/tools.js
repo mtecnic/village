@@ -12,11 +12,13 @@
  *   Roads / power lines: drag an L-shaped path (Shift = straight), commit on release. Zones / dezone / bulldoze:
  *   drag a rectangle, commit on release. Buildings: click (1x1 buildings: drag to place a row), R rotates,
  *   the ghost auto-faces an adjacent road until rotated manually. Trees / terrain: brush while held.
- * PREVIEWS: every frame through VC.gfx.gizmo (the core clears it after drawing) from a draw list rebuilt only
- *   when the inputs of the plan change (tile, drag, rotation, world/money versions). Buildings also get a
- *   ghost via VC.bldgfx.setGhost({key, x, z, rot, valid}) (x/z = footprint min corner, as VC.world.addBuilding)
- *   and a service coverage ring (plus faint rings of existing buildings of the same service).
+ * PREVIEWS: a draw list rebuilt only when the inputs of the plan change (tile, drag, rotation, world / money /
+ *   unlock versions) and replayed into VC.gfx.gizmo from a GL-free transparent layer ('tools', order 990), i.e.
+ *   exactly once per rendered frame. Buildings also get a ghost via VC.bldgfx.setGhost({key, x, z, rot, valid})
+ *   (x/z = footprint min corner, as VC.world.addBuilding; called only on change, null clears), a voxel service
+ *   coverage ring (plus faint rings of existing buildings of the same service) and an entrance arrow.
  * CURSOR LABEL: div.tool-cursor in #ui (style: game/tools.css) with cost, size / count and a red reason.
+ * PHOTO MODE (VC.hud.uiHidden / photo): falls back to the select tool — no invisible edits.
  * Bus: emits 'tool' {key}, 'select' {building, x, z} | null, 'toast' (meaningful failures only), 'sfx'.
  */
 const C = VC.C, M = VC.M;

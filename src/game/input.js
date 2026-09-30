@@ -126,8 +126,8 @@ const I = (VC.input = {
     cv.addEventListener('dblclick', onDblClick);
     // middle-click autoscroll off
     cv.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
-    document.addEventListener('mouseleave', () => { I.mouse.inside = false; });
-    document.addEventListener('mouseenter', () => { I.mouse.inside = true; });
+    // pointer left the browser window (edge scrolling must stop)
+    window.addEventListener('mouseout', (e) => { if (!e.relatedTarget) I.mouse.inside = false; });
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', (e) => {
       I.keys.delete(e.code);

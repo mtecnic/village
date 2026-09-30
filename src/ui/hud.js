@@ -3,8 +3,9 @@
  *   TOP BAR     city name + milestone progress, date / weather / clock, speed controls, funds (animated,
  *               monthly net), population (+trend), approval face (neutral '—' until the first residents),
  *               RCI demand meter, power/water load pills, PROBLEMS CHIP, mute / fullscreen / pause-menu buttons.
- *               Rich live tooltips on every segment. Compacts (c1..c4) while overflowing; re-measured every 5 s
- *               so a transient overflow does not keep it compact.
+ *               Rich live tooltips on every segment. Compacts (c1..c5) while overflowing; re-measured every 5 s
+ *               so a transient overflow does not keep it compact. The problems chip narrows first; the monthly
+ *               net under the funds is the last thing hidden (c5).
  *   PROBLEMS    "Why isn't it growing?": a chip that cycles the city's blockers (every 1.5 s, only while the HUD
  *               shows; e.g. "⚡ 12 lots without power", "🚫 30 zoned tiles without road"). Counts: VC.sim.issues();
  *               power / water lots via VC.actions.zoneSupply (only lots the network cannot reach — inner lots
@@ -17,7 +18,8 @@
  *   DOCK        right-side manager buttons (VC.panels.list, or a built-in fallback list) + overlays,
  *               photo mode, settings, help. Active-window highlight, unread-advisor badge, auto-compacts.
  *   READOUT     bottom-right FPS (VC.settings.showFps) + hovered tile info (+ why an empty zoned lot is not
- *               growing, VC.sim.growReason).
+ *               growing, VC.sim.growReason); placed left of the dock's real width and above the toolbar top
+ *               (layoutReadout: --dock-w / --tb-clear on the HUD root).
  *   VISIBILITY  show()/hide() (game vs title screen), toggleUI(visible?) (H), photoMode(on?) (UI off +
  *               cinematic camera + screenshot button), floating money deltas over the funds display.
  *   HOTKEYS     fallback handling ONLY when VC.input has no KEYMAP (the foundation input); the real
@@ -62,7 +64,7 @@ const SEASONS = [
 const WEATHER_NAMES = { clear: 'Clear skies', cloudy: 'Cloudy', overcast: 'Overcast', rain: 'Rain', storm: 'Thunderstorm', snow: 'Snowfall', fog: 'Fog', windy: 'Windy' };
 
 const T = {}; // top bar element refs
-const D = { btns: new Map(), sig: '' }; // dock
+const D = { btns: new Map(), sig: '', dockW: null, tbClear: null }; // dock (+ readout placement vars)
 const cache = new Map(); // el -> last text (avoid redundant DOM writes)
 let tAcc = 0, slowAcc = 0, infoAcc = 0, fpsAcc = 0, layoutAcc = 0, probAcc = 1.5;
 let popRing = [];
@@ -189,6 +191,7 @@ const hud = (VC.hud = {
     if (slowAcc >= 1) {
       slowAcc = 0;
       safe(refreshDockBadges, 'badges');
+      safe(layoutReadout, 'readout'); // (after the show / hide slide-ins, a toolbar or dock size change)
       layoutAcc += 1;
       // numbers grew: compact further now; every 5 s re-measure from scratch so compaction is not sticky
       if (T.bar.scrollWidth > T.bar.clientWidth + 1 || layoutAcc >= 5) { layoutAcc = 0; layoutTop(); }
@@ -791,12 +794,15 @@ function refreshDockBadges() {
   }
   refreshDockActive();
 }
-/** Top bar: progressively hides secondary details (c1..c4) until everything fits the width. */
+/**
+ * Top bar: progressively hides secondary details (c1..c5) until everything fits the width. The problems chip
+ * narrows at c2 / c3 and drops its text at c4; the monthly net under the funds only goes at c5.
+ */
 function layoutTop() {
   const bar = T.bar;
   if (!bar || !hud.visible) return;
-  bar.classList.remove('c1', 'c2', 'c3', 'c4');
-  for (let lv = 1; lv <= 4 && bar.scrollWidth > bar.clientWidth + 1; lv++) bar.classList.add('c' + lv);
+  bar.classList.remove('c1', 'c2', 'c3', 'c4', 'c5');
+  for (let lv = 1; lv <= 5 && bar.scrollWidth > bar.clientWidth + 1; lv++) bar.classList.add('c' + lv);
 }
 /** Fits the dock between the top bar and the ticker: normal -> compact -> two columns. */
 function layoutDock() {
@@ -806,11 +812,32 @@ function layoutDock() {
   const avail = window.innerHeight - 66 - 40;
   D.el.classList.remove('compact', 'two');
   const need = (hh) => hh * s <= avail;
-  if (need(D.el.offsetHeight)) return;
-  D.el.classList.add('compact');
-  if (need(D.el.offsetHeight)) return;
-  D.el.classList.remove('compact');
-  D.el.classList.add('two');
+  if (!need(D.el.offsetHeight)) {
+    D.el.classList.add('compact');
+    if (!need(D.el.offsetHeight)) {
+      D.el.classList.remove('compact');
+      D.el.classList.add('two');
+    }
+  }
+  layoutReadout();
+}
+/**
+ * The bottom-right readout (tile info / FPS) sits left of the dock's REAL width (a two-column dock at a large
+ * UI scale is ~140 px wide) and above the toolbar's top edge when a large UI scale lifts the toolbar that
+ * high — never over the dock's Settings / Help buttons or the tool bar. CSS vars on the HUD root.
+ */
+function layoutReadout() {
+  const root = hud.root;
+  if (!root || !hud.visible) return;
+  let dw = '';
+  const dr = D.el && D.el.offsetParent ? D.el.getBoundingClientRect() : null;
+  if (dr && dr.width) dw = Math.max(0, Math.round(window.innerWidth - dr.left)) + 'px';
+  let clear = '';
+  const tb = root.querySelector('.hud-toolbar');
+  const tr = tb && tb.offsetParent ? tb.getBoundingClientRect() : null;
+  if (tr && tr.height) clear = Math.max(0, Math.round(window.innerHeight - tr.top + 6)) + 'px';
+  if (dw !== D.dockW) { D.dockW = dw; if (dw) root.style.setProperty('--dock-w', dw); else root.style.removeProperty('--dock-w'); }
+  if (clear !== D.tbClear) { D.tbClear = clear; if (clear) root.style.setProperty('--tb-clear', clear); else root.style.removeProperty('--tb-clear'); }
 }
 
 /* ================================================================== */

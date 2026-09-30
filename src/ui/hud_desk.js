@@ -19,10 +19,14 @@
  * slides in underneath it) — and its max-height stops above whatever HUD block lies below it in its lane:
  * the minimap (+ legend), the toolbar, the ticker, advisor cards and the dock when they reach that far
  * (measured with getBoundingClientRect, re-checked 5x a second, on show / state changes and on resize).
- * The desk card's body and the goals list scroll inside it instead of running into those blocks.
+ * The CHOICES ARE ALWAYS VISIBLE: the card's story (title + text) shrinks and scrolls, the header and the
+ * choices never do; when the lane above the minimap is too short for that (short viewport, overlay legend,
+ * large UI scale), the column moves into the lane beside the minimap while the decision is open (it never
+ * covers the minimap). Only on a viewport too small for either does the whole card scroll, with a sticky
+ * "↓ 3 choices" chip. A goals list peeked at meanwhile gets only the room the decision leaves.
  */
 const h = VC.h;
-const DK = { col: null, card: null, badge: null, v: null, state: 'none', acc: 0, lay: 0, outT: 0, hover: false, choices: [], daysEl: null, pillDays: null, badgeDays: null, timer: null, out: null, body: null };
+const DK = { col: null, card: null, badge: null, v: null, state: 'none', acc: 0, lay: 0, outT: 0, hover: false, choices: [], daysEl: null, pillDays: null, badgeDays: null, timer: null, out: null, body: null, story: null, full: null, chWrap: null, more: null, gFixed: 0, peekBest: Infinity, peekVar: undefined };
 const esc = (s) => (VC.ui && VC.ui.esc ? VC.ui.esc(s) : String(s == null ? '' : s));
 const demo = () => !!(VC.state && VC.state.demo) || !!(VC.menu && VC.menu.active);
 const OUT_MS = 14000;
@@ -74,16 +78,34 @@ function build(v) {
   });
   DK.out = h('div', { class: 'dk-out' });
   DK.timer = h('i');
-  // the body scrolls when the viewport is too short for the whole story (the column is height-capped)
-  DK.body = h('div', { class: 'dk-body' }, title, text, h('div', { class: 'dk-choices' }, DK.choices), DK.out);
-  DK.body.addEventListener('scroll', moreHint, { passive: true });
-  card.append(pill, h('div', { class: 'dk-full' }, head, DK.body), h('div', { class: 'dk-timer' }, DK.timer));
+  // the column is height-capped: the STORY (title + text) shrinks and scrolls, the choices never do (see
+  // goals.css); only when even the story's minimum does not fit does the whole card (.dk-full) scroll, with a
+  // sticky "↓ 3 choices" chip while choices are out of view
+  DK.story = h('div', { class: 'dk-story' }, title, text);
+  DK.chWrap = h('div', { class: 'dk-choices' }, DK.choices);
+  DK.body = h('div', { class: 'dk-body' }, DK.story, DK.chWrap, DK.out);
+  const n = DK.choices.length;
+  DK.more = h('button', { class: 'dk-more', 'aria-label': 'Scroll to the choices', onclick: () => { const f = DK.full; if (f) f.scrollTo({ top: f.scrollHeight, behavior: 'smooth' }); } }, '↓ ' + n + ' choice' + (n === 1 ? '' : 's'));
+  DK.full = h('div', { class: 'dk-full' }, head, DK.body, DK.more);
+  DK.story.addEventListener('scroll', moreHint, { passive: true });
+  DK.full.addEventListener('scroll', moreHint, { passive: true });
+  card.append(pill, DK.full, h('div', { class: 'dk-timer' }, DK.timer));
   return card;
 }
-/** Fades the bottom of the card body while more choices are scrolled out of view. */
+/**
+ * Fades the bottom of the story while more of it is scrolled out of view; shows the sticky "↓ N choices" chip
+ * while the card itself is cut above its last choice (tiny viewports only).
+ */
 function moreHint() {
-  const b = DK.body;
-  if (b) b.classList.toggle('more', b.scrollHeight - b.clientHeight - b.scrollTop > 4);
+  const st = DK.story, f = DK.full;
+  if (st) st.classList.toggle('more', st.scrollHeight - st.clientHeight - st.scrollTop > 4);
+  if (!f || !DK.chWrap) return;
+  let cut = false;
+  if (DK.state === 'open' && f.scrollHeight - f.clientHeight > 2) {
+    const last = DK.choices[DK.choices.length - 1];
+    cut = !!last && last.getBoundingClientRect().bottom > f.getBoundingClientRect().bottom + 1;
+  }
+  if (f.classList.contains('cut') !== cut) f.classList.toggle('cut', cut);
 }
 /** state: 'open' (full card) | 'min' (folded: header badge or pill) | 'done' (outcome) | 'none'. */
 function setState(st) {
@@ -115,7 +137,15 @@ function dock() {
       VC.ui && VC.ui.flash && VC.ui.flash(DK.badge, 'dk-badge-in');
     }
   } else if (DK.badge.parentNode) DK.badge.remove();
+  hasDesk();
   DK.card.classList.toggle('docked', !!head);
+}
+/** .has-desk on the goals header while the badge sits in it (goals.css shortens the label beside a Claim chip). */
+function hasDesk() {
+  const head = DK.col && DK.col.querySelector('.gl-head');
+  if (!head) return;
+  const on = !!(DK.badge && DK.badge.parentNode === head);
+  if (head.classList.contains('has-desk') !== on) head.classList.toggle('has-desk', on);
 }
 function show(v, sound, state) {
   if (!v) return;
@@ -134,8 +164,10 @@ function close(instant) {
   if (DK.badge) DK.badge.remove();
   DK.card = null;
   DK.badge = null;
+  hasDesk();
   DK.v = null;
   DK.choices = [];
+  DK.story = DK.full = DK.chWrap = DK.more = null;
   DK.hover = false;
   deskClass(false);
   DK.state = 'none';
@@ -220,7 +252,10 @@ function refresh() {
   }
 }
 /* ---------------- column layout (see header) ---------------- */
-const COL_TOP = 70, COL_W = 324, COL_GAP = 8, COL_MIN = 96;
+// COL_FLOOR: the smallest max-height (CSS px) — a card header — even when a block sits right under the top;
+// STORY_MIN: the desk story's min-height (goals.css .dk-story); PEEK_MIN: room wanted for a peeked goals list
+const COL_TOP = 70, COL_W = 324, COL_GAP = 8, COL_FLOOR = 44, STORY_MIN = 60, PEEK_MIN = 110;
+const LANE_BLOCKS = ['.hud-bl', '.hud-toolbar', '.hl-notes', '.hud-dock'];
 // size changes of the blocks around the column (minimap legend, tutorial card, …) re-layout it before the
 // next paint; the 5 Hz poll covers moves without a size change
 let colRO = null;
@@ -241,9 +276,45 @@ function rectOf(el) {
   return r.width > 0 && r.height > 0 ? r : null;
 }
 /**
+ * Room of the lane [x0, x1) (screen px) below top0: under the tutorial card while a desk card shows and the
+ * tutorial card overlaps the lane; down to the first HUD block that starts below the top and shares the lane
+ * (minimap + legend, toolbar, advisor cards, dock), and above the ticker. -> {x0, top, h}
+ */
+function lane(root, x0, x1, top0) {
+  const vh = window.innerHeight;
+  let top = top0;
+  // the tutorial card (z above the column) only shares the spot with a desk card: goals hide meanwhile
+  const tut = DK.card ? rectOf(root.querySelector('.tut-card:not(.out)')) : null;
+  if (tut && tut.right > x0 && tut.left < x1) top = Math.max(top, Math.round(tut.bottom + COL_GAP));
+  let bottom = vh - COL_GAP;
+  const tick = root.querySelector('.hud-ticker');
+  if (tick && !tick.classList.contains('hidden') && tick.offsetHeight) bottom = Math.min(bottom, vh - tick.offsetHeight - COL_GAP);
+  for (const sel of LANE_BLOCKS) {
+    for (const el of root.querySelectorAll(sel)) {
+      watch(el);
+      const r = rectOf(el);
+      // every block in the lane that starts below the column top caps it (one beside the top bar does not)
+      if (!r || r.right <= x0 || r.left >= x1 || r.top <= top) continue;
+      bottom = Math.min(bottom, Math.floor(r.top - COL_GAP));
+    }
+  }
+  return { x0, top, h: bottom - top };
+}
+/** CSS px the open desk card needs with its story at the minimum (header, choices / outcome in full). */
+function deskNeed() {
+  const c = DK.card, f = DK.full, st = DK.story;
+  if (!c || !f || !st) return 0;
+  const cut = Math.max(0, f.scrollHeight - f.clientHeight); // (the whole card scrolls: add what is cut off)
+  const chip = f.classList.contains('cut') && DK.more ? DK.more.offsetHeight + 2 : 0;
+  return c.offsetHeight + cut - chip - st.clientHeight + Math.min(st.scrollHeight, STORY_MIN);
+}
+/**
  * Places the shared left column: top under the top bar (or the tutorial card while it shows), max-height
  * down to the first HUD block below it that shares its lane (minimap + legend, toolbar, ticker, advisor
- * cards, dock). Sets --gl-avail (CSS px) for the goals list's peek cap.
+ * cards, dock). While a decision is open and that lane is too short for its choices (short viewports, the
+ * overlay legend, a large UI scale), the column moves into the lane beside the minimap when that one has
+ * more room — it never covers the minimap. Sets --gl-avail (CSS px, the goals list's 40 % peek cap) and
+ * --gl-peek (room a peeked goals list may take without pushing the decision's choices out).
  */
 function layoutCol() {
   const col = DK.col || ensureCol();
@@ -251,39 +322,101 @@ function layoutCol() {
   if (!col || !root || !VC.hud.visible) return;
   DK.col = col;
   const s = (VC.ui && VC.ui.scale && VC.ui.scale()) || 1;
-  const vh = window.innerHeight;
-  let top = COL_TOP;
+  let top0 = COL_TOP;
   const bar = root.querySelector('.hud-top');
   watch(bar);
   watch(root.querySelector('.hl-tut'));
-  if (bar && bar.offsetHeight) top = Math.max(top, Math.round(8 + bar.offsetHeight * s + COL_GAP));
-  // the tutorial card (z above the column) only shares the spot with a desk card: goals hide meanwhile
-  const tut = DK.card ? rectOf(root.querySelector('.tut-card:not(.out)')) : null;
-  if (tut) top = Math.max(top, Math.round(tut.bottom + COL_GAP));
-  const x0 = 10, x1 = 10 + COL_W * s;
-  let bottom = vh - COL_GAP;
-  const tick = root.querySelector('.hud-ticker');
-  if (tick && !tick.classList.contains('hidden') && tick.offsetHeight) bottom = Math.min(bottom, vh - tick.offsetHeight - COL_GAP);
-  for (const sel of ['.hud-bl', '.hud-toolbar', '.hl-notes', '.hud-dock']) {
-    for (const el of root.querySelectorAll(sel)) {
-      watch(el);
-      const r = rectOf(el);
-      // blocks in the column's lane that start below its top (a block beside the top would leave no room)
-      if (!r || r.right <= x0 || r.left >= x1 || r.top < top + COL_MIN * s) continue;
-      bottom = Math.min(bottom, Math.floor(r.top - COL_GAP));
+  if (bar && bar.offsetHeight) top0 = Math.max(top0, Math.round(8 + bar.offsetHeight * s + COL_GAP));
+  const w = Math.ceil(COL_W * s);
+  const N = lane(root, 10, 10 + w, top0);
+  const fits = (Ln, cssPx) => !!Ln && cssPx * s <= Ln.h;
+  // the lane beside the minimap — or, while the tutorial card sits above that lane, beside the tutorial
+  // card, whichever is taller (only measured when the usual lane is too short)
+  let B;
+  const beside = () => {
+    if (B !== undefined) return B;
+    B = null;
+    const bl = rectOf(root.querySelector('.hud-bl'));
+    if (!bl) return B;
+    const xs = [Math.round(bl.right + COL_GAP)];
+    const tut = rectOf(root.querySelector('.tut-card:not(.out)'));
+    if (tut && tut.right + COL_GAP > xs[0]) xs.push(Math.round(tut.right + COL_GAP));
+    for (const x0 of xs) {
+      if (x0 + w > window.innerWidth - 8) continue;
+      const Ln = lane(root, x0, x0 + w, top0);
+      if (!B || Ln.h > B.h) B = Ln;
     }
+    return B;
+  };
+  let L = N, peek = '', yieldGoals = false;
+  if (DK.card && (DK.state === 'open' || DK.state === 'done')) {
+    // the goals card above the decision: header (+ mini bars) always, a peeked list only if there is room.
+    // (Its folded height is remembered while it yields, so the choice below cannot flip back and forth.)
+    const gl = col.querySelector('.gl-card:not(.hide)');
+    let peeking = false;
+    if (!gl) DK.gFixed = 0;
+    else if (gl.offsetHeight) {
+      const list = gl.querySelector('.gl-list');
+      peeking = gl.classList.contains('peek');
+      DK.gFixed = gl.offsetHeight - (list && list.offsetHeight ? list.offsetHeight + 7 : 0) + COL_GAP;
+    }
+    const desk = deskNeed(), gFixed = DK.gFixed || 0;
+    // Where the decision's choices fit, in order: the usual lane with the goals header above them -> (a goals
+    // list being peeked at: beside the minimap with the goals) -> the usual lane, the goals card stepping aside
+    // until the decision is made or folded -> beside the minimap with / without the goals card -> the larger
+    // lane (the card then scrolls as a whole). The goals card's height is remembered while it steps aside,
+    // so this cannot flip back and forth.
+    let pick = null;
+    if (peeking) pick = fits(N, desk + gFixed + PEEK_MIN) ? N : fits(beside(), desk + gFixed + PEEK_MIN) ? beside() : null;
+    if (!pick && fits(N, desk + gFixed)) pick = N;
+    if (!pick && peeking && fits(beside(), desk + gFixed)) pick = beside();
+    if (!pick && gFixed && fits(N, desk)) { pick = N; yieldGoals = true; }
+    if (!pick && fits(beside(), desk + gFixed)) pick = beside();
+    if (!pick && gFixed && fits(beside(), desk)) { pick = beside(); yieldGoals = true; }
+    if (!pick) { pick = beside() && beside().h > N.h ? beside() : N; yieldGoals = !!gFixed; }
+    L = pick;
+    const need = desk + (yieldGoals ? 0 : gFixed);
+    peek = Math.max(0, Math.floor(L.h / s - need - 7)) + 'px';
+    // the most room a peeked goals list could get in either lane (hud_goals folds the decision instead of
+    // peeking into a sliver: VC.deskHud.peekRoom)
+    const room = (Ln) => (Ln ? Math.floor(Ln.h / s - desk - gFixed - 7) : -1);
+    DK.peekBest = gFixed ? Math.max(room(N), room(beside())) : -1;
+  } else {
+    DK.peekBest = Infinity;
+    // not even a card header fits above the minimap (tiny viewport, big UI scale, overlay legend): the goals
+    // card / decision pill go beside it rather than over it
+    if (!fits(N, COL_FLOOR) && fits(beside(), COL_FLOOR)) L = beside();
   }
-  const avail = Math.max(COL_MIN, (bottom - top) / s);
-  const t = top + 'px', mh = Math.floor(avail) + 'px';
+  if (col.classList.contains('gl-yield') !== yieldGoals) col.classList.toggle('gl-yield', yieldGoals);
+  const avail = Math.max(COL_FLOOR, L.h / s);
+  const x = L.x0 + 'px', t = L.top + 'px', mh = Math.floor(avail) + 'px';
+  if (col.style.left !== x) col.style.left = x;
   if (col.style.top !== t) col.style.top = t;
   if (col.style.maxHeight !== mh) {
     col.style.maxHeight = mh;
     col.style.setProperty('--gl-avail', mh);
   }
+  if (peek !== DK.peekVar) {
+    DK.peekVar = peek;
+    if (peek) col.style.setProperty('--gl-peek', peek);
+    else col.style.removeProperty('--gl-peek');
+  }
+  moreHint();
 }
 
-/** Shared with ui/hud_goals.js. */
-VC.deskHud = { layout: layoutCol };
+/**
+ * Shared with ui/hud_goals.js: layout(); peekRoom() -> CSS px a peeked goals list could get beside an open
+ * decision (Infinity without one); fold() -> folds an open decision into its header badge ("Decide later").
+ */
+VC.deskHud = {
+  layout: layoutCol,
+  peekRoom: () => (DK.card && (DK.state === 'open' || DK.state === 'done') ? (DK.peekBest == null ? Infinity : DK.peekBest) : Infinity),
+  fold() {
+    if (!DK.card || DK.state !== 'open') return false;
+    setState('min');
+    return true;
+  },
+};
 
 if (VC.hud && VC.hud.register) {
   VC.hud.register({

@@ -4,8 +4,8 @@
  *   fireworks(x, z, n)  a show of n shells over ~5-20 s (a finale cluster at the end): rockets with
  *                       spark trails, then peony / two-tone / ring / willow / crackle bursts in HDR colours
  *                       with flashes that light the sky ('sfx' firework). Triggered automatically on
- *                       'milestone' (30 shells + confetti) and 'year' (New Year, 18 shells) over City Hall
- *                       or the population-weighted city centre.
+ *                       'milestone' (30 shells + confetti; no confetti with VC.settings.juice === false) and
+ *                       'year' (New Year, 18 shells) over City Hall or the population-weighted city centre.
  *   confetti(x, z, n)   confetti + sparkle bursts (above City Hall when (x, z) is omitted)
  *   isLaunching(b)      true while space_center b's pad rocket must NOT be drawn by the building renderer:
  *                       from lift-off, through the empty-pad pause after the flight, until the replacement
@@ -126,7 +126,9 @@ const Cel = (VC.fxCel = {
       const p = pending;
       pending = null;
       if (showSeq === p.seq) celebrate(p.n, false);
-      if (p.confetti) Cel.confetti();
+      // the 'Growth popups & celebrations' setting (VC.settings.juice) also turns the milestone confetti off
+      // (the fireworks stay)
+      if (p.confetti && !(VC.settings && VC.settings.juice === false)) Cel.confetti();
     }
     if (rdt <= 0) return drawOnly(B, G);
     const Pt = VC.particles;

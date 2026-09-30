@@ -18,11 +18,14 @@
  *   use the CHARACTER (e.key), so AZERTY / QWERTZ / Dvorak players press the key labelled with the letter;
  *   e.code is the fallback when e.key is not a Latin letter (Cyrillic, Greek…). Digits: the character when it
  *   is a digit (AZERTY Shift+digit, numpad), else the physical digit-row key (AZERTY & é " ' ( - è _ ç à, Czech
- *   + ě š …: the row keeps its 1 … 0 meaning; AZERTY zooms with = / + and the numpad). A printable character
- *   with no meaning here does nothing (never its US-position code: AZERTY ')' or QWERTZ 'ß' do not zoom).
+ *   + ě š …: the row keeps its 1 … 0 meaning). Zoom: '+' / '=' in, '-' out (any key, the numpad too), and the
+ *   '-' position right of the digit row also zooms out when it types no letter / digit there (AZERTY ')' — the
+ *   mirror of its '=' key; QWERTZ 'ß' does not). Any other printable character without a meaning here does
+ *   nothing. Numpad with NumLock off: its arrows / PgUp / PgDn pan and tilt like the real ones.
  *   Backspace = Delete (Mac 'delete' key); '?' = help (F1 is brightness on Macs). AltGr characters count
  *   ([ ] on many layouts), AltGr is never Ctrl. A remapped key blocks the positional fallbacks of other
- *   modules (preventDefault).
+ *   modules (preventDefault). The Help window shows the camera keys with THIS layout's labels (Z Q S D / A E
+ *   on AZERTY: navigator.keyboard.getLayoutMap(), else learned from the characters those keys type).
  * KEYBOARD (central; behind menus and modals): see KEYMAP. Ignored only while TYPING — focus in a text-like
  *   field (text/search/number/email/password/… inputs, textarea, select, contenteditable). Sliders, checkboxes,
  *   radios and buttons keep focus after a click but never swallow hotkeys (a focused slider keeps only its own
@@ -32,8 +35,9 @@
  *   Continuous camera moves use real dt: pan speed ∝ zoom distance (Shift = faster).
  * FEEDBACK: toggles (cinematic, grid, overlay, undo) show ONE toast via VC.ui.toast directly (a bus 'toast' would
  *   add the audio module's notify sound); overlay cycling reuses a single toast that updates in place.
- * API: KEYMAP [{group, keys, action}] (help window; keys: alternatives separated by ', ', chords by ' + ', so a
- *   bare '+' / '−' is a key of its own; '⌘' instead of 'Ctrl' on Macs), keys Set of held (logical) codes,
+ * API: KEYMAP [{group, keys, action, pos?}] (help window; keys: alternatives separated by ', ', chords by ' + ', so
+ *   a bare '+' / '−' is a key of its own; '⌘' instead of 'Ctrl' on Macs; pos: 'pan' / 'rot' rows show this
+ *   layout's labels), posLabel(code), posKnown(), keys Set of held (logical) codes,
  *   mouse {x, y (client px), buttons, over}, mods {shift, ctrl, alt}, enabled(), PANEL_KEYS {code: panelKey},
  *   isTyping(e), IS_MAC, MOD ('⌘' | 'Ctrl'), logicalKey(e) -> the layout-aware key code this module acts on,
  *   zoomDir() -> 1 | -1 (VC.settings.invertZoom; multiply wheel deltas by it), wheelZoom(e) -> camera zoom factor
@@ -56,6 +60,14 @@ const MOD = IS_MAC ? '⌘' : 'Ctrl';
 const PANEL_KEYS = { KeyM: 'budget', KeyP: 'policies', KeyG: 'stats', KeyU: 'population', KeyV: 'services', KeyY: 'utilities', KeyN: 'advisors', KeyJ: 'milestones', KeyX: 'disasters', KeyK: 'save' };
 /** Continuous (held) keys by PHYSICAL position: the camera cluster. Zoom keys are resolved by character. */
 const HOLD = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyQ', 'KeyE', 'PageUp', 'PageDown']);
+/**
+ * Labels of the positional camera letter keys on THIS keyboard layout (Help -> Controls): US letters until all
+ * six are known — from navigator.keyboard.getLayoutMap() (Chromium) or learned from the letters those keys
+ * type (learnPos) — then e.g. Z Q S D / A E on AZERTY.
+ */
+const POS = Object.assign(Object.create(null), { KeyW: 'W', KeyA: 'A', KeyS: 'S', KeyD: 'D', KeyQ: 'Q', KeyE: 'E' });
+const POS_US = Object.assign(Object.create(null), POS);
+const posSeen = new Set();
 const holdOf = new Map(); // held physical code -> its logical key (e.g. NumpadAdd / QWERTZ '+' -> 'Equal')
 let ctrlHeld = false; // a real Ctrl / Cmd key is down (a trackpad pinch sends ctrl+wheel without it)
 const DRAG_PX = 5; // movement before a press becomes a drag
@@ -148,12 +160,12 @@ const I = (VC.input = {
   PANEL_KEYS,
   // keys: alternatives separated by ', ', chords by ' + ' (a lone '+' or '−' is a key); see hud_settings keyChips
   KEYMAP: [
-    { group: 'Camera', keys: 'W A S D, Arrows', action: 'Pan the camera (hold Shift = faster)' },
+    { group: 'Camera', keys: 'W A S D, Arrows', action: 'Pan the camera (hold Shift = faster)', pos: 'pan' },
     { group: 'Camera', keys: 'Right-drag', action: 'Rotate and tilt' },
     { group: 'Camera', keys: 'Middle-drag', action: 'Pan (drag the ground)' },
     { group: 'Camera', keys: 'Left-drag', action: 'Pan with the Inspect tool' },
     { group: 'Camera', keys: 'Wheel, Pinch, +, −', action: 'Zoom toward the cursor' },
-    { group: 'Camera', keys: 'Q, E', action: 'Rotate left / right' },
+    { group: 'Camera', keys: 'Q, E', action: 'Rotate left / right', pos: 'rot' },
     { group: 'Camera', keys: 'PgUp, PgDn', action: 'Tilt the camera' },
     { group: 'Camera', keys: 'Double-click', action: 'Focus on a building' },
     { group: 'Camera', keys: 'C', action: 'Cinematic camera' },
@@ -191,6 +203,10 @@ const I = (VC.input = {
   IS_MAC,
   MOD,
   logicalKey,
+  /** Label of a positional camera key (KeyW …) on this keyboard layout ('Z' for KeyW on AZERTY; US until known). */
+  posLabel: (code) => (posKnown() ? POS[code] : POS_US[code]) || String(code || '').replace(/^Key/, ''),
+  /** True once the labels of all positional camera letter keys on this layout are known (see KEYMAP). */
+  posKnown,
   /** +1, or -1 with VC.settings.invertZoom: multiply wheel deltas by it (minimap & co. zoom like the 3D view). */
   zoomDir,
   /**
@@ -213,6 +229,13 @@ const I = (VC.input = {
 
   init() {
     cv = VC.gfx.canvas;
+    // the camera keys' labels on this keyboard layout (Help): Chromium tells us right away
+    try {
+      const kb = navigator.keyboard;
+      if (kb && typeof kb.getLayoutMap === 'function') {
+        kb.getLayoutMap().then((m) => { for (const c in POS) learnPos(c, m.get(c)); }, () => { /* not allowed here */ });
+      }
+    } catch (e) { /* no Keyboard API (Firefox, Safari): learned from key presses */ }
     cv.addEventListener('contextmenu', (e) => e.preventDefault());
     cv.addEventListener('pointerdown', onDown);
     window.addEventListener('pointermove', onMove, { passive: true });
@@ -649,9 +672,18 @@ function logicalKey(e) {
     if (SPEED_UP.has(k)) return 'SpeedUp';
     if (k === '?') return 'Help';
     if (k === ' ') return 'Space';
-    return ''; // a character without a meaning here (not its US-position code: AZERTY ')' is not zoom)
+    // the key right of the digit row types no '-' on some layouts (AZERTY ')' / '°'): it still zooms out, as
+    // its neighbour (the '=' key on AZERTY) zooms in — unless it types a letter / digit (QWERTZ 'ß')
+    if (code === 'Minus' && !LETTER_RE.test(k) && !/^[0-9]$/.test(k)) return 'Minus';
+    return ''; // a character without a meaning here (not its US-position code)
   }
   // named keys and dead keys (e.key 'Dead', 'Unidentified'): by position where that is unambiguous
+  // numpad with NumLock off: 8 / 2 / 4 / 6 / 9 / 3 send ArrowUp … PageDown (pan / tilt, released by e.code on
+  // keyup via holdOf); the other named numpad keys: '.' = Delete, 5 / 0 / 7 / 1 (Clear, Insert, Home, End) = none
+  if (/^Numpad/.test(code) && e.key && e.key.length > 1 && e.key !== 'Unidentified' && e.key !== 'Dead') {
+    if (/^(Arrow(Up|Down|Left|Right)|Page(Up|Down))$/.test(e.key)) return e.key;
+    return e.key === 'Delete' ? 'Delete' : e.key === 'Enter' ? code : '';
+  }
   if (/^Digit\d$/.test(code)) return code;
   if (/^Numpad\d$/.test(code)) return 'Digit' + code.slice(6);
   if (/^Key[A-Z]$/.test(code)) return code;
@@ -669,7 +701,32 @@ function releaseKey(code) {
   I.keys.delete(L);
 }
 
+/** Learns the letter a positional camera key types on this layout; KEYMAP shows them once all six are known. */
+function learnPos(code, ch) {
+  if (!code || !(code in POS) || typeof ch !== 'string' || ch.length !== 1) return;
+  const up = ch.toUpperCase();
+  if (!LETTER_RE.test(up) && !/^[0-9]$/.test(up)) return; // (a symbol would clash with the KEYMAP separators)
+  const was = posKnown();
+  posSeen.add(code);
+  if (POS[code] === up && was === posKnown()) return;
+  POS[code] = up;
+  posKeymap();
+}
+function posKnown() {
+  return posSeen.size >= 6;
+}
+/** Rewrites the KEYMAP camera rows with this layout's labels (US labels until every one is known). */
+function posKeymap() {
+  const L = posKnown() ? POS : POS_US;
+  for (const k of I.KEYMAP) {
+    if (k.pos === 'pan') k.keys = L.KeyW + ' ' + L.KeyA + ' ' + L.KeyS + ' ' + L.KeyD + ', Arrows';
+    else if (k.pos === 'rot') k.keys = L.KeyQ + ', ' + L.KeyE;
+  }
+}
+
 function onKeyDown(e) {
+  // (any plain press of a camera letter key teaches its label on this layout — also while typing)
+  if (e.code in POS && !e.ctrlKey && !e.metaKey && !e.altKey) learnPos(e.code, e.key);
   setMods(e);
   trackCtrl(e, true);
   if (isTyping(e)) return;

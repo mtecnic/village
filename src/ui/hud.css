@@ -113,7 +113,8 @@
 .tb-sys-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.11); transform: translateY(-1px); }
 .tb-sys-btn.on { color: var(--accent); }
 .tb-sys-btn.tb-mute.on { color: var(--bad); border-color: rgba(255, 90, 106, 0.4); background: rgba(255, 90, 106, 0.12); }
-/* compaction levels (hud.js layoutTop adds c1..c4 while the bar overflows) */
+/* compaction levels (hud.js layoutTop adds c1..c5 while the bar overflows). The monthly net under the funds
+ * (the tutorial points at it) is the LAST thing to go: the problems chip compacts long before it. */
 .hud-top.c1 .tb-logo, .hud-top.c1 .tb-sys-btn.tb-fs { display: none; }
 .hud-top.c1 .tb-seg { padding: 0 6px; }
 .hud-top.c1 .tb-date, .hud-top.c1 .tb-money, .hud-top.c1 .tb-pop { min-width: 0; }
@@ -121,11 +122,12 @@
 .hud-top.c2 .tb-sep, .hud-top.c2 .tb-msbar, .hud-top.c2 .tb-hbar, .hud-top.c2 .up-bar, .hud-top.c2 .tb-date .tb-sub { display: none; }
 .hud-top.c2 { gap: 3px; }
 .hud-top.c2 .tb-main { font-size: 14px; }
-.hud-top.c3 .tb-net, .hud-top.c3 .tb-pop .tb-sub, .hud-top.c3 .tb-ms, .hud-top.c3 .rci-lbl, .hud-top.c3 .tb-rename, .hud-top.c3 .tb-sys-btn.tb-mute { display: none; }
+.hud-top.c3 .tb-pop .tb-sub, .hud-top.c3 .tb-ms, .hud-top.c3 .rci-lbl, .hud-top.c3 .tb-rename, .hud-top.c3 .tb-sys-btn.tb-mute { display: none; }
 .hud-top.c3 .tb-name { max-width: 90px; }
 .hud-top.c3 .tb-pill { padding: 0 6px; }
 .hud-top.c4 .tb-city, .hud-top.c4 .tb-wx { display: none; }
 .hud-top.c4 .tb-icon { font-size: 17px; }
+.hud-top.c5 .tb-net { display: none; }
 .tt-rci { display: flex; justify-content: space-between; gap: 18px; margin-top: 6px; font-weight: 800; }
 .tt-rci b, .tt-factor b { font-family: var(--mono); }
 .tt-rci b.good, .tt-factor b.good { color: var(--good); }
@@ -251,8 +253,10 @@
 .tch-x { width: 26px; height: 26px; font-size: 18px; }
 
 /* ================================================================== readout */
-.hud-readout { position: absolute; right: 70px; bottom: 104px; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; scale: var(--ui-scale); transform-origin: 100% 100%; pointer-events: none; }
-.hud.no-ticker .hud-readout { bottom: 78px; }
+/* right of it: the dock's real width (--dock-w, hud.js layoutReadout: compact / two-column / UI scale);
+ * bottom: clear of the toolbar top (--tb-clear) when a large UI scale lifts the toolbar that high */
+.hud-readout { position: absolute; right: calc(var(--dock-w, 60px) + 10px); bottom: 104px; bottom: max(104px, var(--tb-clear, 0px)); display: flex; flex-direction: column; align-items: flex-end; gap: 5px; scale: var(--ui-scale); transform-origin: 100% 100%; pointer-events: none; }
+.hud.no-ticker .hud-readout { bottom: 78px; bottom: max(78px, var(--tb-clear, 0px)); }
 .ro-fps, .ro-tile { padding: 4px 9px; border-radius: 9px; background: rgba(9, 12, 21, 0.74); border: 1px solid var(--line); font: 700 11px var(--mono); color: var(--text2); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); white-space: nowrap; }
 .ro-tile { font-family: var(--font); font-size: 11.5px; display: flex; align-items: center; gap: 7px; opacity: 0; transform: translateY(4px); transition: opacity 0.15s, transform 0.15s; }
 .ro-tile.show { opacity: 1; transform: none; }
@@ -320,8 +324,9 @@
 /* tutorial card and advisor / disaster cards sit just BELOW the windows layer (z 20): a window the player opens
  * (or drags) over them keeps its title bar, tabs and close button usable; panels.js placement avoids the
  * tutorial card, and advisor cards time out on their own */
-.hud-left { position: absolute; left: 10px; top: 70px; width: 322px; display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 18; }
-.hud-right { position: absolute; right: 66px; top: 70px; width: 322px; scale: var(--ui-scale); transform-origin: 100% 0; pointer-events: none; transition: opacity 0.4s, translate 0.45s var(--ease-out); z-index: 19; }
+/* under the top bar at any UI scale (8 px + its 54 px x scale + a gap); .hud-right also clears the dock's real width */
+.hud-left { position: absolute; left: 10px; top: 70px; top: max(70px, calc(16px + 54px * var(--ui-scale))); width: 322px; display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 18; }
+.hud-right { position: absolute; right: 66px; right: calc(var(--dock-w, 56px) + 10px); top: 70px; top: max(70px, calc(16px + 54px * var(--ui-scale))); width: 322px; scale: var(--ui-scale); transform-origin: 100% 0; pointer-events: none; transition: opacity 0.4s, translate 0.45s var(--ease-out); z-index: 19; }
 .hl-notes { display: flex; flex-direction: column; gap: 8px; }
 .adv-card { position: relative; display: flex; gap: 11px; padding: 11px 12px 12px 11px; border-radius: 16px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); border-left: 3px solid var(--ac); box-shadow: var(--shadow), var(--hi); pointer-events: auto; animation: noteIn 0.5s var(--ease); overflow: hidden; }
 .adv-card.out { animation: noteOut 0.26s ease-in forwards; pointer-events: none; }
@@ -465,11 +470,12 @@
 .tp-icon { font-size: 17px; line-height: 1; filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45)); }
 .tp-col { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
 .tp-text { font-weight: 800; font-size: 12.5px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tp-sub { font-size: 10px; font-weight: 750; color: #ffd98a; letter-spacing: 0.02em; white-space: nowrap; }
+.tp-sub { font-size: 10px; font-weight: 750; color: #ffd98a; letter-spacing: 0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tb-prob.bad .tp-sub { color: #ffb3bb; }
 .tb-prob.info .tp-sub { color: #a8e6ff; }
-.hud-top.c2 .tp-sub { display: none; }
-.hud-top.c3 .tb-prob { max-width: 150px; }
+.hud-top.c3 .tp-sub { display: none; }
+.hud-top.c2 .tb-prob { max-width: 150px; }
+.hud-top.c3 .tb-prob { max-width: 118px; }
 .hud-top.c4 .tp-col { display: none; }
 .tp-popover { width: 300px; }
 .tp-pop { display: flex; flex-direction: column; gap: 8px; }

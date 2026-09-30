@@ -495,6 +495,10 @@ function makeWhatIf(c, o = {}) {
 /* ---------------- Overview ---------------- */
 function tabOverview(c) {
   const kNet = U.kpi('Monthly net', { icon: '📊', tip: 'Forecast of next month: all recurring income minus all recurring expenses.', cls: 'big' });
+  // the amount + a small, never-clipped '/mo' unit (the big value would otherwise ellipsize 5-digit nets)
+  const netNum = h('span', { class: 'pn-kpi-num' });
+  kNet.val.textContent = '';
+  kNet.val.append(netNum, h('small', { class: 'pn-kpi-unit' }, '/mo'));
   const kBal = U.kpi('Treasury', { icon: '🏦', tip: 'Cash on hand right now.' });
   const kProj = U.kpi('In 12 months', { icon: '🔮', tip: 'Projected treasury if the current monthly net holds for a year.' });
   const spark = U.spark(150, 34);
@@ -561,7 +565,11 @@ function tabOverview(c) {
       const r = typeof run === 'number' ? run : S.money > 0 ? S.money / -f.net : 0;
       if (isFinite(r)) netSub = r < 1 ? 'Out of money!' : 'Runway ' + Math.floor(r) + ' month' + (Math.floor(r) === 1 ? '' : 's');
     }
-    kNet.set(U.smoney(f.net) + ' /mo', netSub, f.net > 0 ? 'good' : f.net < 0 ? 'bad' : '');
+    // six-figure nets in the short form (+$124k); the exact figure is in the forecast table below
+    const an = Math.abs(f.net);
+    U.txt(netNum, an >= 1e5 && an < 1e6 ? (f.net < 0 ? '−' : '+') + '$' + VC.fmt.short(an) : U.smoney(f.net));
+    U.txt(kNet.sub, netSub);
+    U.tone(kNet.val, f.net > 0 ? 'good' : f.net < 0 ? 'bad' : '');
     kBal.set(U.money(S.money), S.sandbox ? 'Sandbox: unlimited funds' : S.money < 0 ? 'In debt!' : S.loans && S.loans.length ? S.loans.length + ' loan' + (S.loans.length > 1 ? 's' : '') + ' outstanding' : 'No debt', S.money < 0 ? 'bad' : '');
     const proj = S.money + f.net * 12;
     kProj.set(U.money(proj), U.smoney(f.net * 12) + ' over the year', proj < 0 ? 'bad' : flat ? '' : proj > S.money ? 'good' : 'warn');
@@ -823,7 +831,10 @@ function tabLoans(c) {
   const offerCard = () => {
     const amt = h('div', { class: 'pn-loan-amt' });
     const terms = h('div', { class: 'pn-loan-terms' });
-    const pay = h('div', { class: 'pn-loan-pay' });
+    // monthly payment and total on lines of their own: side by side they were cut off in a 150 px card
+    const payMo = h('div', { class: 'pn-loan-paymo' });
+    const payTot = h('div', { class: 'pn-loan-paytot' });
+    const pay = h('div', { class: 'pn-loan-pay' }, payMo, payTot);
     const btn = VC.ui.button('Borrow', () => {
       const o = el._o;
       if (o.available === false) return;
@@ -844,7 +855,9 @@ function tabLoans(c) {
       el._o = o;
       U.txt(amt, U.money(o.amount));
       U.txt(terms, `${U.rate(o.rate)} APR · ${o.months >= 24 && o.months % 12 === 0 ? o.months / 12 + ' years' : o.months + ' months'}`);
-      U.txt(pay, U.money(o.monthly) + '/mo' + (o.total ? ' · ' + U.money(o.total) + ' total' : ''));
+      U.txt(payMo, U.money(o.monthly) + '/mo');
+      U.txt(payTot, o.total ? U.money(o.total) + ' in total' : '');
+      U.show(payTot, !!o.total);
       const na = o.available === false;
       U.cls(el, 'na', na);
       btn.disabled = na;

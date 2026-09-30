@@ -16,8 +16,10 @@
  *   S.buildings is stored as an array of building objects.
  *
  * STORAGE STRING (localStorage value and exported file)
- *   'VXPZ1:' + base64(gzip(container))      when CompressionStream is available
- *   raw JSON of the serialized object         otherwise (typed arrays inline base64)
+ *   'VXPZ1:' + base64(gzip(container))      gzip by CompressionStream, or by the built-in JS encoder
+ *                                            (LZ77 + fixed Huffman) on browsers without it
+ *   'VXPB1:' + base64(container)             only if compression failed outright
+ *   raw JSON of the serialized object         accepted on import (typed arrays inline base64)
  *   container = 'VXPB' | u32 1 | u32 jsonBytes | u32 blobBytes | json utf8 | pad4 | blob
  *   Blob chunks are typed-array bytes with a byte-plane shuffle + delta filter (f:1), which makes
  *   height/zone/id layers compress 2-4x better. Decoding also accepts raw gzip files and uses a
@@ -537,23 +539,117 @@ function inflateGzip(u8) {
 }
 
 /* ------------------------------------------------------------------ */
+/* JS gzip encoder (fallback when CompressionStream is missing)          */
+/* LZ77 with hash chains + fixed Huffman codes (RFC1951 BTYPE=01).       */
+/* Filtered save data is dominated by long zero runs, which this handles */
+/* well (about 2x the size of zlib -9, 20x+ smaller than raw JSON).      */
+/* ------------------------------------------------------------------ */
+let CRC = null;
+function crc32(u8) {
+  if (!CRC) {
+    CRC = new Int32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; CRC[n] = c; }
+  }
+  let c = -1;
+  for (let i = 0; i < u8.length; i++) c = CRC[(c ^ u8[i]) & 255] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+function gzipJS(src) {
+  const n = src.length;
+  let out = new Uint8Array(Math.max(4096, (n >> 2) + 64)), op = 0;
+  const room = (k) => {
+    if (op + k <= out.length) return;
+    const o2 = new Uint8Array(Math.max(out.length * 2, op + k + 1024));
+    o2.set(out.subarray(0, op));
+    out = o2;
+  };
+  room(10);
+  out.set([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255], 0);
+  op = 10;
+  let bb = 0, bc = 0;
+  const put = (bits, len) => {
+    bb |= bits << bc;
+    bc += len;
+    while (bc >= 8) { out[op++] = bb & 255; bb >>>= 8; bc -= 8; }
+  };
+  const rev = (code, len) => { let r = 0; for (let i = 0; i < len; i++) { r = (r << 1) | (code & 1); code >>= 1; } return r; };
+  // fixed Huffman tables, bit-reversed for the LSB-first stream
+  const litC = new Uint16Array(288), litL = new Uint8Array(288);
+  for (let s = 0; s < 288; s++) {
+    let c, l;
+    if (s < 144) { c = 0x30 + s; l = 8; } else if (s < 256) { c = 0x190 + s - 144; l = 9; } else if (s < 280) { c = s - 256; l = 7; } else { c = 0xc0 + s - 280; l = 8; }
+    litC[s] = rev(c, l); litL[s] = l;
+  }
+  const lenSym = new Uint16Array(259);
+  for (let s = 0; s < 29; s++) for (let L = LBASE[s]; L < (s < 28 ? LBASE[s + 1] : 259); L++) lenSym[L] = s;
+  const distRev = new Uint8Array(30);
+  for (let s = 0; s < 30; s++) distRev[s] = rev(s, 5);
+  put(1, 1); put(1, 2); // final block, fixed Huffman
+  const HB = 15, HM = (1 << HB) - 1, WM = 32767;
+  const head = new Int32Array(1 << HB).fill(-1), prev = new Int32Array(32768);
+  const hash = (i) => ((src[i] << 10) ^ (src[i + 1] << 5) ^ src[i + 2]) & HM;
+  const insert = (i) => { const h = hash(i); prev[i & WM] = head[h]; head[h] = i; };
+  let i = 0;
+  while (i < n) {
+    room(64);
+    let bl = 0, bd = 0;
+    if (i + 2 < n) {
+      const max = Math.min(258, n - i);
+      let j = head[hash(i)], chain = 40;
+      while (j >= 0 && i - j <= 32768 && chain-- > 0) {
+        if (src[j + bl] === src[i + bl]) {
+          let l = 0;
+          while (l < max && src[j + l] === src[i + l]) l++;
+          if (l > bl) { bl = l; bd = i - j; if (l === max) break; }
+        }
+        j = prev[j & WM];
+      }
+      insert(i);
+    }
+    if (bl >= 3) {
+      const s = lenSym[bl];
+      put(litC[257 + s], litL[257 + s]);
+      if (LEXT[s]) put(bl - LBASE[s], LEXT[s]);
+      let ds = 29;
+      while (DBASE[ds] > bd) ds--;
+      put(distRev[ds], 5);
+      if (DEXT[ds]) put(bd - DBASE[ds], DEXT[ds]);
+      for (let k = 1; k < bl; k++) if (i + k + 2 < n) insert(i + k);
+      i += bl;
+    } else {
+      put(litC[src[i]], litL[src[i]]);
+      i++;
+    }
+  }
+  put(litC[256], litL[256]);
+  if (bc) { out[op++] = bb & 255; bb = 0; bc = 0; }
+  room(8);
+  const crc = crc32(src);
+  for (const v of [crc, n >>> 0]) { out[op++] = v & 255; out[op++] = (v >>> 8) & 255; out[op++] = (v >>> 16) & 255; out[op++] = (v >>> 24) & 255; }
+  return out.subarray(0, op);
+}
+
+/* ------------------------------------------------------------------ */
 /* Storage strings / files                                              */
 /* ------------------------------------------------------------------ */
 /**
  * Synchronous snapshot for saving (so later mutations can't leak into an in-flight save).
- * Returns { bin: Uint8Array } (to be gzipped) or { text } (raw JSON fallback).
+ * Returns { bin: Uint8Array } — the binary container, gzipped by finish().
  */
 function snapshot(S, extra) {
-  if (canGzip()) return { bin: containerEncode(S, extra) };
-  return { text: JSON.stringify(serialize(S, { extra })) };
+  return { bin: containerEncode(S, extra) };
 }
-/** Finishes a snapshot into the storage string. */
+/**
+ * Finishes a snapshot into the storage string: native gzip (CompressionStream) when available, else the
+ * built-in JS encoder; the uncompressed container ('VXPB1:') only if both fail.
+ */
 async function finish(snap) {
   if (snap.text != null) return snap.text;
   try {
-    return 'VXPZ1:' + VC.b64.fromBytes(await gzip(snap.bin));
+    const gz = canGzip() ? await gzip(snap.bin) : gzipJS(snap.bin);
+    return 'VXPZ1:' + VC.b64.fromBytes(gz);
   } catch (e) {
-    // compression failed (rare): store the container uncompressed
+    try { return 'VXPZ1:' + VC.b64.fromBytes(gzipJS(snap.bin)); } catch (e2) { /* fall through */ }
     return 'VXPB1:' + VC.b64.fromBytes(snap.bin);
   }
 }
@@ -632,5 +728,5 @@ VC.save = VC.save || {};
 VC.save.codec = {
   VERSION: CODEC_V, MIGRATIONS, BLD_SKIP, STATE_SKIP,
   serialize, deserialize, meta, migrate, snapshot, finish, decodeText, decodeBytes,
-  containerEncode, containerDecode, gzip, gunzip, inflateGzip, inflateRaw, canGzip, diff, enc, dec, friendly,
+  containerEncode, containerDecode, gzip, gunzip, gzipJS, crc32, inflateGzip, inflateRaw, canGzip, diff, enc, dec, friendly,
 };

@@ -478,3 +478,27 @@
 .pn-save-foot { display: flex; gap: 8px; align-items: center; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .pn-busy { cursor: progress; }
 .pn-save-loading { padding: 8px 0; }
+
+/* ---------------- additions: real-API extras ---------------- */
+.pn-adv-det { font-size: 10.5px; color: var(--text3); margin: -6px 0 6px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pn-loan-why { font-size: 11px; font-weight: 700; color: var(--warn); margin-bottom: 4px; }
+.pn-loan-offer.na { background: rgba(255, 255, 255, 0.02); border-style: dashed; }
+.pn-loan-offer.na .pn-loan-amt { color: var(--text3); }
+.pn-loan-offer.na:hover { transform: none; border-color: var(--line); }
+.pn-loan-trow { display: flex; align-items: center; gap: 8px; }
+.pn-advc-mood { position: absolute; bottom: -4px; right: -6px; width: 22px; height: 22px; display: grid; place-items: center; font-size: 13px; border-radius: 50%; background: var(--bg-solid); box-shadow: 0 0 0 2px var(--bg-solid), 0 2px 6px rgba(0, 0, 0, 0.4); }
+.pn-advc[data-mood='happy'] .pn-advc-por { box-shadow: 0 0 0 3px rgba(61, 220, 132, 0.55), 0 6px 16px color-mix(in srgb, var(--c) 35%, transparent); }
+.pn-advc[data-mood='worried'] .pn-advc-por { box-shadow: 0 0 0 3px rgba(255, 200, 61, 0.65), 0 6px 16px rgba(255, 200, 61, 0.25); }
+.pn-advc[data-mood='upset'] .pn-advc-por { box-shadow: 0 0 0 3px rgba(255, 90, 106, 0.8), 0 0 22px rgba(255, 90, 106, 0.45); animation: pnUpset 1.6s ease-in-out infinite; }
+@keyframes pnUpset { 50% { box-shadow: 0 0 0 5px rgba(255, 90, 106, 0.45), 0 0 30px rgba(255, 90, 106, 0.6); } }
+.pn-advc-head { font-size: 11.5px; font-weight: 800; margin-top: 5px; line-height: 1.25; }
+.pn-advc-head + .pn-advc-text { margin-top: 2px; }
+.pn-msg-acts { display: none; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+.pn-msg.open .pn-msg-acts { display: flex; }
+.pn-dis-next { font-size: 11.5px; color: var(--text3); margin: 2px 0 4px 48px; }
+.pn-dis { position: relative; }
+.pn-dis-count { position: absolute; top: 6px; right: 8px; font-size: 10.5px; font-weight: 800; font-family: var(--mono); color: #ffb3ba; background: rgba(255, 90, 106, 0.18); padding: 1px 6px; border-radius: 8px; }
+.pn-insp-dev { margin: 8px 0 4px; font-weight: 700; }
+.pn-dis-toggle .toggle { padding: 4px 0; }
+.pn-loan-offer.na .btn { filter: grayscale(1); opacity: 0.45; }
+.pn-loan-pay { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

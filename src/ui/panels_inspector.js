@@ -18,6 +18,8 @@ const LOCAL = [
   { key: 'traffic', label: 'Traffic', icon: '🚗', ramp: U.rampBad },
 ];
 const level3 = (v) => (v < 40 ? 'Low' : v < 110 ? 'Moderate' : v < 180 ? 'High' : 'Extreme');
+/** buildingInfo lines already shown as pills / meters (hidden from the Details list, except for rubble). */
+const SHOWN = new Set(['Residents', 'Jobs', 'Staff', 'Happiness', 'Power', 'Water', 'Status', 'ON FIRE', 'Under construction', 'Upgrading']);
 
 /** Tile-value meters (S.maps) around tile i. Returns {el, set(i)} */
 function localBlock(list) {
@@ -75,7 +77,6 @@ function buildBuilding(p, b) {
   };
   if (!rubble) p.body.appendChild(h('div', { class: 'pn-pills' }, Object.values(pills)));
 
-  const upd = [];
   // occupancy
   const isR = grow ? b.zt === 1 : def && def.housing > 0;
   const occ = U.meter(isR ? 'Residents' : 'Workers', { icon: isR ? '👪' : '👷', color: grow ? zone && zone.color : '#5ad1ff' });
@@ -92,26 +93,32 @@ function buildBuilding(p, b) {
 
   // facility section for catalog buildings
   let fac = null;
+  const facLines = []; // [{el, same: [sim line labels that make this row redundant]}]
   if (def) {
     fac = {};
     const box = h('div', { class: 'pn-insp-lines' });
-    const L = (k, label, icon, tip) => (fac[k] = U.line(label, { icon, tip }));
-    box.appendChild(L('upkeep', 'Upkeep', '💸', 'Monthly running cost at the current department funding'));
-    box.appendChild(L('fund', 'Department funding', '🏛️'));
+    const add = (el, same) => {
+      facLines.push({ el, same: same || [] });
+      box.appendChild(el);
+      return el;
+    };
+    const L = (k, label, icon, tip, same) => (fac[k] = add(U.line(label, { icon, tip }), same));
+    L('upkeep', 'Upkeep', '💸', 'Monthly running cost at the current department funding');
+    L('fund', 'Department funding', '🏛️');
     if (def.cover) for (const k in def.cover) {
       const sv = VC.SERVICES.find((s) => s.key === k);
-      box.appendChild(U.line((sv ? sv.name : k) + ' radius', { icon: sv ? sv.icon : '📡', value: def.cover[k] + ' tiles' }));
+      const label = (sv ? sv.name : k) + ' radius';
+      add(U.line(label, { icon: sv ? sv.icon : '📡', value: def.cover[k] + ' tiles' }), [label]);
     }
-    if (def.power) box.appendChild(L('power', 'Power output', '⚡'));
-    if (def.water) box.appendChild(L('water', 'Water output', '💧'));
-    if (def.housing) box.appendChild(U.line('Housing capacity', { icon: '🏘️', value: U.int(def.housing) }));
-    if (def.income) box.appendChild(U.line('Income', { icon: '💰', value: '+' + U.money(def.income) + '/mo' }));
-    if (def.tourism) box.appendChild(U.line('Tourism', { icon: '📸', value: '+' + def.tourism }));
-    if (def.happy) box.appendChild(U.line('City happiness', { icon: '😊', value: '+' + (def.happy * 100).toFixed(1) + '%' }));
-    if (def.lv) box.appendChild(U.line('Land value effect', { icon: '💎', value: (def.lv > 0 ? '+' : '') + def.lv + ' · r' + (def.lvR || 0) }));
-    if (def.pollution) box.appendChild(U.line('Air pollution', { icon: '🏭', value: level3(def.pollution) + ' · r' + (def.pollR || 0) }));
-    if (def.noise) box.appendChild(U.line('Noise', { icon: '🔊', value: level3(def.noise) + ' · r' + (def.noiseR || 0) }));
-    if (fac.fund) fac.fund.set('');
+    if (def.power) L('power', 'Power output', '⚡', null, ['Output']);
+    if (def.water) L('water', 'Water output', '💧', null, ['Output']);
+    if (def.housing) add(U.line('Housing capacity', { icon: '🏘️', value: U.int(def.housing) }));
+    if (def.income) add(U.line('Income', { icon: '💰', value: '+' + U.money(def.income) + '/mo' }), ['Income']);
+    if (def.tourism) add(U.line('Tourism', { icon: '📸', value: '+' + def.tourism }), ['Tourism']);
+    if (def.happy) add(U.line('City happiness', { icon: '😊', value: '+' + (def.happy * 100).toFixed(1) + '%' }), ['City happiness']);
+    if (def.lv) add(U.line('Land value effect', { icon: '💎', value: (def.lv > 0 ? '+' : '') + def.lv + ' · r' + (def.lvR || 0) }));
+    if (def.pollution) add(U.line('Air pollution', { icon: '🏭', value: level3(def.pollution) + ' · r' + (def.pollR || 0) }), ['Pollution']);
+    if (def.noise) add(U.line('Noise', { icon: '🔊', value: level3(def.noise) + ' · r' + (def.noiseR || 0) }), ['Noise']);
     p.body.appendChild(U.sec('Facility', box));
     if (def.desc) p.body.appendChild(h('div', { class: 'pn-insp-desc' }, '“' + def.desc + '”'));
   }
@@ -144,9 +151,12 @@ function buildBuilding(p, b) {
     const name = info.name || U.safe(() => VC.sim.buildingName(b), null) || (def ? def.name : rubble ? 'Rubble' : 'Building');
     U.txt(hd.titleEl, name);
     if (grow) {
-      U.txt(subTxt, info.subtitle || `${VC.DENSITY[b.den] || ''} density ${zone ? zone.name.toLowerCase() : ''} · `);
-      U.txt(stars, info.subtitle ? '' : U.stars(b.level));
-      U.txt(wealth, info.subtitle ? '' : ' ' + U.wealth(b.wealth));
+      // own composition (stars + $ read better than the sim's "Level 2 · Middle wealth" text)
+      const zl = U.safe(() => VC.sim.zoneLabel(b), null) || `${VC.DENSITY[b.den] || ''} density ${zone ? zone.name.toLowerCase() : ''}`;
+      U.txt(subTxt, zl + ' · ');
+      U.txt(stars, U.stars(b.level));
+      U.attr(stars, 'data-tip', 'Level ' + (b.level | 0) + ' of 3');
+      U.txt(wealth, ' ' + U.wealth(b.wealth));
       U.attr(wealth, 'data-tip', U.WEALTH[M.clamp(b.wealth | 0, 0, 2)]);
     } else if (rubble) U.txt(subTxt, 'Debris');
     else {
@@ -167,7 +177,8 @@ function buildBuilding(p, b) {
     U.show(pills.unique, !!(def && def.unique));
     // occupancy
     const cap = grow ? growCap(b) : def ? def.housing || def.jobs || b.cap || 0 : 0;
-    occ.set(cap > 0 ? U.num(b.pop) / cap : 0, U.int(b.pop) + ' / ' + U.int(cap));
+    const occN = !grow && def && !def.housing && b.simJobs != null ? U.num(b.simJobs) : U.num(b.pop); // catalog staff: sim's b.simJobs
+    occ.set(cap > 0 ? occN / cap : 0, U.int(occN) + ' / ' + U.int(cap));
     U.show(occ, cap > 0);
     hap.set(U.num(b.happy, 0.5), U.pct(U.num(b.happy, 0.5)));
     U.show(hap, grow || !!(def && def.housing));
@@ -175,7 +186,8 @@ function buildBuilding(p, b) {
     U.keyed(facBox, factors, (f) => f.label, factorEl, (el, f) => el.set(U.num(f.value)));
     U.show(wellSec, cap > 0 || factors.length);
     // lines & problems
-    const lines = Array.isArray(info.lines) ? info.lines.filter((l) => l && l.label) : [];
+    const raw = Array.isArray(info.lines) ? info.lines.filter((l) => l && l.label) : [];
+    const lines = rubble ? raw : raw.filter((l) => !SHOWN.has(l.label));
     const extra = [{ label: 'Age', icon: '🕰️', value: b.age >= 360 ? (b.age / 360).toFixed(1) + ' years' : b.age >= 30 ? Math.floor(b.age / 30) + ' months' : Math.floor(U.num(b.age)) + ' days' }, { label: 'Footprint', icon: '📐', value: b.w + ' × ' + b.d + ' tiles' }];
     const all = lines.concat(extra.filter((e) => !lines.some((l) => l.label === e.label)));
     U.keyed(lineBox, all, (l) => l.label, lineEl, (el, l) => el.set(l.value != null ? String(l.value) : '', l.cls === 'good' ? 'good' : l.cls === 'bad' ? 'bad' : l.cls === 'warn' ? 'warn' : ''));
@@ -187,6 +199,8 @@ function buildBuilding(p, b) {
     U.show(probBox, probs.length);
     // facility
     if (fac) {
+      const simLabels = new Set(raw.map((l) => l.label));
+      for (const fl of facLines) U.show(fl.el, !fl.same.some((l) => simLabels.has(l)));
       const f = S.budget[def.dept] != null ? S.budget[def.dept] : 1;
       fac.upkeep.set(U.money((def.upkeep || 0) * f * U.safe(() => VC.money.costMul(), 1)) + '/mo');
       fac.fund.set(Math.round(f * 100) + '%', f < 0.5 ? 'bad' : f < 0.8 ? 'warn' : '');
@@ -235,6 +249,10 @@ function buildTile(p, t) {
     if (S.pline[i]) L('Power line', '🔌', 'Yes');
   }
   p.body.appendChild(U.sec('Tile', lines));
+  const dev = h('div', { class: 'pn-banner pn-insp-dev' });
+  const traffic = U.line('Traffic', { icon: '🚗' });
+  if (road) lines.appendChild(traffic);
+  p.body.insertBefore(dev, lines.parentNode);
   const loc = localBlock(LOCAL);
   p.body.appendChild(U.sec('Local conditions', loc));
   const cov = localBlock(VC.SERVICES.map((s) => ({ key: s.key, label: s.name, icon: s.icon, ramp: U.rampGood })));
@@ -247,6 +265,17 @@ function buildTile(p, t) {
     pills.access.set(fl & F.ACCESS || road ? '🛣️ Road access' : '🛣️ No road access', fl & F.ACCESS || road ? 'good' : 'warn');
     loc.set(i);
     cov.set(i);
+    // the sim can explain why a zoned lot is still empty, and how busy a road is
+    const ti = U.api('sim', 'tileInfo', [x, z], null);
+    const why = ti && ti.growReason ? String(ti.growReason) : '';
+    U.txt(dev, '🏗️ ' + why);
+    U.tone(dev, /ready/i.test(why) ? 'good' : 'warn');
+    U.show(dev, !!why);
+    if (road && ti) {
+      const cg = U.num(ti.congestion);
+      traffic.set((cg > 1 ? 'Jammed' : cg > 0.6 ? 'Busy' : 'Light') + (ti.trafficVolume ? ' · ' + U.int(ti.trafficVolume) + ' trips' : ''), cg > 1 ? 'bad' : cg > 0.6 ? 'warn' : 'good');
+    }
+    U.show(traffic, !!(road && ti));
     const b = W.buildingAt(x, z);
     if (b && b !== t) P.inspect(b); // something got built here: follow it
   };

@@ -36,7 +36,7 @@ function scan() {
     r.resPop += pop;
     for (const sv of VC.SERVICES) {
       const m = S.maps[sv.key];
-      if (m && m[i] >= 64) r.cov[sv.key] += pop;
+      if (m && m[i] > 96) r.cov[sv.key] += pop; // same threshold as VC.sim.serviceStats
     }
   }
   for (const k in r.cov) r.cov[k] = r.resPop > 0 ? r.cov[k] / r.resPop : 0;
@@ -53,6 +53,7 @@ function svc(key, sst, sc) {
     coverage: M.sat(typeof s.coverage === 'number' ? s.coverage : sc.cov[key] || 0),
     buildings: typeof s.buildings === 'number' ? s.buildings : sc.bld[key] || 0,
     funding: typeof s.funding === 'number' ? s.funding : fund != null ? fund : 1,
+    eff: typeof s.effectiveness === 'number' ? s.effectiveness : null,
   };
 }
 /** Cheapest unlocked catalog building providing a service (for advice). */
@@ -124,7 +125,7 @@ P.defs.services = {
       for (const r of rows) {
         const s = svc(r.sv.key, sst, sc);
         r.meter.set(s.coverage);
-        U.txt(r.sub, `${s.buildings} bldg · ${Math.round(s.funding * 100)}% funded`);
+        U.txt(r.sub, `${s.buildings} bldg · ${Math.round(s.funding * 100)}% funded` + (s.eff != null && Math.abs(s.eff - s.funding) > 0.02 ? ` · ${Math.round(s.eff * 100)}% effective` : ''));
         U.tone(r.sub, s.funding < 0.5 ? 'bad' : s.funding < 0.8 ? 'warn' : '');
         let msg, tone;
         const best = bestFor(r.sv.key);
@@ -170,6 +171,7 @@ function netInfo(kind) {
       if (out > 0) items.push({ b, output: b.built >= 1 ? out : 0 });
     }
   }
+  const unserved = kind === 'power' ? info.unpowered : info.unwatered;
   const groups = new Map();
   for (const it of items) {
     if (!it || !it.b) continue;
@@ -179,7 +181,7 @@ function netInfo(kind) {
     g.output += U.num(it.output);
   }
   const gl = [...groups.values()].sort((a, b) => b.output - a.output);
-  return { supply, demand, groups: gl };
+  return { supply, demand, groups: gl, unserved: typeof unserved === 'number' ? unserved : null, networks: U.num(info.networks), shortage: !!info.shortage };
 }
 
 function netSection(kind) {
@@ -262,8 +264,10 @@ P.defs.utilities = {
       else if (a.use > 0.9) T.push({ k: 'p2', text: '⚡ The grid is running above 90% — plan your next power plant soon.', tone: 'warn' });
       if (b.diff < 0) T.push({ k: 'w1', text: `💧 Water shortage of ${U.int(-b.diff)} kL — add pumps or a treatment plant.`, tone: 'bad' });
       else if (b.use > 0.9) T.push({ k: 'w2', text: '💧 Water capacity is nearly exhausted.', tone: 'warn' });
-      if (sc.noPower) T.push({ k: 'p3', text: `🔌 ${U.int(sc.noPower)} building${sc.noPower === 1 ? ' has' : 's have'} no electricity. Connect them to the grid with power lines.`, tone: 'warn' });
-      if (sc.noWater) T.push({ k: 'w3', text: `🚱 ${U.int(sc.noWater)} building${sc.noWater === 1 ? ' lacks' : 's lack'} water service.`, tone: 'warn' });
+      const noP = a.n.unserved != null ? a.n.unserved : sc.noPower, noW = b.n.unserved != null ? b.n.unserved : sc.noWater;
+      if (noP) T.push({ k: 'p3', text: `🔌 ${U.int(noP)} building${noP === 1 ? ' has' : 's have'} no electricity. ${a.diff < 0 ? 'Add generating capacity.' : 'Connect them to the grid with power lines.'}`, tone: 'warn' });
+      if (noW) T.push({ k: 'w3', text: `🚱 ${U.int(noW)} building${noW === 1 ? ' lacks' : 's lack'} water service. ${b.diff < 0 ? 'Add pumping capacity.' : 'Water flows along roads from pumps and towers.'}`, tone: 'warn' });
+      if (a.n.networks > 1) T.push({ k: 'p4', text: `🧩 Your power grid is split into ${a.n.networks} separate networks. Link them so surplus power can flow where it is needed.`, tone: 'info' });
       if (sc.resPop && g.coverage < 0.5) T.push({ k: 'g1', text: '🗑️ Garbage is piling up — build a landfill or incinerator near your neighbourhoods.', tone: 'warn' });
       if (a.n.groups.some((x) => x.key === 'coal_plant')) T.push({ k: 'c1', text: '🏭 Coal plants pollute heavily. Switch to cleaner energy once it unlocks.', tone: 'info' });
       if (!T.length) T.push({ k: 'ok', text: '✅ All utilities are running smoothly.', tone: 'good' });

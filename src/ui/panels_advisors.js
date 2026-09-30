@@ -19,6 +19,15 @@ function messages() {
   const m = U.api('advisors', 'messages', [], null) || (VC.advisors && VC.advisors.inbox) || [];
   return Array.isArray(m) ? m : [];
 }
+/** Newest first regardless of the inbox's own order (day, then id). */
+const byNewest = (a, b) => U.num(b.day) - U.num(a.day) || U.num(b.id) - U.num(a.id);
+const MOOD = { happy: ['😊', 'good'], ok: ['🙂', ''], worried: ['😟', 'warn'], upset: ['😠', 'bad'] };
+/** Advice for one advisor: VC.advisors.adviceInfo when present, else plain advice(). */
+function adviceOf(k) {
+  const info = U.api('advisors', 'adviceInfo', [k], null);
+  if (info && typeof info === 'object') return info;
+  return { text: String(U.api('advisors', 'advice', [k], '') || ''), mood: null, issues: [] };
+}
 function markRead(m) {
   if (!m || m.read) return;
   U.api('advisors', 'markRead', [m.id]);
@@ -37,14 +46,16 @@ P.defs.advisors = {
       const a = VC.ADVISORS[k];
       const text = h('div', { class: 'pn-advc-text' });
       const badge = h('span', { class: 'pn-advc-badge' });
+      const mood = h('span', { class: 'pn-advc-mood' });
+      const head = h('div', { class: 'pn-advc-head' });
       const el = h('div', { class: 'pn-advc', role: 'button', onclick: () => {
         advFilter = advFilter === k ? null : k;
         VC.bus.emit('sfx', { name: 'click' });
         upd(true);
-      } }, h('div', { class: 'pn-advc-por' }, h('span', { class: 'pn-advc-emoji' }, a.icon), badge), h('div', { class: 'pn-advc-name' }, a.name), h('div', { class: 'pn-advc-role' }, a.role), text);
+      } }, h('div', { class: 'pn-advc-por' }, h('span', { class: 'pn-advc-emoji' }, a.icon), badge, mood), h('div', { class: 'pn-advc-name' }, a.name), h('div', { class: 'pn-advc-role' }, a.role), head, text);
       el.style.setProperty('--c', a.color || '#5ad1ff');
       grid.appendChild(el);
-      cards[k] = { el, text, badge };
+      cards[k] = { el, text, badge, mood, head };
     }
     p.body.appendChild(U.sec('Your cabinet', grid));
 
@@ -63,15 +74,26 @@ P.defs.advisors = {
     p.body.appendChild(h('div', { class: 'pn-sec' }, h('div', { class: 'pn-toolbar pn-inbox-bar' }, h('span', { class: 'pn-sec-title pn-inline' }, 'Inbox'), count, filt, clear, h('span', { class: 'pn-grow' }), markAll), list, empty));
 
     const msgEl = (m) => {
-      const a = VC.ADVISORS[m.advisor] || { icon: '📨', name: 'City Hall', color: '#5ad1ff' };
+      const a = VC.ADVISORS[m.advisor] || { icon: m.icon || '📨', name: m.name || 'City Hall', role: m.role, color: m.color || '#5ad1ff' };
       const title = h('div', { class: 'pn-msg-title' });
       const date = h('span', { class: 'pn-msg-date' });
       const text = h('div', { class: 'pn-msg-text' });
+      // optional follow-ups carried by the message: open a panel, look at a spot, show an overlay
+      const acts = h('div', { class: 'pn-msg-acts' });
+      const stop = (fn) => (e) => {
+        e.stopPropagation();
+        fn();
+      };
+      const pinfo = m.panel && (P.list.find((l) => l.key === m.panel) || (m.panel === 'loans' ? { name: 'Loans', icon: '🏦' } : null));
+      if (pinfo) acts.appendChild(VC.ui.button('Open ' + pinfo.name, stop(() => P.open(m.panel)), { icon: pinfo.icon, cls: 'small' }));
+      if (m.x != null && m.z != null) acts.appendChild(VC.ui.button('Show me', stop(() => VC.camera && VC.camera.focus && VC.camera.focus(m.x, m.z, 30)), { icon: '📍', cls: 'small' }));
+      const ov = m.overlay && VC.OVERLAYS.find((o) => o.key === m.overlay);
+      if (ov) acts.appendChild(VC.ui.button(ov.name, stop(() => VC.gfx && VC.gfx.setOverlay && VC.gfx.setOverlay(m.overlay)), { icon: ov.icon, cls: 'small' }));
       const el = h('div', { class: 'pn-msg', onclick: () => {
         el.classList.toggle('open');
         markRead(el._m);
         upd(true);
-      } }, h('div', { class: 'pn-msg-por' }, a.icon), h('div', { class: 'pn-msg-body' }, h('div', { class: 'pn-msg-top' }, title, date), h('div', { class: 'pn-msg-from' }, a.name + ' · ' + (a.role || '')), text));
+      } }, h('div', { class: 'pn-msg-por' }, a.icon), h('div', { class: 'pn-msg-body' }, h('div', { class: 'pn-msg-top' }, title, date), h('div', { class: 'pn-msg-from' }, a.name + (a.role ? ' · ' + a.role : '')), text, acts.children.length ? acts : null));
       el.style.setProperty('--c', a.color || '#5ad1ff');
       el.set = (mm) => {
         el._m = mm;
@@ -95,17 +117,28 @@ P.defs.advisors = {
         }
       for (const k in cards) {
         const c = cards[k];
-        const adv = String(U.api('advisors', 'advice', [k], '') || '');
+        const info = adviceOf(k);
+        const adv = String(info.text || '');
         U.txt(c.text, adv || 'Nothing to report — keep up the good work.');
         U.cls(c.text, 'quiet', !adv);
-        U.attr(c.el, 'data-tip', adv ? `<b>${VC.ADVISORS[k].name}</b><br>${adv.replace(/</g, '&lt;')}` : null);
+        const md = MOOD[info.mood] || null;
+        U.txt(c.mood, md ? md[0] : '');
+        U.show(c.mood, !!md);
+        U.attr(c.el, 'data-mood', info.mood || null);
+        const issueTitle = info.title && info.title !== 'All good' ? info.title : '';
+        U.txt(c.head, issueTitle);
+        U.show(c.head, !!issueTitle);
+        U.tone(c.head, info.severity === 'bad' ? 'bad' : info.severity === 'warn' ? 'warn' : info.severity === 'good' ? 'good' : '');
+        const issues = Array.isArray(info.issues) ? info.issues : [];
+        const esc = (t) => String(t).replace(/</g, '&lt;');
+        U.attr(c.el, 'data-tip', adv ? `<b>${VC.ADVISORS[k].name}</b><br>${esc(adv)}${issues.length > 1 ? '<br><br>' + issues.map((x) => '• ' + esc(x.title)).join('<br>') : ''}` : null);
         U.txt(c.badge, unread[k] ? String(unread[k]) : '');
         U.show(c.badge, !!unread[k]);
         U.cls(c.el, 'sel', advFilter === k);
         U.cls(c.el, 'dim', !!advFilter && advFilter !== k);
       }
-      let shown = advFilter ? all.filter((m) => m.advisor === advFilter) : all;
-      shown = shown.slice(-80).reverse(); // newest first
+      let shown = advFilter ? all.filter((m) => m.advisor === advFilter) : all.slice();
+      shown = shown.sort(byNewest).slice(0, 80);
       U.keyed(list, shown, (m, i) => (m.id != null ? m.id : 'i' + i), msgEl, (el, m) => el.set(m));
       U.show(empty, !shown.length);
       U.txt(count, nUnread ? nUnread + ' unread' : 'all read');
@@ -177,7 +210,7 @@ function msAchievements(c) {
     const el = h('div', { class: 'pn-ach' }, h('div', { class: 'pn-ach-icon' }, a.icon || '🏅'), h('div', { class: 'pn-ach-name' }, a.name || a.key), h('div', { class: 'pn-ach-desc' }, a.desc || ''));
     el.set = (x) => {
       U.cls(el, 'done', !!x.done);
-      U.attr(el, 'data-tip', `<b>${x.name || x.key}</b><br>${x.desc || ''}<br>${x.done ? '✅ Unlocked' : '🔒 Not yet unlocked'}`);
+      U.attr(el, 'data-tip', `<b>${x.name || x.key}</b><br>${x.desc || ''}<br>${x.done ? '✅ Unlocked' + (x.day != null ? ' on ' + VC.fmt.fullDate(x.day) : '') : '🔒 Not yet unlocked'}`);
     };
     return el;
   };

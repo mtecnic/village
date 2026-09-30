@@ -59,8 +59,8 @@ function setPolicy(p, on, card) {
   }
   const ok = U.safe(() => VC.econ.setPolicy(p.key, on), false);
   if (ok === false) {
+    // VC.econ explains refusals itself (locked / can't afford) — just snap the switch back
     card.sw.setValue(isOn(p));
-    VC.bus.emit('toast', { text: `Couldn't ${on ? 'enact' : 'repeal'} <b>${p.name}</b>${on ? ' — can the city afford it?' : '.'}`, type: 'bad', icon: p.icon });
   } else {
     VC.bus.emit('toast', { text: on ? `<b>${p.name}</b> enacted.` : `<b>${p.name}</b> repealed.`, type: on ? 'good' : 'info', icon: p.icon });
     VC.bus.emit('sfx', { name: on ? 'policy' : 'click' });

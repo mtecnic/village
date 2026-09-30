@@ -158,6 +158,9 @@ const CAT_ORDER = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income', 'reward', 'lo
 for (const d of VC.DEPARTMENTS) CAT_ORDER.push('upkeep:' + d.key);
 CAT_ORDER.push('roadUpkeep', 'policy', 'loanPayment', 'construction', 'roads', 'zoning', 'pline', 'demolish', 'terraform', 'trees', 'misc');
 U.catInfo = (cat) => {
+  // prefer the economy module's own labels (VC.econ.category) so all windows agree
+  const e = VC.econ && typeof VC.econ.category === 'function' ? U.safe(() => VC.econ.category(cat), null) : null;
+  if (e && e.name && e.name !== cat) return [e.icon || (CATS[cat] ? CATS[cat][0] : '•'), e.name];
   if (CATS[cat]) return CATS[cat];
   if (cat.startsWith('upkeep:')) {
     const d = VC.DEPARTMENTS.find((x) => x.key === cat.slice(7));

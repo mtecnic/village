@@ -20,8 +20,11 @@ const CHARTS = [
   { key: 'happy', title: 'Happiness & approval', icon: '😊', min: 0, max: 1, fmt: pctFmt, series: [{ keys: ['happiness'], color: '#ffd166', label: 'Happiness' }, { keys: ['approval'], color: '#5ad1ff', label: 'Approval', fill: false }], cur: (S) => { const v = U.n01(S.stats.happiness); return [U.pct(v), v < 0.4 ? 'bad' : v < 0.55 ? 'warn' : 'good']; } },
   { key: 'fin', title: 'Income vs expenses', icon: '💵', fmt: U.moneyAxis, series: [{ keys: ['income'], color: '#3ddc84', label: 'Income', fill: false }, { keys: ['expenses'], color: '#ff5a6a', label: 'Expenses', fill: false, abs: true }], cur: (S) => { const st = S.stats; let n = U.num(st.net, U.num(st.income) - Math.abs(U.num(st.expenses))); if (!st.income && !st.expenses && U.histLen('income')) n = U.num(+U.hist('income', 1)[0]) - Math.abs(U.num(+U.hist('expenses', 1)[0])); return [U.smoney(n) + '/mo', n < 0 ? 'bad' : n > 0 ? 'good' : '']; } },
   { key: 'rci', title: 'RCI demand', icon: '🏗️', min: -1, max: 1, sub: 'Growth pressure, −100 … +100', fmt: (v) => Math.round(v * 100), series: [{ keys: ['demandR'], color: U.ZHEX.R, label: 'Residential', fill: false }, { keys: ['demandC'], color: U.ZHEX.C, label: 'Commercial', fill: false }, { keys: ['demandI'], color: U.ZHEX.I, label: 'Industrial', fill: false }], cur: (S) => { const d = S.demand || {}; const f = (v) => (v > 0 ? '+' : '') + Math.round(U.num(v) * 100); return ['R' + f(d.R) + ' C' + f(d.C) + ' I' + f(d.I), '']; } },
-  { key: 'env', title: 'Crime, pollution & traffic', icon: '🚨', auto: true, series: [{ keys: ['crime'], color: '#ff5a6a', label: 'Crime', fill: false }, { keys: ['pollution'], color: '#c9a27a', label: 'Pollution', fill: false }, { keys: ['traffic'], color: '#f4a261', label: 'Traffic', fill: false }], cur: (S) => { const v = U.n01(S.stats.crime); return ['🦹 ' + U.pct(v), v > 0.4 ? 'bad' : v > 0.2 ? 'warn' : 'good']; } },
+  { key: 'labor', title: 'Residents vs jobs', icon: '💼', fmt: (v) => VC.fmt.short(v), series: [{ keys: ['pop'], color: '#39d98a', label: 'Residents', fill: false }, { keys: ['jobs'], color: '#4cc9f0', label: 'Jobs', fill: false }], cur: (S) => [U.int(S.stats.jobs) + ' jobs', ''] },
+  { key: 'unemp', title: 'Unemployment', icon: '📉', auto: true, lower: true, series: [{ keys: ['unemployment'], color: '#ff9f43' }], cur: (S) => { const v = U.n01(S.stats.unemployment); return [U.pct(v, 1), v > 0.12 ? 'bad' : v > 0.07 ? 'warn' : 'good']; } },
+  { key: 'env', title: 'Crime, pollution & traffic', icon: '🚨', auto: true, lower: true, series: [{ keys: ['crime'], color: '#ff5a6a', label: 'Crime', fill: false }, { keys: ['pollution'], color: '#c9a27a', label: 'Pollution', fill: false }, { keys: ['traffic'], color: '#f4a261', label: 'Traffic', fill: false }], cur: (S) => { const v = U.n01(S.stats.crime); return ['🦹 ' + U.pct(v), v > 0.4 ? 'bad' : v > 0.2 ? 'warn' : 'good']; } },
   { key: 'util', title: 'Power & water', icon: '⚡', auto: true, series: [{ keys: ['powerSupply', 'power'], color: '#ffd166' }, { keys: ['powerDemand'], color: '#ff9f43', fill: false }, { keys: ['waterSupply', 'water'], color: '#4cc9f0' }, { keys: ['waterDemand'], color: '#2d7dd2', fill: false }], cur: (S) => { const st = S.stats; const pu = st.powerSupply > 0 ? st.powerDemand / st.powerSupply : 0, wu = st.waterSupply > 0 ? st.waterDemand / st.waterSupply : 0; return ['⚡' + U.pct(pu) + ' 💧' + U.pct(wu), pu > 1 || wu > 1 ? 'bad' : pu > 0.9 || wu > 0.9 ? 'warn' : '']; } },
+  { key: 'tour', title: 'Tourism', icon: '📸', fmt: (v) => VC.fmt.short(v), series: [{ keys: ['tourism'], color: '#f15bb5' }], cur: (S) => [U.int(S.stats.tourism) + ' pts', ''] },
 ];
 let statRange = 60;
 
@@ -52,6 +55,7 @@ function chartCard(def, width) {
       series.push({ data, color: sd.color, label: def.series.length > 1 ? sd.label || LABELS[key] || key : null, fill: sd.fill });
     }
     autoPct = auto01;
+    el.hasData = series.length > 0;
     chart.update(series);
     // 12-month delta of the first series
     const d0 = series[0] && series[0].data;
@@ -65,11 +69,11 @@ function chartCard(def, width) {
       if (def.min != null || (def.auto && auto01)) {
         const dv = (b - a) * 100;
         txt = (dv >= 0 ? '▲ ' : '▼ ') + Math.abs(dv).toFixed(1) + ' pts';
-        good = def.key === 'env' ? dv <= 0 : dv >= 0;
+        good = def.lower ? dv <= 0 : dv >= 0;
       } else {
         const dv = a !== 0 ? (b - a) / Math.abs(a) : 0;
         txt = (dv >= 0 ? '▲ ' : '▼ ') + Math.abs(dv * 100).toFixed(1) + '%';
-        good = dv >= 0;
+        good = def.lower ? dv <= 0 : dv >= 0;
       }
       U.txt(delta, txt + ' over ' + span + ' month' + (span === 1 ? '' : 's'));
       U.tone(delta, Math.abs(b - a) < 1e-9 ? 'muted' : good ? 'good' : 'bad');
@@ -104,7 +108,10 @@ P.defs.stats = {
       U.txt(months, n ? '📅 ' + n + ' month' + (n === 1 ? '' : 's') + ' of records' : '');
       U.show(empty, n < 2);
       U.cls(grid, 'pn-cc-sparse', n < 2);
-      for (const c of cards) c.upd(S, force);
+      for (const c of cards) {
+        c.upd(S, force);
+        U.show(c, n < 2 || c.hasData); // hide charts whose metric this city does not record
+      }
     }
     return upd;
   },
@@ -166,7 +173,7 @@ function popOverview(c) {
   const kWork = U.kpi('Workers', { icon: '👷', tip: 'Residents with a job' });
   const kUn = U.kpi('Jobless', { icon: '📉', tip: 'Unemployment rate' });
   c.appendChild(h('div', { class: 'pn-kpis cols4' }, kRes, kJobs, kWork, kUn));
-  const labor = h('div', { class: 'pn-banner t-info' });
+  const labor = h('div', { class: 'pn-banner' });
   c.appendChild(labor);
   const mEdu = U.meter('Education', { icon: '🎓', color: U.rampGood });
   const mHea = U.meter('Health', { icon: '🩺', color: U.rampGood });

@@ -53,6 +53,9 @@ function forecast() {
     }
   }
   out.net = out.totalIncome - out.totalExpenses;
+  // extra detail from the real econ (per-wealth tax revenue and tax base) passes straight through
+  if (any && f.taxDetail) out.taxDetail = f.taxDetail;
+  if (any && f.taxBase) out.taxBase = f.taxBase;
   fcCache = out;
   fcAt = now;
   return out;
@@ -77,17 +80,19 @@ function taxGet(z, w) {
   const t = VC.state.tax && VC.state.tax[z];
   return t ? U.num(t[w], 9) : 9;
 }
-/**
- * Mood hint from VC.econ.taxEffect(zone) — interpreted as a penalty (positive = unhappy).
- * Falls back to the average rate when econ reports no effect.
- */
+/** Same curve as VC.econ.taxEffect: +0.35 at 0 %, 0 at 9 %, −0.8 at 20 % (positive = citizens like it). */
+function taxCurve(avg) {
+  return avg <= 9 ? 0.35 * ((9 - avg) / 9) : -0.8 * Math.pow((avg - 9) / 11, 1.25);
+}
+/** Mood hint from VC.econ.taxEffect(zone) (demand/happiness effect, positive = good). */
 function taxMood(z) {
   const avg = taxAvg(z);
-  let e = U.api('econ', 'taxEffect', [z], 0);
-  if (!(typeof e === 'number' && isFinite(e)) || Math.abs(e) < 1e-4) e = (avg - 9) / 9;
-  if (e < -0.15) return ['😄 Citizens are happy', 'good'];
-  if (e < 0.18) return ['🙂 Acceptable', 'info'];
-  if (e < 0.5) return ['😠 Grumbling', 'warn'];
+  let e = U.api('econ', 'taxEffect', [z], null);
+  // no econ (or a stub that always answers 0): use the documented curve
+  if (typeof e !== 'number' || !isFinite(e) || (e === 0 && Math.abs(avg - 9) > 0.5)) e = taxCurve(avg);
+  if (e > 0.12) return ['😄 Citizens are happy', 'good'];
+  if (e > -0.12) return ['🙂 Acceptable', 'info'];
+  if (e > -0.45) return ['😠 Grumbling', 'warn'];
   return ['🔥 Revolt!', 'bad'];
 }
 function deptCost(key) {
@@ -166,7 +171,13 @@ function tabOverview(c) {
   return () => {
     const S = VC.state;
     const f = forecast();
-    kNet.set(U.smoney(f.net) + ' /mo', f.net >= 0 ? 'Surplus 👍' : 'Deficit — cut costs', f.net > 0 ? 'good' : f.net < 0 ? 'bad' : '');
+    let netSub = f.net >= 0 ? 'Surplus 👍' : 'Deficit — cut costs';
+    if (f.net < 0 && !S.sandbox) {
+      const run = U.api('econ', 'runway', [], null);
+      const r = typeof run === 'number' ? run : S.money > 0 ? S.money / -f.net : 0;
+      if (isFinite(r)) netSub = r < 1 ? 'Out of money!' : 'Runway ' + Math.floor(r) + ' month' + (Math.floor(r) === 1 ? '' : 's');
+    }
+    kNet.set(U.smoney(f.net) + ' /mo', netSub, f.net > 0 ? 'good' : f.net < 0 ? 'bad' : '');
     kBal.set(U.money(S.money), S.sandbox ? 'Sandbox: unlimited funds' : S.money < 0 ? 'In debt!' : S.loans && S.loans.length ? S.loans.length + ' loan' + (S.loans.length > 1 ? 's' : '') + ' outstanding' : 'No debt', S.money < 0 ? 'bad' : '');
     const proj = S.money + f.net * 12;
     kProj.set(U.money(proj), U.smoney(f.net * 12) + ' over the year', proj < 0 ? 'bad' : proj > S.money ? 'good' : 'warn');
@@ -247,7 +258,9 @@ function tabTaxes(c) {
         U.api('econ', 'setTax', [z, w, v]);
         P.refresh();
       } });
-      col.appendChild(sl);
+      const det = h('div', { class: 'pn-adv-det' });
+      col.append(sl, det);
+      sl.det = det;
       zones[z].adv.push(sl);
     }
     advBody.appendChild(col);
@@ -269,10 +282,14 @@ function tabTaxes(c) {
       const mood = taxMood(z);
       U.txt(o.mood, mood[0]);
       U.tone(o.mood, mood[1]);
+      const td = f.taxDetail && f.taxDetail[z], tb = f.taxBase && f.taxBase[z];
       for (let w = 0; w < 3; w++) {
         const v = taxGet(z, w);
         o.adv[w].sync(Math.round(v));
         if (v > 12) hi = true;
+        const det = o.adv[w].det;
+        U.show(det, !!td);
+        if (td) U.txt(det, '≈ ' + U.money(td[w]) + '/mo' + (tb ? ' · ' + U.short(tb[w]) + (z === 'R' ? ' residents' : ' jobs') : ''));
       }
       if (avg > 12) hi = true;
     }
@@ -301,7 +318,7 @@ function tabDepartments(c) {
   for (const d of VC.DEPARTMENTS) {
     const count = h('div', { class: 'pn-dept-count' });
     const cost = h('div', { class: 'pn-dept-cost' });
-    const warn = h('div', { class: 'pn-dept-warn' }, '⚠️ Strike risk!');
+    const warn = h('div', { class: 'pn-dept-warn' });
     const sl = U.slider({ label: 'Funding', min: 0, max: 150, step: 5, value: Math.round(((VC.state.budget[d.key] != null ? VC.state.budget[d.key] : 1) * 100) / 5) * 5, format: (v) => v + '%', color: (v) => (v < 50 ? '#ff5a6a' : v < 80 ? '#ffc83d' : v > 110 ? '#b388ff' : '#5ad1ff'), onInput: (v) => {
       U.api('econ', 'setFunding', [d.key, v / 100]);
       P.refresh();
@@ -331,7 +348,7 @@ function tabDepartments(c) {
         const n = rc[1] + rc[2] + rc[3];
         U.txt(r.count, U.int(n) + ' road tile' + (n === 1 ? '' : 's'));
       } else {
-        const n = st.n[k] || 0;
+        const n = U.num(U.api('econ', 'deptCount', [k], null), st.n[k] || 0);
         U.txt(r.count, n ? n + ' building' + (n === 1 ? '' : 's') : 'No buildings');
       }
       const cost = deptCost(k);
@@ -342,9 +359,14 @@ function tabDepartments(c) {
       U.css(r.effFill, 'background', U.rampGood(e));
       U.txt(r.effTxt, '⚙️ ' + Math.round(e * 100) + '% effective');
       U.tone(r.effTxt, e < 0.5 ? 'bad' : e < 0.8 ? 'warn' : '');
-      U.show(r.warn, f < 0.5);
-      U.show(r.effTxt, f >= 0.5);
-      U.cls(r.el, 'low', f < 0.5);
+      // strikes: econ tracks consecutive months below 50 % funding (strike after STRIKE_MONTHS)
+      const strike = !!U.api('econ', 'onStrike', [k], false);
+      const lowM = U.num(U.api('econ', 'lowFundingMonths', [k], 0));
+      const sm = U.num(VC.econ && VC.econ.STRIKE_MONTHS, 3);
+      U.txt(r.warn, strike ? '🪧 ON STRIKE!' : lowM > 0 && f < 0.5 ? '⚠️ Strike in ' + Math.max(1, sm - lowM) + ' mo' : '⚠️ Strike risk!');
+      U.show(r.warn, strike || f < 0.5);
+      U.show(r.effTxt, !strike && f >= 0.5);
+      U.cls(r.el, 'low', strike || f < 0.5);
       U.cls(r.el, 'high', f > 1.1);
     }
     U.txt(total, 'Total ' + U.money(sum) + ' /mo');
@@ -356,7 +378,7 @@ function tabLoans(c) {
   const sum = h('div', { class: 'pn-kpis cols3' });
   const kDebt = U.kpi('Total debt', { icon: '🏦' });
   const kPay = U.kpi('Monthly payments', { icon: '📆' });
-  const kCash = U.kpi('Treasury', { icon: '💰' });
+  const kCash = U.kpi('Credit left', { icon: '💳', tip: 'Remaining credit limit — it grows with your peak population.' });
   sum.append(kDebt, kPay, kCash);
   c.appendChild(sum);
   const offers = h('div', { class: 'pn-loan-offers' });
@@ -372,17 +394,32 @@ function tabLoans(c) {
     const pay = h('div', { class: 'pn-loan-pay' });
     const btn = VC.ui.button('Borrow', () => {
       const o = el._o;
-      VC.ui.confirm(`Borrow <b>${U.money(o.amount)}</b> at <b>${U.rate(o.rate)}</b> for ${o.months} months?<br>You will pay <b>${U.money(o.monthly)}</b> every month (${U.money(o.monthly * o.months)} in total).`, () => {
-        const ok = U.api('econ', 'takeLoan', [o.amount], false);
-        if (ok === false) VC.bus.emit('toast', { text: 'The bank declined the loan.', type: 'bad', icon: '🏦' });
-        else {
+      if (o.available === false) return;
+      VC.ui.confirm(`Borrow <b>${U.money(o.amount)}</b> at <b>${U.rate(o.rate)}</b> for ${o.months} months?<br>You will pay <b>${U.money(o.monthly)}</b> every month (${U.money(o.total || o.monthly * o.months)} in total).`, () => {
+        const ok = U.api('econ', 'takeLoan', [o.amount, o.months], false);
+        // a real econ explains refusals itself (toast); only speak up when nobody else will
+        if (ok === false) {
+          if (!('available' in o)) VC.bus.emit('toast', { text: 'The bank declined the loan.', type: 'bad', icon: '🏦' });
+        } else {
           VC.bus.emit('toast', { text: `Loan of <b>${U.money(o.amount)}</b> received.`, type: 'good', icon: '🏦' });
           VC.bus.emit('sfx', { name: 'cash' });
         }
         P.refresh();
       }, { title: '🏦 Take a loan', yes: 'Borrow' });
     }, { icon: '🤝', cls: 'small primary' });
-    const el = h('div', { class: 'pn-loan-offer' }, amt, terms, pay, btn);
+    const why = h('div', { class: 'pn-loan-why' });
+    const el = h('div', { class: 'pn-loan-offer' }, amt, terms, pay, why, btn);
+    el.set = (o) => {
+      el._o = o;
+      U.txt(amt, U.money(o.amount));
+      U.txt(terms, `${U.rate(o.rate)} APR · ${o.months >= 24 && o.months % 12 === 0 ? o.months / 12 + ' years' : o.months + ' months'}`);
+      U.txt(pay, U.money(o.monthly) + '/mo' + (o.total ? ' · ' + U.money(o.total) + ' total' : ''));
+      const na = o.available === false;
+      U.cls(el, 'na', na);
+      btn.disabled = na;
+      U.txt(why, na ? '🔒 ' + (o.reason || 'Unavailable') : '');
+      U.show(why, na);
+    };
     return el;
   };
   const loanRow = () => {
@@ -398,14 +435,16 @@ function tabLoans(c) {
         P.refresh();
       }, { title: '🏦 Repay loan', yes: 'Repay' });
     }, { icon: '💸', cls: 'small good' });
-    const el = h('div', { class: 'pn-loan-row' }, h('div', { class: 'pn-loan-ic' }, '🏦'), h('div', { class: 'pn-loan-info' }, title, meta, bar), btn);
+    const emerg = U.pill('Emergency', 'bad', 'Forced bail-out loan after months of bankruptcy');
+    const el = h('div', { class: 'pn-loan-row' }, h('div', { class: 'pn-loan-ic' }, '🏦'), h('div', { class: 'pn-loan-info' }, h('div', { class: 'pn-loan-trow' }, title, emerg), meta, bar), btn);
     el.btn = btn;
     el.set = (l, i) => {
       el._l = l;
       el._i = i;
       const amount = U.num(l.amount), rem = U.num(l.remaining, amount);
       U.txt(title, U.money(rem) + ' remaining');
-      U.txt(meta, `${U.money(l.monthly)}/mo · ${U.rate(l.rate)} · ${l.months != null ? l.months + ' months left' : ''} · borrowed ${U.money(amount)}`);
+      U.txt(meta, `${U.money(l.monthly)}/mo · ${U.rate(l.rate)} · ${l.months != null ? l.months + (l.term ? ' of ' + l.term : '') + ' months left · ' : ''}borrowed ${U.money(amount)}`);
+      U.show(emerg, !!l.emergency);
       bar.set(amount > 0 ? 1 - rem / amount : 0, amount > 0 ? Math.round((1 - rem / amount) * 100) + '%' : '');
       btn.disabled = !VC.money.canAfford(rem);
       U.txt(btn.lastChild, 'Repay ' + U.short(rem));
@@ -422,17 +461,14 @@ function tabLoans(c) {
     }
     kDebt.set(U.money(debt), loans.length + ' loan' + (loans.length === 1 ? '' : 's'), debt > 0 ? 'warn' : 'good');
     kPay.set(U.money(pay) + ' /mo', pay > 0 ? 'Deducted automatically' : '—');
-    kCash.set(U.money(S.money), null, S.money < 0 ? 'bad' : '');
+    const lim = U.api('econ', 'creditLimit', [], null);
+    if (typeof lim === 'number') kCash.set(U.money(Math.max(0, lim - debt)), 'of ' + U.money(lim) + ' limit', lim - debt <= 0 ? 'warn' : '');
+    else kCash.set(U.money(S.money), 'treasury', S.money < 0 ? 'bad' : '');
     const opts = U.api('econ', 'loanOptions', [], []) || [];
-    U.keyed(offers, opts, (o, i) => i + ':' + o.amount, offerCard, (el, o) => {
-      el._o = o;
-      U.txt(el.children[0], U.money(o.amount));
-      U.txt(el.children[1], `${U.rate(o.rate)} interest · ${o.months} months`);
-      U.txt(el.children[2], U.money(o.monthly) + ' / month');
-    });
+    U.keyed(offers, opts, (o, i) => i + ':' + o.amount + ':' + o.months, offerCard, (el, o) => el.set(o));
     U.show(offers, opts.length);
     U.show(offersEmpty, !opts.length);
-    U.keyed(outs, loans.map((l, i) => ({ l, i })), (x) => x.i + ':' + x.l.amount, loanRow, (el, x) => el.set(x.l, x.i));
+    U.keyed(outs, loans.map((l, i) => ({ l, i })), (x) => (x.l.id != null ? 'id' + x.l.id : x.i + ':' + x.l.amount), loanRow, (el, x) => el.set(x.l, x.i));
     U.show(outs, loans.length);
     U.show(outsEmpty, !loans.length);
   };

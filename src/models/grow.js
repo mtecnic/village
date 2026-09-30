@@ -646,11 +646,14 @@ K.STYLES = {
     if (u === 0 || u === len - 1) return o.trim || 0;
     return v % fh >= 1 ? o.win : o.spandrel || 0;
   },
-  /** Full curtain wall: glass spandrels + window rows (lit at night), thin mullions every 4. */
+  /**
+   * Full curtain wall: glass with one band of office windows per floor (two on 4-voxel floors)
+   * that light up at night; optional mullions every mstep columns.
+   */
   curtain(o, u, v, f, len, fh) {
     const r = v % fh;
     if (o.mullion && u % (o.mstep || 4) === 0) return o.mullion;
-    return r === 0 ? o.glass : o.win;
+    return r === 1 || (fh >= 4 && r === 2) ? o.win : o.glass;
   },
   /** Grid of mullions (trim) around 1-wide glazing. */
   grid(o, u, v, f, len, fh) {

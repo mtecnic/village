@@ -729,18 +729,16 @@ const C3_ARCH = [
       // lobby
       rotSquare(g, cx, cz, s, 0, 1, 5, P.GLASS_DARK);
       let y = 6;
-      const step = small ? 4 : 3, groups = Math.ceil(F / step), maxA = small ? Math.PI / 4 : Math.PI / 2;
+      // each rotation group = slab + a band of floors glazed with office windows (lit at night);
+      // uniform bands keep the stair-stepped outline cheap for the greedy mesher
+      const step = small || c.W < 24 ? 4 : 3, groups = Math.ceil(F / step), maxA = small ? Math.PI / 4 : Math.PI / 2;
       for (let k = 0; k < groups; k++) {
         const a = (k / Math.max(1, groups - 1)) * maxA;
         const n = Math.min(step, F - k * step);
-        for (let f = 0; f < n; f++) {
-          rotSquare(g, cx, cz, s, a, y, 1, slab);
-          rotSquare(g, cx, cz, s, a, y + 1, 2, glass);
-          y += 3;
-        }
+        rotSquare(g, cx, cz, s, a, y, 1, slab);
+        rotSquare(g, cx, cz, s, a, y + 1, n * 3 - 1, k % 2 ? glass : P.WIN_OFFICE);
+        y += n * 3;
       }
-      // window rows light up at night: repaint the middle glass row of every floor
-      K.skin(g, 0, 7, 0, c.W, y, c.D, (x, yy) => ((yy - 6) % 3 === 2 ? P.WIN_OFFICE : 0));
       rotSquare(g, cx, cz, s, maxA, y, 1, slab);
       const neon = c.pk(2, [P.NEON_CYAN, P.NEON_PURPLE, P.NEON_BLUE]);
       rotSquare(g, cx, cz, s - 2, maxA, y + 1, 1, c.L >= 2 ? neon : P.LAMP_WHITE);
@@ -823,7 +821,7 @@ const C3_ARCH = [
       K.skin(g, 0, 1, 0, c.W, y, c.D, (x, yy, z) => {
         const d1 = (x + z + (yy >> 1)) % 6, d2 = (x - z + 64 + (yy >> 1)) % 6;
         if (d1 === 0 || d2 === 0) return gb;
-        return yy % 3 === 0 ? 0 : P.WIN_OFFICE;
+        return yy % 3 === 1 ? P.WIN_OFFICE : 0;
       });
       K.skin(g, 0, 1, 0, c.W, 4, c.D, () => P.GLASS_DARK);
       g.ellipsoid(cx, y, cz, R * 0.28 + 0.6, 2, R * 0.28 + 0.6, P.GLASS_CYAN);

@@ -19,7 +19,7 @@
   --line2: rgba(255, 255, 255, 0.16);
   --text: #e9eef8;
   --text2: #a9b3c7;
-  --text3: #707b92;
+  --text3: #9aa5ba; /* >= 4.5:1 (WCAG AA small text) on every glass panel tone, still dimmer than --text2 */
   --accent: #5ad1ff;
   --accent2: #b388ff;
   --good: #3ddc84;
@@ -375,9 +375,10 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
  * Both live in one left column under the top bar (where the tutorial card sits). The column stacks at
  * z 15: above the HUD chrome (0-5), BELOW the windows layer (20), so windows always cover it.
  * Colours come from the base.css tokens; no color-mix() (Safari 16.0/16.1). */
-/* height-capped: ui/hud_desk.js (VC.deskHud.layout) sets top + max-height so the column stops above the
- * minimap / toolbar / ticker (the CSS value is only the fallback); the desk card's body and the goals list
- * scroll inside it. No transition on `top`: a card must never slide in underneath the tutorial card. */
+/* height-capped: ui/hud_desk.js (VC.deskHud.layout) sets left + top + max-height so the column stops above
+ * the minimap / toolbar / ticker (the CSS value is only the fallback) — or, while a decision needs more room
+ * than that lane has, moves beside the minimap. The desk card's story and the goals list scroll inside it;
+ * the decision's choices never do. No transition on `top`: a card must never slide in under the tutorial card. */
 .gl-col { position: absolute; left: 10px; top: 70px; width: 324px; max-height: calc((100vh - 110px) / var(--ui-scale)); display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 15; transition: transform 0.5s var(--ease-out), opacity 0.4s; }
 .hud.off .gl-col { transform: translateX(-120%); opacity: 0; }
 .hud.no-ticker .gl-col { max-height: calc((100vh - 84px) / var(--ui-scale)); }
@@ -389,7 +390,11 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .gl-head { flex: none; width: 100%; min-height: 24px; display: flex; align-items: center; gap: 7px; padding: 2px 3px; border-radius: 9px; cursor: pointer; transition: background 0.15s; outline: none; }
 .gl-head:hover { background: rgba(255, 255, 255, 0.05); }
 .gl-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.gl-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold); white-space: nowrap; }
+.gl-badge { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 10.5px; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold); white-space: nowrap; }
+.gl-target { flex: none; }
+/* the label yields first when the header is crowded (Claim chip + docked desk badge): "Goals", then "Go…" */
+.gl-btext { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.gl-card.claimable .gl-head.has-desk .gl-bpre { display: none; }
 .gl-target { font-size: 13px; letter-spacing: 0; filter: drop-shadow(0 0 6px rgba(255, 209, 102, 0.45)); }
 .gl-count { flex: 1; min-width: 0; font-size: 11px; color: var(--text3); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gl-claimchip { display: none; font-size: 10.5px; font-weight: 850; padding: 1px 7px; border-radius: 9px; color: #2a1d02; background: linear-gradient(180deg, #ffe29a, #ffc34d); box-shadow: 0 0 12px rgba(255, 209, 102, 0.45); white-space: nowrap; }
@@ -399,11 +404,14 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .gl-card.compact .gl-chev { transform: rotate(-90deg); }
 .gl-list { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; margin-top: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .gl-list > .gl-item { flex: none; }
-.gl-list.more, .dk-body.more { -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); }
-/* peeking at the goals while a decision is open: the list scrolls in ~40% of the column, the decision keeps the rest */
-.gl-card.peek .gl-list { max-height: calc(var(--gl-avail, 420px) * 0.4); }
+.gl-list.more, .dk-story.more { -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); }
+/* peeking at the goals while a decision is open: the list scrolls in at most ~40% of the column and never in
+ * the room the decision's choices need (--gl-peek, set by VC.deskHud.layout) */
+.gl-card.peek .gl-list { max-height: calc(var(--gl-avail, 420px) * 0.4); max-height: min(calc(var(--gl-avail, 420px) * 0.4), var(--gl-peek, 100vh)); }
 /* with a decision on the desk the goals card keeps its (folded / capped) size and the desk card gives way */
 .gl-col.desk-open .gl-card, .gl-card.compact { flex-shrink: 0; }
+/* … unless even then the decision's choices would not fit: the goals card steps aside until it is decided */
+.gl-col.desk-open.gl-yield .gl-card { display: none; }
 .gl-card.compact .gl-list { display: none; }
 /* collapsed: one slim progress bar per goal */
 .gl-mini { flex: none; display: none; gap: 4px; margin: 6px 3px 1px; }
@@ -457,7 +465,9 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .dk-card.out { animation: dkOut 0.36s ease-in forwards; pointer-events: none; }
 @keyframes dkIn { from { opacity: 0; transform: translateX(-60px) rotate(-3deg) scale(0.94); } }
 @keyframes dkOut { to { opacity: 0; transform: translateX(-40px) scale(0.95); } }
-.dk-full { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 9px 4px 11px 11px; }
+/* the header and the choices never shrink: the story (title + text) shrinks and scrolls first; only when even
+ * the story's minimum does not fit does the whole card scroll (with a sticky "↓ 3 choices" chip) */
+.dk-full { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 9px 4px 11px 11px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .dk-head { flex: none; display: flex; align-items: center; gap: 9px; padding-right: 3px; }
 .dk-portrait { flex: none; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; background: radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.6), transparent 55%), var(--ac); box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16), 0 0 18px var(--ac); animation: portraitIn 0.6s var(--ease) 0.15s backwards; }
 .dk-portrait span { filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45)); }
@@ -470,7 +480,10 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .dk-days { color: var(--text3); font-weight: 800; }
 .dk-card.urgent .dk-days { color: var(--warn); }
 .dk-min.win-btn { flex: none; width: 24px; height: 24px; }
-.dk-body { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 7px; }
+/* (.dk-body only groups them: its parts are flex items of .dk-full, so the story's min-height is what counts) */
+.dk-body { display: contents; }
+.dk-story { flex: 0 1 auto; min-height: 60px; margin-right: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.dk-choices, .dk-out { flex: none; margin-right: 7px; }
 .dk-title { display: flex; align-items: flex-start; gap: 7px; margin: 8px 0 4px; font-size: 14.5px; font-weight: 850; line-height: 1.25; color: #fff; }
 .dk-ticon { flex: none; font-size: 16px; line-height: 1.15; }
 .dk-text { font-size: 12.3px; line-height: 1.42; color: var(--text2); }
@@ -493,7 +506,10 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .dk-timer { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, 0.06); }
 .dk-timer i { display: block; height: 100%; width: 100%; background: linear-gradient(90deg, #ffc34d, var(--gold)); box-shadow: 0 0 8px rgba(255, 209, 102, 0.6); transition: width 0.5s var(--ease-out); }
 .dk-card.urgent .dk-timer i { background: linear-gradient(90deg, var(--bad), var(--warn)); }
-.dk-card.done .dk-timer, .dk-card.done .dk-choices, .dk-card.done .dk-days, .dk-card.done .dk-min { display: none; }
+.dk-card.done .dk-timer, .dk-card.done .dk-choices, .dk-card.done .dk-days, .dk-card.done .dk-min, .dk-card.done .dk-more { display: none; }
+/* last resort (a tiny viewport): the card scrolls as a whole; this chip sticks to its bottom while choices are cut */
+.dk-more { position: sticky; bottom: 0; z-index: 1; flex: none; display: none; align-self: center; margin: 6px 0 -4px; padding: 2px 10px; border-radius: 10px; border: 1px solid rgba(255, 209, 102, 0.55); background: linear-gradient(180deg, rgba(70, 58, 34, 0.96), rgba(40, 34, 26, 0.96)); color: var(--gold); font: 800 11px var(--font); cursor: pointer; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45); }
+.dk-full.cut .dk-more { display: block; }
 /* outcome */
 .dk-out { display: none; margin-top: 10px; padding: 9px 10px 10px; border-radius: 12px; background: rgba(61, 220, 132, 0.08); border: 1px solid rgba(61, 220, 132, 0.3); animation: popIn 0.35s var(--ease); }
 .dk-card.done .dk-out { display: block; }
@@ -643,7 +659,8 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .tb-sys-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.11); transform: translateY(-1px); }
 .tb-sys-btn.on { color: var(--accent); }
 .tb-sys-btn.tb-mute.on { color: var(--bad); border-color: rgba(255, 90, 106, 0.4); background: rgba(255, 90, 106, 0.12); }
-/* compaction levels (hud.js layoutTop adds c1..c4 while the bar overflows) */
+/* compaction levels (hud.js layoutTop adds c1..c5 while the bar overflows). The monthly net under the funds
+ * (the tutorial points at it) is the LAST thing to go: the problems chip compacts long before it. */
 .hud-top.c1 .tb-logo, .hud-top.c1 .tb-sys-btn.tb-fs { display: none; }
 .hud-top.c1 .tb-seg { padding: 0 6px; }
 .hud-top.c1 .tb-date, .hud-top.c1 .tb-money, .hud-top.c1 .tb-pop { min-width: 0; }
@@ -651,11 +668,12 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .hud-top.c2 .tb-sep, .hud-top.c2 .tb-msbar, .hud-top.c2 .tb-hbar, .hud-top.c2 .up-bar, .hud-top.c2 .tb-date .tb-sub { display: none; }
 .hud-top.c2 { gap: 3px; }
 .hud-top.c2 .tb-main { font-size: 14px; }
-.hud-top.c3 .tb-net, .hud-top.c3 .tb-pop .tb-sub, .hud-top.c3 .tb-ms, .hud-top.c3 .rci-lbl, .hud-top.c3 .tb-rename, .hud-top.c3 .tb-sys-btn.tb-mute { display: none; }
+.hud-top.c3 .tb-pop .tb-sub, .hud-top.c3 .tb-ms, .hud-top.c3 .rci-lbl, .hud-top.c3 .tb-rename, .hud-top.c3 .tb-sys-btn.tb-mute { display: none; }
 .hud-top.c3 .tb-name { max-width: 90px; }
 .hud-top.c3 .tb-pill { padding: 0 6px; }
 .hud-top.c4 .tb-city, .hud-top.c4 .tb-wx { display: none; }
 .hud-top.c4 .tb-icon { font-size: 17px; }
+.hud-top.c5 .tb-net { display: none; }
 .tt-rci { display: flex; justify-content: space-between; gap: 18px; margin-top: 6px; font-weight: 800; }
 .tt-rci b, .tt-factor b { font-family: var(--mono); }
 .tt-rci b.good, .tt-factor b.good { color: var(--good); }
@@ -781,8 +799,10 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .tch-x { width: 26px; height: 26px; font-size: 18px; }
 
 /* ================================================================== readout */
-.hud-readout { position: absolute; right: 70px; bottom: 104px; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; scale: var(--ui-scale); transform-origin: 100% 100%; pointer-events: none; }
-.hud.no-ticker .hud-readout { bottom: 78px; }
+/* right of it: the dock's real width (--dock-w, hud.js layoutReadout: compact / two-column / UI scale);
+ * bottom: clear of the toolbar top (--tb-clear) when a large UI scale lifts the toolbar that high */
+.hud-readout { position: absolute; right: calc(var(--dock-w, 60px) + 10px); bottom: 104px; bottom: max(104px, var(--tb-clear, 0px)); display: flex; flex-direction: column; align-items: flex-end; gap: 5px; scale: var(--ui-scale); transform-origin: 100% 100%; pointer-events: none; }
+.hud.no-ticker .hud-readout { bottom: 78px; bottom: max(78px, var(--tb-clear, 0px)); }
 .ro-fps, .ro-tile { padding: 4px 9px; border-radius: 9px; background: rgba(9, 12, 21, 0.74); border: 1px solid var(--line); font: 700 11px var(--mono); color: var(--text2); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); white-space: nowrap; }
 .ro-tile { font-family: var(--font); font-size: 11.5px; display: flex; align-items: center; gap: 7px; opacity: 0; transform: translateY(4px); transition: opacity 0.15s, transform 0.15s; }
 .ro-tile.show { opacity: 1; transform: none; }
@@ -850,8 +870,9 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 /* tutorial card and advisor / disaster cards sit just BELOW the windows layer (z 20): a window the player opens
  * (or drags) over them keeps its title bar, tabs and close button usable; panels.js placement avoids the
  * tutorial card, and advisor cards time out on their own */
-.hud-left { position: absolute; left: 10px; top: 70px; width: 322px; display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 18; }
-.hud-right { position: absolute; right: 66px; top: 70px; width: 322px; scale: var(--ui-scale); transform-origin: 100% 0; pointer-events: none; transition: opacity 0.4s, translate 0.45s var(--ease-out); z-index: 19; }
+/* under the top bar at any UI scale (8 px + its 54 px x scale + a gap); .hud-right also clears the dock's real width */
+.hud-left { position: absolute; left: 10px; top: 70px; top: max(70px, calc(16px + 54px * var(--ui-scale))); width: 322px; display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 18; }
+.hud-right { position: absolute; right: 66px; right: calc(var(--dock-w, 56px) + 10px); top: 70px; top: max(70px, calc(16px + 54px * var(--ui-scale))); width: 322px; scale: var(--ui-scale); transform-origin: 100% 0; pointer-events: none; transition: opacity 0.4s, translate 0.45s var(--ease-out); z-index: 19; }
 .hl-notes { display: flex; flex-direction: column; gap: 8px; }
 .adv-card { position: relative; display: flex; gap: 11px; padding: 11px 12px 12px 11px; border-radius: 16px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); border-left: 3px solid var(--ac); box-shadow: var(--shadow), var(--hi); pointer-events: auto; animation: noteIn 0.5s var(--ease); overflow: hidden; }
 .adv-card.out { animation: noteOut 0.26s ease-in forwards; pointer-events: none; }
@@ -995,11 +1016,12 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .tp-icon { font-size: 17px; line-height: 1; filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45)); }
 .tp-col { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
 .tp-text { font-weight: 800; font-size: 12.5px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tp-sub { font-size: 10px; font-weight: 750; color: #ffd98a; letter-spacing: 0.02em; white-space: nowrap; }
+.tp-sub { font-size: 10px; font-weight: 750; color: #ffd98a; letter-spacing: 0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tb-prob.bad .tp-sub { color: #ffb3bb; }
 .tb-prob.info .tp-sub { color: #a8e6ff; }
-.hud-top.c2 .tp-sub { display: none; }
-.hud-top.c3 .tb-prob { max-width: 150px; }
+.hud-top.c3 .tp-sub { display: none; }
+.hud-top.c2 .tb-prob { max-width: 150px; }
+.hud-top.c3 .tb-prob { max-width: 118px; }
 .hud-top.c4 .tp-col { display: none; }
 .tp-popover { width: 300px; }
 .tp-pop { display: flex; flex-direction: column; gap: 8px; }
@@ -1056,7 +1078,11 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
   linear-gradient(180deg, rgba(5, 8, 16, 0.45) 0%, transparent 18%),
   radial-gradient(ellipse at 75% 115%, rgba(179, 136, 255, 0.22), transparent 55%); }
 .vpm-grain { position: absolute; inset: 0; opacity: 0.05; pointer-events: none; mix-blend-mode: overlay; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>"); }
-.vpm-main { position: absolute; left: max(36px, 6vw); top: 50%; translate: 0 -50%; display: flex; flex-direction: column; scale: var(--ui-scale); transform-origin: 0 50%; transition: opacity 0.35s, filter 0.35s; }
+/* --menu-scale (menu.js fitMenu): the UI scale, or less when the block would not fit above the footer; the block
+ * is centred in the space above the footer line (46 px) */
+.vpm-main { position: absolute; left: max(36px, 6vw); top: calc(50% - 16px); translate: 0 -50%; display: flex; flex-direction: column; scale: var(--menu-scale, var(--ui-scale)); transform-origin: 0 50%; transition: opacity 0.35s, filter 0.35s; }
+.vp-menu.tight .vpm-tag { margin: 6px 0 14px 2px; }
+.vp-menu.tight .vpm-btns { gap: 6px; }
 .vp-menu.has-dialog .vpm-main, .vp-menu.has-dialog .vpm-foot { opacity: 0.25; filter: blur(2px); }
 .vpm-logo { display: flex; align-items: flex-end; margin-left: -4px; filter: drop-shadow(0 0 26px rgba(90, 209, 255, 0.38)) drop-shadow(0 10px 16px rgba(0, 0, 0, 0.55)); }
 .vpm-letter { display: block; flex: none; animation: letterDrop 0.75s var(--ease) backwards, letterFloat 3.6s ease-in-out infinite, letterShine 7s ease-in-out infinite; }
@@ -1076,6 +1102,10 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .vpm-bt { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .vpm-bt b { font-size: 16px; font-weight: 800; letter-spacing: 0.01em; }
 .vpm-bt small { font-size: 12px; color: var(--text3); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Continue: the city name yields (ellipsis), the citizens / save age stay */
+.vpm-bt small.vpm-sub-split { display: flex; min-width: 0; }
+.vpm-sub-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.vpm-sub-meta { flex: none; white-space: pre; }
 .vpm-arrow { font-size: 24px; line-height: 1; color: var(--text3); transition: transform 0.25s var(--ease), color 0.2s; }
 .vpm-btn:hover .vpm-arrow { transform: translateX(4px); color: var(--accent); }
 .vpm-btn.primary { border-color: rgba(90, 209, 255, 0.65); background: linear-gradient(90deg, rgba(42, 143, 216, 0.62), rgba(90, 209, 255, 0.16)); box-shadow: 0 10px 34px rgba(42, 143, 216, 0.35), var(--hi); }
@@ -1267,6 +1297,8 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .pn-kpi-icon { font-size: 14px; letter-spacing: 0; }
 .pn-kpi-val { font-family: var(--mono); font-size: 20px; font-weight: 800; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.02em; }
 .pn-kpi.big .pn-kpi-val { font-size: 22px; }
+/* a small unit after a big value ('/mo'): the number keeps the room, the unit is never the part cut off */
+.pn-kpi-unit { margin-left: 3px; font: 700 12px var(--font); letter-spacing: 0; color: var(--text3); }
 .pn-kpi-sub { font-size: 11.5px; color: var(--text3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pn-kpi-sub:empty { display: none; }
 .pn-kpi .pn-spark { display: block; margin-top: 6px; width: 100% !important; }
@@ -1774,7 +1806,8 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .pn-insp-dev { margin: 8px 0 4px; font-weight: 700; }
 .pn-dis-toggle .toggle { padding: 4px 0; }
 .pn-loan-offer.na .btn { filter: grayscale(1); opacity: 0.45; }
-.pn-loan-pay { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pn-loan-pay > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pn-loan-paymo { color: var(--text2); font-weight: 700; }
 .pn-hov { position: relative; }
 .pn-hov canvas { cursor: crosshair; }
 .pn-guide { position: absolute; display: none; width: 1px; margin-left: -0.5px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.15)); pointer-events: none; box-shadow: 0 0 6px rgba(90, 209, 255, 0.6); }
@@ -2272,12 +2305,13 @@ C.SEA_Y = C.SEA * C.STEP - 0.12;
  * upkeepMul: recurring building & road upkeep and policy costs (econ; defaults to costMul).
  * grantMul: scale of the state grant young towns receive (econ).
  * demandMul: growth demand scale.
+ * rewardMul: scale of cash rewards the city receives (goals, Mayor's Desk gains, milestone grants).
  */
 VC.DIFFICULTY = {
-  easy: { name: 'Relaxed', money: 150000, costMul: 0.8, upkeepMul: 0.85, grantMul: 1.2, demandMul: 1.2, desc: 'Plenty of cash, forgiving citizens.' },
-  normal: { name: 'Mayor', money: 60000, costMul: 1.0, upkeepMul: 1.0, grantMul: 1, demandMul: 1.0, desc: 'The classic experience.' },
-  hard: { name: 'Tycoon', money: 30000, costMul: 1.25, upkeepMul: 1.1, grantMul: 0.8, demandMul: 0.85, desc: 'Tight budgets, demanding voters.' },
-  sandbox: { name: 'Sandbox', money: 1e9, costMul: 0, upkeepMul: 1, demandMul: 1.3, unlockAll: true, desc: 'Infinite money, everything unlocked.' },
+  easy: { name: 'Relaxed', money: 150000, costMul: 0.8, upkeepMul: 0.85, grantMul: 1.2, demandMul: 1.2, rewardMul: 1.2, desc: 'Plenty of cash, forgiving citizens.' },
+  normal: { name: 'Mayor', money: 60000, costMul: 1.0, upkeepMul: 1.0, grantMul: 1, demandMul: 1.0, rewardMul: 1, desc: 'The classic experience.' },
+  hard: { name: 'Tycoon', money: 30000, costMul: 1.25, upkeepMul: 1.1, grantMul: 0.8, demandMul: 0.85, rewardMul: 0.8, desc: 'Tight budgets, demanding voters.' },
+  sandbox: { name: 'Sandbox', money: 1e9, costMul: 0, upkeepMul: 1, demandMul: 1.3, rewardMul: 1, unlockAll: true, desc: 'Infinite money, everything unlocked.' },
 };
 VC.MAP_SIZES = { small: 96, medium: 128, large: 192, huge: 256 };
 VC.MAP_TYPES = [
@@ -2575,9 +2609,9 @@ for (const p of VC.POLICIES) VC.POLICY[p.key] = p;
 /* ------------------------------------------------------------------ */
 VC.MILESTONES = [
   { pop: 0, name: 'Hamlet', reward: 0 },
-  { pop: 250, name: 'Village', reward: 5000 },
-  { pop: 1000, name: 'Town', reward: 10000 },
-  { pop: 3000, name: 'Small City', reward: 15000 },
+  { pop: 250, name: 'Village', reward: 4000 },
+  { pop: 1000, name: 'Town', reward: 8000 },
+  { pop: 3000, name: 'Small City', reward: 12000 },
   { pop: 10000, name: 'City', reward: 25000 },
   { pop: 25000, name: 'Large City', reward: 40000 },
   { pop: 50000, name: 'Metropolis', reward: 60000 },
@@ -5372,17 +5406,26 @@ function onContextRestored() {
  *     parts: [{ model:'wind_rotor', pivot:[x,y,z], partPivot:[x,y,z], axis:'x'|'y'|'z', speed: radPerSec }],
  *     sized: false,                        // true: forBuilding passes params {fw, fd} (e.g. 'rubble')
  *     lodMinFill: 3,                       // LOD-1 downsample keeps blocks with >= this many voxels (1 for poles)
+ *     lod: true,                           // false: no downsampled LOD — model.lod IS the model (its full-mesh
+ *                                          // handles). For thin street furniture (lamps, signals, hydrants), whose
+ *                                          // 1-voxel poles would double into chunky pillars at half resolution
  *     openFoliage: false,                  // true (deciduous trees): also builds model.winter, meshes whose wood
  *                                          // faces touching leaves exist too (a hidden branch skeleton shows when
- *                                          // the renderer drops the leaves); the summer meshes stay lean
+ *                                          // the renderer drops the leaves); the summer meshes stay lean. The
+ *                                          // winter LOD (model.winter.lod) is its own grid: the wood downsampled
+ *                                          // with minFill 1 (trunks and limbs survive, block grid phase-aligned
+ *                                          // to the trunk), leaf blocks only where there is no wood
  *   })
  *   PARTS: an animated sub-model. pivot = attachment point in the PARENT grid (voxels);
  *   partPivot = rotation center in the PART grid (voxels). Renderer draws the part with
  *   world = parentTransform * T(pivot) * Rot(axis, time*speed [* wind for anim 'wind']) * T(-partPivot).
  *   VC.models.get(key, variant, params) -> Model (generated, meshed, uploaded on first use; cached)
- *   Model = { key, variant, params, sx, sy, sz, vox, height, quads, vao, vbo, lod:{quads,vao,vbo},
- *             emitters:[{x,y,z,type}], lights:[{x,y,z,color,size}], parts,
+ *   Model = { key, variant, params, sx, sy, sz, vox, height, quads, vao, vbo, lod:{quads,vao,vbo} (=== the model
+ *             itself for lod: false), emitters:[{x,y,z,type}], lights:[{x,y,z,color,size}], parts,
  *             winter?:{quads,vao,vbo,lod} (openFoliage models: meshes with the wood under the leaves) }
+ *   VC.models.restore() (after a WebGL context restore; VC.fxgl.restoreModels calls it) re-meshes every cached
+ *   model from model.grid and uploads it into the SAME objects (model, model.lod, model.winter, model.winter.lod),
+ *   so renderers' references stay valid; it also drops the palette texture (re-created on next use).
  *
  * BUILDING MODEL CONVENTIONS:
  *   - A building of unrotated footprint fw x fd tiles is a grid of exactly (fw*8) x H x (fd*8) voxels.
@@ -5815,6 +5858,61 @@ function downsample(g, f = 2, minFill = 3) {
   return o;
 }
 
+/**
+ * Half-resolution WINTER mesh data of an openFoliage model (drawn while the crowns are bare). The plain LOD grid
+ * loses the skeleton: a 2x2 trunk straddles block boundaries (2 voxels per block < minFill) and leaves out-vote
+ * the wood in mixed blocks, so a bare crown fell apart into floating blocks. Here the WOOD (every non-`open`
+ * voxel) is downsampled on its own with minFill 1, so trunks, limbs and twigs survive, and the foliage blocks
+ * (same minFill as the summer LOD) fill in only where there is no wood. The 2x2x2 block grid is shifted by one
+ * voxel on X and / or Z when that needs fewer wood blocks: a 2x2 trunk on voxels 3..4 then stays one block
+ * (2 voxels) wide instead of doubling to 4; the meshed positions are shifted back. Returns mesh() output.
+ */
+function winterLodMesh(g, open, minFill) {
+  const sx = g.sx, sy = g.sy, sz = g.sz, v = g.v;
+  let best = null;
+  for (let s = 0; s < 4; s++) {
+    const ox = s & 1, oz = s >> 1;
+    const wx = sx + ox, wz = sz + oz;
+    const wood = new VoxelGrid(wx, sy, wz);
+    let any = false;
+    for (let y = 0; y < sy; y++)
+      for (let z = 0; z < sz; z++) {
+        let i = sx * (z + sz * y);
+        const o = ox + wx * (z + oz + wz * y);
+        for (let x = 0; x < sx; x++, i++) {
+          const c = v[i];
+          if (c && !open[c]) { wood.v[o + x] = c; any = true; }
+        }
+      }
+    if (!any && s) break; // no wood at all: the unshifted grid is as good as any
+    const w = downsample(wood, 2, 1);
+    let n = 0;
+    for (let i = 0; i < w.v.length; i++) if (w.v[i]) n++;
+    if (!best || n < best.n) best = { n, w, ox, oz };
+  }
+  const { w, ox, oz } = best;
+  // foliage-only grid in the same (shifted) frame, downsampled like the summer LOD, merged where there is no wood
+  const wx = sx + ox, wz = sz + oz;
+  const fol = new VoxelGrid(wx, sy, wz);
+  for (let y = 0; y < sy; y++)
+    for (let z = 0; z < sz; z++) {
+      let i = sx * (z + sz * y);
+      const o = ox + wx * (z + oz + wz * y);
+      for (let x = 0; x < sx; x++, i++) {
+        const c = v[i];
+        if (c && open[c]) fol.v[o + x] = c;
+      }
+    }
+  const f = downsample(fol, 2, minFill);
+  for (let i = 0; i < w.v.length; i++) if (!w.v[i] && f.v[i]) w.v[i] = f.v[i];
+  const m = mesh(w, 2, open);
+  if (ox || oz) {
+    const p = new Int16Array(m.data.buffer, m.data.byteOffset, m.data.byteLength >> 1);
+    for (let k = 0; k < p.length; k += 4) { p[k] -= ox; p[k + 2] -= oz; }
+  }
+  return m;
+}
+
 /* ------------------------------------------------------------------ */
 /* VC.voxel API                                                          */
 /* ------------------------------------------------------------------ */
@@ -5833,6 +5931,7 @@ VC.voxel = {
   palette: PAL,
   mesh,
   downsample,
+  winterLodMesh,
   foliageLUT,
   get palVersion() {
     return palVersion;
@@ -5889,6 +5988,31 @@ VC.voxel = {
 /* ------------------------------------------------------------------ */
 const defs = Object.create(null);
 const cache = new Map();
+/**
+ * Meshes model m's grid g and uploads it INTO m: the full mesh (m.vao/vbo/quads), m.lod (the model itself for
+ * def.lod === false) and, for openFoliage models, m.winter (+ m.winter.lod). Existing lod / winter objects are
+ * refilled in place (context restore), so references held by renderers stay valid. full = mesh(g, 1) if known.
+ */
+function uploadModel(m, def, g, full) {
+  const V = VC.voxel;
+  Object.assign(m, V.upload(full || mesh(g, 1)));
+  if (def.lod === false) m.lod = m; // thin street furniture: the full mesh is its own LOD
+  else {
+    const lod = V.upload(mesh(downsample(g, 2, def.lodMinFill || 3), 2));
+    if (m.lod && m.lod !== m) Object.assign(m.lod, lod);
+    else m.lod = lod;
+  }
+  if (def.openFoliage) {
+    // winter meshes: the wood under the leaves meshed too (drawn while crowns are bare); the LOD keeps the skeleton
+    const open = foliageLUT();
+    const w = V.upload(mesh(g, 1, open));
+    const wl = V.upload(winterLodMesh(g, open, def.lodMinFill || 3));
+    if (m.winter) Object.assign(m.winter, w);
+    else m.winter = w;
+    if (m.winter.lod) Object.assign(m.winter.lod, wl);
+    else m.winter.lod = wl;
+  }
+}
 VC.models = {
   defs,
   stats: { built: 0, quads: 0, ms: 0 },
@@ -5934,8 +6058,6 @@ VC.models = {
     }
     const vox = VC.C.VOX * (def.scale || 1);
     const full = mesh(g, 1);
-    const lodGrid = downsample(g, 2, def.lodMinFill || 3);
-    const lodMesh = mesh(lodGrid, 2);
     m = {
       key, variant, params, sx: g.sx, sy: g.sy, sz: g.sz, vox,
       height: g.maxHeight() * vox,
@@ -5946,16 +6068,7 @@ VC.models = {
       parts: def.parts || null,
       grid: g,
     };
-    if (VC.gfx.gl) {
-      Object.assign(m, VC.voxel.upload(full));
-      m.lod = VC.voxel.upload(lodMesh);
-      if (def.openFoliage) {
-        // winter meshes: the same grids with the wood under the leaves meshed too (drawn while crowns are bare)
-        const open = foliageLUT();
-        m.winter = VC.voxel.upload(mesh(g, 1, open));
-        m.winter.lod = VC.voxel.upload(mesh(lodGrid, 2, open));
-      }
-    }
+    if (VC.gfx.gl) uploadModel(m, def, g, full);
     cache.set(ck, m);
     const dt = performance.now() - t0;
     VC.models.stats.built++;
@@ -5994,10 +6107,38 @@ VC.models = {
     const gl = VC.gfx.gl;
     for (const m of cache.values()) {
       if (gl && m.vbo) { gl.deleteBuffer(m.vbo); gl.deleteVertexArray(m.vao); }
-      if (gl && m.lod) { gl.deleteBuffer(m.lod.vbo); gl.deleteVertexArray(m.lod.vao); }
+      if (gl && m.lod && m.lod !== m) { gl.deleteBuffer(m.lod.vbo); gl.deleteVertexArray(m.lod.vao); }
       if (gl && m.winter) for (const w of [m.winter, m.winter.lod]) if (w) { gl.deleteBuffer(w.vbo); gl.deleteVertexArray(w.vao); }
     }
     cache.clear();
+  },
+  /**
+   * After a WebGL context restore: re-meshes every cached model from its grid and uploads it into the same model /
+   * lod / winter objects (exactly as get() built them). Old handles are dead and are never deleted. Also drops the
+   * palette texture (re-created by the next paletteTexture()). Returns the number of models re-uploaded.
+   */
+  restore() {
+    VC.voxel._palTex = null;
+    VC.voxel._palDirty = false;
+    if (!VC.gfx.gl) return 0;
+    let n = 0;
+    const t0 = performance.now();
+    for (const m of cache.values()) {
+      try {
+        if (!m.grid) {
+          // (no voxels kept: cannot be rebuilt; renderers skip meshes without a VAO)
+          m.vao = m.vbo = null;
+          if (m.lod && m.lod !== m) m.lod.vao = m.lod.vbo = null;
+          continue;
+        }
+        uploadModel(m, defs[m.key] || {}, m.grid);
+        n++;
+      } catch (e) {
+        console.error('[models] re-upload failed', m && m.key, e);
+      }
+    }
+    VC.models.stats.restored = { models: n, ms: Math.round(performance.now() - t0) };
+    return n;
   },
   cached() {
     return cache;
@@ -9036,9 +9177,11 @@ Object.assign(A.ALIAS, {
  *   canTerraform / terraform(x,z,radius, mode 'raise'|'lower'|'level', level)
  *   UNDO: every commit is journaled (tiles touched + buildings added/removed + money spent).
  *     beginGroup(label) / endGroup() merge several commits (brush strokes, multi-place drags) into one step.
- *     canUndo() -> {ok, label, age}, undo() -> {ok, reason, refund}: allowed for UNDO_SEC seconds and only
- *     while every touched tile / added building is still exactly as the action left it. Refunds are booked
- *     under the money category 'refund' (so spending stats / achievements can tell them apart from income).
+ *     canUndo() -> {ok, label, age, locked?}, undo() -> {ok, reason, refund}: allowed for UNDO_SEC seconds and
+ *     only while every touched tile / added building is still exactly as the action left it, and never for a
+ *     step made before a Mayor's Goal completed (bus 'goalDone': it may be what completed the goal — no
+ *     refund on top of the reward; locked: true). Refunds are booked under the money category 'refund' (so
+ *     spending stats / achievements can tell them apart from income).
  *
  * INPUT VALIDATION: every public entry point rejects non-integer / non-finite coordinates ('Invalid position'),
  *   off-map tiles ('Out of bounds'), unknown keys / modes / zone codes, and de-duplicates tile lists, so a bad
@@ -9177,6 +9320,9 @@ const affordable = (cost) => cost <= 0 || VC.money.canAfford(cost);
 let J = null; // record being written
 let groupDepth = 0;
 const history = [];
+// performance.now() of the last completed Mayor's Goal: a step journaled before it may have completed that
+// goal, so it can no longer be undone (else the refund + the reward would make goals free money)
+let goalLockT = -1;
 
 function jOpen(label) {
   if (J) return false;
@@ -9568,11 +9714,13 @@ const A = (VC.actions = {
 
   init() {
     VC.bus.on('dirty', () => { dirtyN++; });
+    VC.bus.on('goalDone', () => { goalLockT = performance.now(); });
   },
   reset() {
     history.length = 0;
     J = null;
     groupDepth = 0;
+    goalLockT = -1;
     ZS.key = '';
   },
 
@@ -10172,6 +10320,7 @@ const A = (VC.actions = {
     if (!r) return { ok: false, reason: 'Nothing to undo' };
     const age = (performance.now() - r.t) / 1000;
     if (age > UNDO_SEC) return { ok: false, reason: 'Nothing to undo', label: r.label, age };
+    if (r.t <= goalLockT) return { ok: false, reason: 'Can’t undo — it already counted for a Mayor’s Goal', label: r.label, age, locked: true };
     return { ok: true, label: r.label, age };
   },
   /** Reverts the most recent step if nothing has touched its tiles/buildings since. */
@@ -10247,11 +10396,14 @@ const A = (VC.actions = {
  *   use the CHARACTER (e.key), so AZERTY / QWERTZ / Dvorak players press the key labelled with the letter;
  *   e.code is the fallback when e.key is not a Latin letter (Cyrillic, Greek…). Digits: the character when it
  *   is a digit (AZERTY Shift+digit, numpad), else the physical digit-row key (AZERTY & é " ' ( - è _ ç à, Czech
- *   + ě š …: the row keeps its 1 … 0 meaning; AZERTY zooms with = / + and the numpad). A printable character
- *   with no meaning here does nothing (never its US-position code: AZERTY ')' or QWERTZ 'ß' do not zoom).
+ *   + ě š …: the row keeps its 1 … 0 meaning). Zoom: '+' / '=' in, '-' out (any key, the numpad too), and the
+ *   '-' position right of the digit row also zooms out when it types no letter / digit there (AZERTY ')' — the
+ *   mirror of its '=' key; QWERTZ 'ß' does not). Any other printable character without a meaning here does
+ *   nothing. Numpad with NumLock off: its arrows / PgUp / PgDn pan and tilt like the real ones.
  *   Backspace = Delete (Mac 'delete' key); '?' = help (F1 is brightness on Macs). AltGr characters count
  *   ([ ] on many layouts), AltGr is never Ctrl. A remapped key blocks the positional fallbacks of other
- *   modules (preventDefault).
+ *   modules (preventDefault). The Help window shows the camera keys with THIS layout's labels (Z Q S D / A E
+ *   on AZERTY: navigator.keyboard.getLayoutMap(), else learned from the characters those keys type).
  * KEYBOARD (central; behind menus and modals): see KEYMAP. Ignored only while TYPING — focus in a text-like
  *   field (text/search/number/email/password/… inputs, textarea, select, contenteditable). Sliders, checkboxes,
  *   radios and buttons keep focus after a click but never swallow hotkeys (a focused slider keeps only its own
@@ -10261,8 +10413,9 @@ const A = (VC.actions = {
  *   Continuous camera moves use real dt: pan speed ∝ zoom distance (Shift = faster).
  * FEEDBACK: toggles (cinematic, grid, overlay, undo) show ONE toast via VC.ui.toast directly (a bus 'toast' would
  *   add the audio module's notify sound); overlay cycling reuses a single toast that updates in place.
- * API: KEYMAP [{group, keys, action}] (help window; keys: alternatives separated by ', ', chords by ' + ', so a
- *   bare '+' / '−' is a key of its own; '⌘' instead of 'Ctrl' on Macs), keys Set of held (logical) codes,
+ * API: KEYMAP [{group, keys, action, pos?}] (help window; keys: alternatives separated by ', ', chords by ' + ', so
+ *   a bare '+' / '−' is a key of its own; '⌘' instead of 'Ctrl' on Macs; pos: 'pan' / 'rot' rows show this
+ *   layout's labels), posLabel(code), posKnown(), keys Set of held (logical) codes,
  *   mouse {x, y (client px), buttons, over}, mods {shift, ctrl, alt}, enabled(), PANEL_KEYS {code: panelKey},
  *   isTyping(e), IS_MAC, MOD ('⌘' | 'Ctrl'), logicalKey(e) -> the layout-aware key code this module acts on,
  *   zoomDir() -> 1 | -1 (VC.settings.invertZoom; multiply wheel deltas by it), wheelZoom(e) -> camera zoom factor
@@ -10285,6 +10438,14 @@ const MOD = IS_MAC ? '⌘' : 'Ctrl';
 const PANEL_KEYS = { KeyM: 'budget', KeyP: 'policies', KeyG: 'stats', KeyU: 'population', KeyV: 'services', KeyY: 'utilities', KeyN: 'advisors', KeyJ: 'milestones', KeyX: 'disasters', KeyK: 'save' };
 /** Continuous (held) keys by PHYSICAL position: the camera cluster. Zoom keys are resolved by character. */
 const HOLD = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyQ', 'KeyE', 'PageUp', 'PageDown']);
+/**
+ * Labels of the positional camera letter keys on THIS keyboard layout (Help -> Controls): US letters until all
+ * six are known — from navigator.keyboard.getLayoutMap() (Chromium) or learned from the letters those keys
+ * type (learnPos) — then e.g. Z Q S D / A E on AZERTY.
+ */
+const POS = Object.assign(Object.create(null), { KeyW: 'W', KeyA: 'A', KeyS: 'S', KeyD: 'D', KeyQ: 'Q', KeyE: 'E' });
+const POS_US = Object.assign(Object.create(null), POS);
+const posSeen = new Set();
 const holdOf = new Map(); // held physical code -> its logical key (e.g. NumpadAdd / QWERTZ '+' -> 'Equal')
 let ctrlHeld = false; // a real Ctrl / Cmd key is down (a trackpad pinch sends ctrl+wheel without it)
 const DRAG_PX = 5; // movement before a press becomes a drag
@@ -10377,12 +10538,12 @@ const I = (VC.input = {
   PANEL_KEYS,
   // keys: alternatives separated by ', ', chords by ' + ' (a lone '+' or '−' is a key); see hud_settings keyChips
   KEYMAP: [
-    { group: 'Camera', keys: 'W A S D, Arrows', action: 'Pan the camera (hold Shift = faster)' },
+    { group: 'Camera', keys: 'W A S D, Arrows', action: 'Pan the camera (hold Shift = faster)', pos: 'pan' },
     { group: 'Camera', keys: 'Right-drag', action: 'Rotate and tilt' },
     { group: 'Camera', keys: 'Middle-drag', action: 'Pan (drag the ground)' },
     { group: 'Camera', keys: 'Left-drag', action: 'Pan with the Inspect tool' },
     { group: 'Camera', keys: 'Wheel, Pinch, +, −', action: 'Zoom toward the cursor' },
-    { group: 'Camera', keys: 'Q, E', action: 'Rotate left / right' },
+    { group: 'Camera', keys: 'Q, E', action: 'Rotate left / right', pos: 'rot' },
     { group: 'Camera', keys: 'PgUp, PgDn', action: 'Tilt the camera' },
     { group: 'Camera', keys: 'Double-click', action: 'Focus on a building' },
     { group: 'Camera', keys: 'C', action: 'Cinematic camera' },
@@ -10420,6 +10581,10 @@ const I = (VC.input = {
   IS_MAC,
   MOD,
   logicalKey,
+  /** Label of a positional camera key (KeyW …) on this keyboard layout ('Z' for KeyW on AZERTY; US until known). */
+  posLabel: (code) => (posKnown() ? POS[code] : POS_US[code]) || String(code || '').replace(/^Key/, ''),
+  /** True once the labels of all positional camera letter keys on this layout are known (see KEYMAP). */
+  posKnown,
   /** +1, or -1 with VC.settings.invertZoom: multiply wheel deltas by it (minimap & co. zoom like the 3D view). */
   zoomDir,
   /**
@@ -10442,6 +10607,13 @@ const I = (VC.input = {
 
   init() {
     cv = VC.gfx.canvas;
+    // the camera keys' labels on this keyboard layout (Help): Chromium tells us right away
+    try {
+      const kb = navigator.keyboard;
+      if (kb && typeof kb.getLayoutMap === 'function') {
+        kb.getLayoutMap().then((m) => { for (const c in POS) learnPos(c, m.get(c)); }, () => { /* not allowed here */ });
+      }
+    } catch (e) { /* no Keyboard API (Firefox, Safari): learned from key presses */ }
     cv.addEventListener('contextmenu', (e) => e.preventDefault());
     cv.addEventListener('pointerdown', onDown);
     window.addEventListener('pointermove', onMove, { passive: true });
@@ -10878,9 +11050,18 @@ function logicalKey(e) {
     if (SPEED_UP.has(k)) return 'SpeedUp';
     if (k === '?') return 'Help';
     if (k === ' ') return 'Space';
-    return ''; // a character without a meaning here (not its US-position code: AZERTY ')' is not zoom)
+    // the key right of the digit row types no '-' on some layouts (AZERTY ')' / '°'): it still zooms out, as
+    // its neighbour (the '=' key on AZERTY) zooms in — unless it types a letter / digit (QWERTZ 'ß')
+    if (code === 'Minus' && !LETTER_RE.test(k) && !/^[0-9]$/.test(k)) return 'Minus';
+    return ''; // a character without a meaning here (not its US-position code)
   }
   // named keys and dead keys (e.key 'Dead', 'Unidentified'): by position where that is unambiguous
+  // numpad with NumLock off: 8 / 2 / 4 / 6 / 9 / 3 send ArrowUp … PageDown (pan / tilt, released by e.code on
+  // keyup via holdOf); the other named numpad keys: '.' = Delete, 5 / 0 / 7 / 1 (Clear, Insert, Home, End) = none
+  if (/^Numpad/.test(code) && e.key && e.key.length > 1 && e.key !== 'Unidentified' && e.key !== 'Dead') {
+    if (/^(Arrow(Up|Down|Left|Right)|Page(Up|Down))$/.test(e.key)) return e.key;
+    return e.key === 'Delete' ? 'Delete' : e.key === 'Enter' ? code : '';
+  }
   if (/^Digit\d$/.test(code)) return code;
   if (/^Numpad\d$/.test(code)) return 'Digit' + code.slice(6);
   if (/^Key[A-Z]$/.test(code)) return code;
@@ -10898,7 +11079,32 @@ function releaseKey(code) {
   I.keys.delete(L);
 }
 
+/** Learns the letter a positional camera key types on this layout; KEYMAP shows them once all six are known. */
+function learnPos(code, ch) {
+  if (!code || !(code in POS) || typeof ch !== 'string' || ch.length !== 1) return;
+  const up = ch.toUpperCase();
+  if (!LETTER_RE.test(up) && !/^[0-9]$/.test(up)) return; // (a symbol would clash with the KEYMAP separators)
+  const was = posKnown();
+  posSeen.add(code);
+  if (POS[code] === up && was === posKnown()) return;
+  POS[code] = up;
+  posKeymap();
+}
+function posKnown() {
+  return posSeen.size >= 6;
+}
+/** Rewrites the KEYMAP camera rows with this layout's labels (US labels until every one is known). */
+function posKeymap() {
+  const L = posKnown() ? POS : POS_US;
+  for (const k of I.KEYMAP) {
+    if (k.pos === 'pan') k.keys = L.KeyW + ' ' + L.KeyA + ' ' + L.KeyS + ' ' + L.KeyD + ', Arrows';
+    else if (k.pos === 'rot') k.keys = L.KeyQ + ', ' + L.KeyE;
+  }
+}
+
 function onKeyDown(e) {
+  // (any plain press of a camera letter key teaches its label on this layout — also while typing)
+  if (e.code in POS && !e.ctrlKey && !e.metaKey && !e.altKey) learnPos(e.code, e.key);
   setMods(e);
   trackCtrl(e, true);
   if (isTyping(e)) return;
@@ -14325,9 +14531,10 @@ function buildRender() {
  *   skip distance are dropped) are scanned — nearest first in the camera pass, so each bucket is ordered front
  *   to back — and each instance picks a LOD tier by camera distance (0 full mesh, 1 model.lod, 2 a
  *   1/4-resolution mesh built lazily here from model.grid; props stop at tier 1, models without a distinct
- *   LOD mesh stay in one bucket, and a model's few 1/4-res instances (<= 3) join its LOD-1 bucket). The LOD
- *   distances are the preset's lodDist on high/ultra (moved closer only by dynamic resolution / wide FOV); on
- *   medium/low the full-mesh range is screen-space (see lodDistance). Tiny/far things are skipped (SKIP_DEF:
+ *   LOD mesh (incl. thin street furniture whose model.lod is the model) stay in one bucket, bare deciduous crowns
+ *   use their winter LOD mesh for tier 2 as well, and a model's few 1/4-res instances (<= 3) join its LOD-1
+ *   bucket). The LOD distances are the preset's lodDist on high/ultra (moved closer only by dynamic resolution /
+ *   wide FOV); on medium/low the full-mesh range is screen-space (see lodDistance). Tiny/far things are skipped (SKIP_DEF:
  *   props end at 0.9 lodDist, their glows stay), and the visible slot indices are counting-sorted per
  *   (model, tier) into a stream buffer. Result: ONE drawElementsInstanced per visible
  *   (model, tier) — bindVertexArray + one attribute pointer + one uniform per draw (the instance attribute's
@@ -14621,6 +14828,7 @@ let cellSeen = new Int32Array(0); // frameCount when the camera pass last saw th
 const MWS = [];
 const mwMap = new Map();
 let mwKind = new Uint8Array(64), mwHasL2 = new Uint8Array(64), mwL2State = new Uint8Array(64), mwSameL1 = new Uint8Array(64);
+let mwBareL1 = new Uint8Array(64); // 1: bare-crown tree with a winter LOD mesh (its tier 2 is that mesh while bareSeason())
 const mwSkip = [new Float32Array(64), new Float32Array(64), new Float32Array(64)]; // (factor * lodDist)^2 per mode (camera, shadow near, shadow far), in units of lodDist^2
 const l2Queue = [];
 // lit slots (model has lights) for the static sprite list
@@ -14846,6 +15054,7 @@ function ensureMwArrays(n) {
   mwHasL2 = growU8(mwHasL2, len, 0);
   mwL2State = growU8(mwL2State, len, 0);
   mwSameL1 = growU8(mwSameL1, len, 0);
+  mwBareL1 = growU8(mwBareL1, len, 0);
   for (let k = 0; k < 3; k++) {
     const a = new Float32Array(len);
     a.set(mwSkip[k]);
@@ -14903,21 +15112,26 @@ function getMW(m, kind) {
 }
 /**
  * (Re)reads the mesh handles of wrapper mw from its model (at creation and after a context restore re-uploaded
- * the model): tier 0 full mesh, tier 1 model.lod (or the full mesh), tier 2 the 1/4-res mesh built here lazily
- * (dropped: requested again by gather), winter meshes of open-foliage trees.
+ * the model): tier 0 full mesh, tier 1 model.lod (or the full mesh: models without a LOD, and thin street furniture
+ * whose model.lod is the model itself), tier 2 the 1/4-res mesh built here lazily (dropped: requested again by
+ * gather), winter meshes of open-foliage trees. Bare crowns do not use the 1/4-res mesh (at 1/4 resolution the
+ * leaves out-vote the skeleton, and a 2-voxel trunk would become a 4-voxel pillar): their tier 2 is the winter LOD
+ * mesh (gather folds those instances into the tier-1 bucket while bareSeason()).
  */
 function meshLevels(mw) {
   const m = mw.m, idx = mw.idx;
   const l0 = m.vao && m.quads ? { vao: m.vao, quads: m.quads } : null;
-  const l1 = m.lod && m.lod.vao && m.lod.quads ? { vao: m.lod.vao, quads: m.lod.quads } : l0;
+  const l1 = m.lod && m.lod !== m && m.lod.vao && m.lod.quads ? { vao: m.lod.vao, quads: m.lod.quads } : l0;
   mw.lv[0] = l0;
   mw.lv[1] = l1;
   mw.lv[2] = null;
   const w = m.winter;
-  mw.lvWinter = w && w.vao ? [{ vao: w.vao, quads: w.quads }, w.lod && w.lod.vao ? { vao: w.lod.vao, quads: w.lod.quads } : null, null] : null;
+  const wl1 = w && w.lod && w.lod.vao && w.lod.quads ? { vao: w.lod.vao, quads: w.lod.quads } : null;
+  mw.lvWinter = w && w.vao ? [{ vao: w.vao, quads: w.quads }, wl1, wl1] : null;
   mwHasL2[idx] = 0;
   mwL2State[idx] = l0 ? 0 : 3;
   mwSameL1[idx] = l1 === l0 ? 1 : 0;
+  mwBareL1[idx] = wl1 ? 1 : 0;
 }
 /** Overrides skip distances (in units of quality lodDist; Infinity = never skip, 0 = never draw) for a wrapper. */
 function setSkip(mw, cam, shNear, shFar) {
@@ -15914,6 +16128,7 @@ function gather(set, planes, mode) {
     T1[k] = TIER_F[k][1] * TIER_F[k][1] * L2;
   }
   const minTier = mode === 0 ? 0 : mode === 1 ? 1 : 2;
+  const bare = bareSeason();
   const skip = mwSkip[mode];
   const cam = VC.camera.pos;
   const px = cam[0], py = cam[1], pz = cam[2];
@@ -15962,6 +16177,9 @@ function gather(set, planes, mode) {
         if (mwL2State[mi] === 0) { mwL2State[mi] = 1; l2Queue.push(mi); }
         tier = 1;
       }
+      // bare crowns: the leafy 1/4-res mesh has no skeleton left, the winter LOD mesh draws their tier 2 (the 1/4-res
+      // mesh is still requested above, so it is ready when the leaves come back)
+      if (tier === 2 && bare && mwBareL1[mi]) tier = 1;
       if (tier === 1 && mwSameL1[mi]) tier = 0; // no distinct LOD mesh: one bucket, one draw
       const bk = mi * 3 + tier;
       if (bCnt[bk]++ === 0) { used[nUsed++] = bk; bMin[bk] = d2; }
@@ -19025,8 +19243,8 @@ function updateBalloons(dt) {
  *   fireworks(x, z, n)  a show of n shells over ~5-20 s (a finale cluster at the end): rockets with
  *                       spark trails, then peony / two-tone / ring / willow / crackle bursts in HDR colours
  *                       with flashes that light the sky ('sfx' firework). Triggered automatically on
- *                       'milestone' (30 shells + confetti) and 'year' (New Year, 18 shells) over City Hall
- *                       or the population-weighted city centre.
+ *                       'milestone' (30 shells + confetti; no confetti with VC.settings.juice === false) and
+ *                       'year' (New Year, 18 shells) over City Hall or the population-weighted city centre.
  *   confetti(x, z, n)   confetti + sparkle bursts (above City Hall when (x, z) is omitted)
  *   isLaunching(b)      true while space_center b's pad rocket must NOT be drawn by the building renderer:
  *                       from lift-off, through the empty-pad pause after the flight, until the replacement
@@ -19147,7 +19365,9 @@ const Cel = (VC.fxCel = {
       const p = pending;
       pending = null;
       if (showSeq === p.seq) celebrate(p.n, false);
-      if (p.confetti) Cel.confetti();
+      // the 'Growth popups & celebrations' setting (VC.settings.juice) also turns the milestone confetti off
+      // (the fireworks stay)
+      if (p.confetti && !(VC.settings && VC.settings.juice === false)) Cel.confetti();
     }
     if (rdt <= 0) return drawOnly(B, G);
     const Pt = VC.particles;
@@ -23410,7 +23630,10 @@ void main(){
  * registered in init() only if those keys are missing.
  *
  * Props end at their LOD-1 mesh (no 1/4-res tier) and are culled well before they shrink below a pixel
- * (VC.bldgfx skip table); lamp and signal glows are sprites and stay visible farther out.
+ * (VC.bldgfx skip table); lamp and signal glows are sprites and stay visible farther out. Thin street furniture
+ * (lamps, traffic lights, hydrants: model `lod: false`) has no coarser mesh at all — a half-resolution LOD would
+ * double the 1-voxel poles into pillars — so only big props (pylons) switch to their LOD-1 mesh. Lamps and
+ * traffic lights are ~0.8-0.9 units tall (a one-storey eave).
  *
  * WEBGL CONTEXT LOSS: tick() does nothing while the context is lost (queued rects / wires wait); restore() re-creates
  *   the wire buffers + VAO and re-uploads the wires. Prop instances live in VC.bldgfx.eng, restored by VC.bldgfx.
@@ -23537,17 +23760,18 @@ function defineFallbacks() {
   const P = VC.P;
   if (!VC.models.has('streetlamp')) {
     VC.models.define('streetlamp', {
+      lod: false,
       variants: 2,
       scale: 0.5,
       gen(rng, v) {
-        const g = new VC.VoxelGrid(9, 19, 9);
+        const g = new VC.VoxelGrid(9, 13, 9);
         const X = 4, Z = 4, dark = v ? P.METAL : P.BLACK;
         g.box(3, 0, 3, 3, 1, 3, P.CONCRETE_D);
-        g.box(X, 1, Z, 1, 15, 1, dark);
-        g.box(X, 15, Z + 1, 1, 1, 3, dark);
-        g.box(X, 13, Z + 3, 1, 2, 1, v ? P.LAMP_WHITE : P.LAMP);
-        g.meta.head = [X + 0.5, 13, Z + 3.5];
-        g.light(X + 0.5, 13, Z + 3.5, v ? [0.85, 0.92, 1] : [1, 0.78, 0.45], 1.2);
+        g.box(X, 1, Z, 1, 11, 1, dark);
+        g.box(X, 11, Z + 1, 1, 1, 3, dark);
+        g.box(X, 9, Z + 3, 1, 2, 1, v ? P.LAMP_WHITE : P.LAMP);
+        g.meta.head = [X + 0.5, 9, Z + 3.5];
+        g.light(X + 0.5, 9, Z + 3.5, v ? [0.85, 0.92, 1] : [1, 0.78, 0.45], 1.2);
         return crop(g);
       },
     });
@@ -23556,27 +23780,28 @@ function defineFallbacks() {
     const ON = [P.NEON_RED, P.NEON_YELLOW, P.NEON_GREEN], OFF = [P.BRICK_D, P.WOOD_D, P.GRASS_D];
     const RGB = [[1, 0.2, 0.15], [1, 0.6, 0.1], [0.3, 1, 0.4]];
     VC.models.define('traffic_light', {
+      lod: false,
       variants: 3,
       scale: 0.5,
       gen(rng, v) {
-        const g = new VC.VoxelGrid(9, 18, 17);
+        const g = new VC.VoxelGrid(9, 14, 17);
         const X = 4, Z = 8, litX = [0, 2, 1][v % 3], litZ = litX === 0 ? 2 : 0;
         g.box(3, 0, 7, 3, 1, 3, P.CONCRETE_D);
-        g.box(X, 1, Z, 1, 15, 1, P.METAL_D);
-        g.box(X, 15, Z + 1, 1, 1, 8, P.METAL_D);
+        g.box(X, 1, Z, 1, 12, 1, P.METAL_D);
+        g.box(X, 12, Z + 1, 1, 1, 8, P.METAL_D);
         const hz = Z + 6;
-        g.box(X, 10, hz - 1, 1, 5, 3, P.BLACK);
+        g.box(X, 8, hz - 1, 1, 4, 3, P.BLACK);
         for (let k = 0; k < 3; k++) {
-          g.set(X, 13 - k, hz, k === litX ? ON[k] : OFF[k]);
+          g.set(X, 10 - k, hz, k === litX ? ON[k] : OFF[k]);
           if (k === litX) {
-            g.light(X - 0.2, 13.5 - k, hz + 0.5, RGB[k], 0.5, true);
-            g.light(X + 1.2, 13.5 - k, hz + 0.5, RGB[k], 0.5, true);
+            g.light(X - 0.2, 10.5 - k, hz + 0.5, RGB[k], 0.5, true);
+            g.light(X + 1.2, 10.5 - k, hz + 0.5, RGB[k], 0.5, true);
           }
         }
-        g.box(X + 1, 7, Z, 2, 5, 1, P.BLACK);
+        g.box(X + 1, 5, Z, 2, 5, 1, P.BLACK);
         for (let k = 0; k < 3; k++) {
-          g.set(X + 1, 10 - k, Z, k === litZ ? ON[k] : OFF[k]);
-          if (k === litZ) g.light(X + 1.5, 10.5 - k, Z + 1.2, RGB[k], 0.45, true);
+          g.set(X + 1, 8 - k, Z, k === litZ ? ON[k] : OFF[k]);
+          if (k === litZ) g.light(X + 1.5, 8.5 - k, Z + 1.2, RGB[k], 0.45, true);
         }
         return crop(g);
       },
@@ -28368,6 +28593,9 @@ function iceTarget() {
  *   meantime (player, disaster) restarts it (after 3 tries it waits for the next trigger). Compression
  *   is async (CompressionStream). Autosaves capture NO thumbnail (a canvas capture stalls the GPU
  *   pipeline): the entry reuses this city's latest thumbnail; manual saves capture one.
+ * WHOLE DAYS: every snapshot of the running city (save, quick save, sliced / sync autosave, serialize,
+ *   encode / export) first finishes a sim day the frame loop left half-done (VC.sim.finishDay), so a save
+ *   never holds half a day or a month boundary whose billing has not run yet.
  * PAUSE MENU: while it is open (or after it paused the game) a save stores the speed the game resumes at
  *   (VC.menu.resumeSpeed() when available, else the speed before the menu paused), so it never loads paused.
  *
@@ -28611,9 +28839,19 @@ function storedSpeed(S) {
   if (menuPause && menuPause.S === S) return menuPause.from;
   return t.speed;
 }
+/**
+ * The running city may be in the middle of a staged sim day (a big city's day can span frames; on a
+ * month's last day the billing runs in the day's final slice): finish it first, so a save never holds
+ * half a day or skips a month's billing. Only for the running city (VC.sim.finishDay ignores others).
+ */
+function wholeDay(S) {
+  if (!S || S !== VC.state || !VC.sim || typeof VC.sim.finishDay !== 'function') return;
+  try { VC.sim.finishDay(); } catch (e) { console.error('[save] finishing the sim day failed', e); }
+}
 /** Synchronous snapshot storing the resume speed (see storedSpeed). */
 function snapshotOf(S, withExtra) {
   if (!S || !S.time) return codec().snapshot(S, null); // throws the friendly "no city" error
+  wholeDay(S);
   return codec().snapshot(S, withExtra === false ? null : collectExtra(S), { speed: storedSpeed(S) });
 }
 /** Writes a storage string. An autosave that hits the quota evicts other cities' oldest autosaves first. */
@@ -28778,6 +29016,7 @@ function saveState(S, slot, name, opts, pre) {
   else {
     try {
       // snapshot synchronously so the running game can't change what gets written
+      wholeDay(S); // (before the fingerprint: finishing the day changes the city)
       if (!S.demo) cityIdOf(S);
       fp = fingerprint(S);
       snap = snapshotOf(S, opts.extra);
@@ -28878,6 +29117,7 @@ function startInc(S) {
 function restartInc() {
   const j = inc;
   j.tries++;
+  wholeDay(j.S); // whole days only (the hold below then keeps new days from starting)
   j.sig = structSig(j.S);
   j.gen = codec().snapshotGen(j.S, collectExtra(j.S), { speed: storedSpeed(j.S) });
 }
@@ -28928,6 +29168,7 @@ function saveSync(S, force) {
   if (!force && (!changedSinceSave(S) || isEmptyCity(S))) return false;
   const t0 = now();
   try {
+    wholeDay(S);
     cityIdOf(S);
     const fp = fingerprint(S);
     const meta = codec().meta(S);
@@ -29056,7 +29297,9 @@ const SV = (VC.save = Object.assign(VC.save || {}, {
   },
 
   serialize(S) {
-    return codec().serialize(S || VC.state, { extra: collectExtra(S || VC.state) });
+    S = S || VC.state;
+    wholeDay(S);
+    return codec().serialize(S, { extra: collectExtra(S) });
   },
   deserialize(obj) {
     return codec().deserialize(obj);
@@ -37853,13 +38096,17 @@ VC.models.define('grow_R2', {
  * only through voxels buried inside the canopy (the summer look is unchanged). Their definitions carry
  * `openFoliage: true`, so the registry also builds model.winter meshes in which the wood faces touching leaves
  * exist (VC.voxel.mesh open set); when the renderer drops the leaves in late autumn it draws those, and the bare
- * tree keeps a real branch structure (the summer meshes stay as lean as before). Bush flowers and
+ * tree keeps a real branch structure (the summer meshes stay as lean as before). The winter LOD mesh is built
+ * from the wood alone (VC.voxel.winterLodMesh: trunk, leader and limbs survive the half-resolution downsample,
+ * the 2x2 trunk stays 2 voxels wide) and also stands in for the 1/4-res tier while crowns are bare, so keep
+ * trunks on voxels 3..4 and skeletons connected. Bush flowers and
  * fallen cherry petals use FOLIAGE-flagged colours (BLOOM_*), so they follow the seasons like leaves.
  *
  * Non-building models (props, vehicles, creatures) are centred on their grid: the renderer's origin
  * is the bottom centre (sx/2, 0, sz/2); the front faces +Z. See the per-file headers for meta fields.
  * Thin models carry `lodMinFill: 1` in their definition: a hint that the LOD downsample should keep
- * any block with >= 1 voxel (poles, stems and rotor blades otherwise vanish at LOD).
+ * any block with >= 1 voxel (poles, stems and rotor blades otherwise vanish at LOD). Thin street furniture
+ * (streetlamp, traffic_light, hydrant) is `lod: false` instead: no downsampled LOD at all (see nature_props.js).
  *
  * VC.natureKit (usable by any module after load):
  *   seasonPalette()          { autumn, winter: Float32Array(256*3) sRGB, mask: Uint8Array(256) }
@@ -38448,14 +38695,18 @@ VC.models.define('tree_bush', {
  * Street furniture uses scale 0.5 (1/16-unit voxels, 16 per tile) so poles stay slim next to the
  * 1/8-unit buildings. Non-sized props are centred on their grid (renderer origin = bottom centre
  * (sx/2, 0, sz/2)); odd grid widths keep 1-voxel poles exactly on that origin. Front = +Z.
+ * Lamps, traffic lights and hydrants are `lod: false`: a half-resolution LOD would double their 1-voxel poles
+ * into chunky pillars, so the full mesh (a few dozen quads) is drawn at every distance.
  *
- *   streetlamp     scale .5, 9x19x9. Pole on the origin, arm overhangs +Z. Variants: 0 classic
- *                  (dark grey-green cast-iron crook + lantern, warm LAMP — not pure black, so the slim pole
- *                  still reads against dark asphalt), 1 modern (grey LED arm, LAMP_WHITE).
- *                  meta.head = lamp position (voxels); g.light at the head (glows at night).
- *   traffic_light  scale .5, 9x18x17. Pole on the origin, mast arm along +Z over the lanes carrying
- *                  a double-faced head that faces +-X (seen by traffic moving along X); a small
- *                  pole head faces +-Z for the crossing direction.
+ *   streetlamp     scale .5, 9x13x9 (0.81 units: a one-storey eave, about half a two-storey house). Pole on
+ *                  the origin, the head hangs 3-3.5 voxels out along +Z (the terrain's light pools and
+ *                  VC.props.lampReach, ~0.2 units, sit under it). Variants: 0 classic (dark grey-green
+ *                  cast-iron crook + lantern, warm LAMP — not pure black, so the slim pole still reads against
+ *                  dark asphalt), 1 modern (grey LED arm, LAMP_WHITE). meta.head = lamp position (voxels);
+ *                  g.light at the head (glows at night).
+ *   traffic_light  scale .5, 9x14x17 (0.88 units). Pole on the origin, mast arm along +Z over the lanes
+ *                  carrying a double-faced head that faces +-X (seen by traffic moving along X; its underside
+ *                  clears the tallest vehicles); a small pole head faces +-Z for the crossing direction.
  *                  Variants (main head / pole head): 0 red/green, 1 green/red, 2 yellow/red,
  *                  3 red/yellow. VC.natureKit.signalVariant(phase, rot) maps an agents.signal()
  *                  phase to the right variant. meta.heads = lit lamps of the main head; every
@@ -38480,35 +38731,35 @@ const M = VC.M;
 /* Street lamp                                                           */
 /* ------------------------------------------------------------------ */
 VC.models.define('streetlamp', {
-  lodMinFill: 1,
+  lod: false, // (thin pole: the full mesh is its own LOD)
   variants: 2,
   scale: 0.5,
   gen(rng, v) {
-    const g = new VC.VoxelGrid(9, 19, 9);
+    const g = new VC.VoxelGrid(9, 13, 9);
     const X = 4, Z = 4;
     if (v % 2 === 0) {
       // classic: stepped cast-iron base, fluted pole, shepherd's crook, hanging lantern
       const IRON = K.col('IRON');
       g.box(3, 0, 3, 3, 1, 3, IRON);
-      g.box(X, 1, Z, 1, 15, 1, IRON);
+      g.box(X, 1, Z, 1, 11, 1, IRON);
       g.set(X, 3, Z, P.GOLD);
-      g.set(X, 16, Z, P.GOLD); // finial
-      g.box(X, 15, Z + 1, 1, 1, 3, IRON); // arm
-      g.set(X, 14, Z + 1, IRON); // scroll brace
-      g.set(X, 14, Z + 3, IRON); // lantern cap
-      g.box(X, 12, Z + 3, 1, 2, 1, P.LAMP);
-      g.set(X, 11, Z + 3, IRON);
-      g.meta.head = [X + 0.5, 12.5, Z + 3.5];
-      g.light(X + 0.5, 12.5, Z + 3.5, [1, 0.78, 0.45], 1.2);
+      g.set(X, 12, Z, P.GOLD); // finial
+      g.box(X, 11, Z + 1, 1, 1, 3, IRON); // arm
+      g.set(X, 10, Z + 1, IRON); // scroll brace
+      g.set(X, 10, Z + 3, IRON); // lantern cap
+      g.box(X, 8, Z + 3, 1, 2, 1, P.LAMP);
+      g.set(X, 7, Z + 3, IRON);
+      g.meta.head = [X + 0.5, 8.5, Z + 3.5];
+      g.light(X + 0.5, 8.5, Z + 3.5, [1, 0.78, 0.45], 1.2);
     } else {
       // modern: slim grey pole, rising arm, flat LED head
       g.box(3, 0, 3, 3, 1, 3, P.CONCRETE_D);
-      g.box(X, 1, Z, 1, 16, 1, P.METAL);
-      g.line(X, 16, Z, X, 17, Z + 2, P.METAL);
-      g.box(X, 17, Z + 2, 1, 1, 3, P.METAL_D);
-      g.box(X, 16, Z + 3, 1, 1, 2, P.LAMP_WHITE);
-      g.meta.head = [X + 0.5, 16, Z + 4];
-      g.light(X + 0.5, 16, Z + 4, [0.85, 0.92, 1], 1.2);
+      g.box(X, 1, Z, 1, 11, 1, P.METAL);
+      g.line(X, 11, Z, X, 12, Z + 2, P.METAL);
+      g.box(X, 12, Z + 2, 1, 1, 3, P.METAL_D);
+      g.box(X, 11, Z + 3, 1, 1, 2, P.LAMP_WHITE);
+      g.meta.head = [X + 0.5, 11, Z + 4];
+      g.light(X + 0.5, 11, Z + 4, [0.85, 0.92, 1], 1.2);
     }
     return K.fit(g);
   },
@@ -38527,30 +38778,30 @@ const SIG_RGB = [[1, 0.2, 0.15], [1, 0.6, 0.1], [0.3, 1, 0.4]];
  */
 K.signalVariant = (phase, rot = 0) => (phase < 0 ? 0 : (rot & 1 ? [0, 3, 1, 2] : [1, 2, 0, 3])[phase & 3]);
 VC.models.define('traffic_light', {
-  lodMinFill: 1,
+  lod: false, // (thin pole: the full mesh is its own LOD)
   variants: 4,
   scale: 0.5,
   gen(rng, v) {
-    const g = new VC.VoxelGrid(9, 18, 17);
+    const g = new VC.VoxelGrid(9, 14, 17);
     const X = 4, Z = 8;
     const on = SIG_ON(), off = SIG_OFF();
     // variant -> lit lamp (0 top red, 1 yellow, 2 green) of the main (X-facing) head and the pole
     // (Z-facing) head: 0 red/green, 1 green/red, 2 yellow/red, 3 red/yellow
     const litX = [0, 2, 1, 0][v % 4], litZ = [2, 0, 0, 1][v % 4];
     g.box(3, 0, 7, 3, 1, 3, P.CONCRETE_D);
-    g.box(X, 1, Z, 1, 15, 1, P.METAL_D);
-    g.set(X, 16, Z, P.METAL_D);
-    g.box(X, 15, Z + 1, 1, 1, 8, P.METAL_D); // mast arm over the lanes
-    g.set(X, 14, Z + 1, P.METAL_D); // gusset
+    g.box(X, 1, Z, 1, 12, 1, P.METAL_D);
+    g.box(X, 12, Z + 1, 1, 1, 8, P.METAL_D); // mast arm over the lanes
+    g.set(X, 11, Z + 1, P.METAL_D); // gusset
     // street-name blade on the arm
-    g.box(X, 16, Z + 2, 1, 1, 3, P.GREEN);
-    g.set(X, 16, Z + 3, P.WHITE);
-    // main head hanging from the arm end: lamps on the +-X faces, black housing around them
+    g.box(X, 13, Z + 2, 1, 1, 3, P.GREEN);
+    g.set(X, 13, Z + 3, P.WHITE);
+    // main head hanging from the arm end: lamps on the +-X faces, black housing around them. Its underside
+    // (y 8 = 0.5 units + the kerb) clears the tallest vehicles (trucks, 0.5 units) passing below
     const hz = Z + 6;
-    g.box(X, 10, hz - 1, 1, 5, 3, P.BLACK);
+    g.box(X, 8, hz - 1, 1, 4, 3, P.BLACK);
     g.meta.heads = [];
     for (let k = 0; k < 3; k++) {
-      const y = 13 - k;
+      const y = 10 - k;
       g.set(X, y, hz, k === litX ? on[k] : off[k]);
       if (k === litX) {
         g.meta.heads.push([X + 0.5, y + 0.5, hz + 0.5]);
@@ -38559,9 +38810,9 @@ VC.models.define('traffic_light', {
       }
     }
     // pole head for the crossing direction (faces +-Z), complementary aspect
-    g.box(X + 1, 7, Z, 2, 5, 1, P.BLACK);
+    g.box(X + 1, 5, Z, 2, 5, 1, P.BLACK);
     for (let k = 0; k < 3; k++) {
-      const y = 10 - k;
+      const y = 8 - k;
       g.set(X + 1, y, Z, k === litZ ? on[k] : off[k]);
       if (k === litZ) g.light(X + 1.5, y + 0.5, Z + 1.2, SIG_RGB[k], 0.45, true);
     }
@@ -38664,7 +38915,7 @@ VC.models.define('bench', {
 });
 
 VC.models.define('hydrant', {
-  lodMinFill: 1,
+  lod: false, // (tiny: a half-resolution LOD is a blob)
   variants: 2,
   scale: 0.5,
   gen(rng, v) {
@@ -41421,8 +41672,10 @@ const A = (VC.advisors = {
  *   history: [{seq, id, title, icon, choice (-1 = ignored), label, out, day, auto}] (last 20),
  *   seen: {eventId: day}, recurring: [{id, label (the choice), title (the event), amount (+ income /
  *   − cost), left (months)}] }
- * Money amounts in the pool are multiples of k = $1,000 + $0.35 per citizen (2 significant digits), so
- * a decision matters in a village and in a metropolis alike.
+ * Money amounts in the pool are multiples of k = $500 + $0.35 per citizen (2 significant digits, max
+ * $80k), so a decision matters in a village and in a metropolis alike; money the city receives is scaled
+ * by VC.DIFFICULTY[..].rewardMul. Gambles (`roll`) are seeded (S.seed, decision seq, choice): saving and
+ * reloading before answering does not re-roll them. Every choice has a price (no strictly dominant answer).
  *
  * API  EVENTS, pending() -> view | null, choose(i) -> {ok, outcome, label, reason?}, trigger(id?) (debug:
  *   puts an event on the desk now, ignoring the cadence; an explicit id also ignores its conditions),
@@ -41464,7 +41717,17 @@ function nice(v) {
 /** $ scale of a decision for the current city. */
 function scaleK(S) {
   const pop = Math.max((S.stats && S.stats.pop) || 0, (S.peakPop || 0) * 0.8);
-  return nice(M.clamp(1000 + pop * 0.35, 1000, 80000));
+  return nice(M.clamp(500 + pop * 0.35, 500, 80000));
+}
+/** Difficulty multiplier for money the city RECEIVES (VC.DIFFICULTY[..].rewardMul; costs are not scaled). */
+function rewardMul(S) {
+  const d = S && VC.DIFFICULTY && VC.DIFFICULTY[S.difficulty];
+  return d && typeof d.rewardMul === 'number' ? d.rewardMul : 1;
+}
+/** $ of a money amount (x k): gains scaled by the difficulty's rewardMul, costs as they are. */
+function amount(m, k, S) {
+  const v = nice(m * k);
+  return v > 0 ? nice(v * rewardMul(S || S_())) : v;
 }
 const SEASON = ['winter', 'winter', 'spring', 'spring', 'spring', 'summer', 'summer', 'summer', 'autumn', 'autumn', 'autumn', 'winter'];
 
@@ -41526,7 +41789,7 @@ const EVENTS = [
     when: (c) => c.has('stadium'),
     choices: [
       { label: '🎆 Give them the big stage', fx: { money: -0.6, special: 'fireworks', n: 24, mods: { happiness: 0.03, tourism: 0.2 }, days: 60, news: 'Garage band The Cubic Rhythms sells out the Stadium; experts baffled' }, out: 'Against all odds, the show is legendary. The fireworks finale is visible from space (and from the next town).' },
-      { label: '💵 Rent it at the usual price', fx: { money: 0.8 }, out: 'The band pays in coins from a jar labelled “TOUR FUND”. The concert has 14 attendees.' },
+      { label: '💵 Rent it at the usual price', fx: { money: 0.8, mods: { noise: 0.04 }, days: 30 }, out: 'The band pays in coins from a jar labelled “TOUR FUND”. The concert has 14 attendees and a great many cymbals.' },
       { label: '⚽ Stadiums are for sports', ignore: true, fx: {}, out: 'The band plays the Stadium parking lot anyway. The parking lot has never sounded better.' },
     ],
   },
@@ -41585,7 +41848,7 @@ const EVENTS = [
     text: 'Kids found a softly glowing rock in a field outside {city}. It hums. Sometimes it hums show tunes. Scientists and a museum are both very interested.',
     when: (c) => c.pop >= 600,
     choices: [
-      { label: '🏛️ Sell it to a museum', fx: { money: 3 }, out: 'The Museum of Suspicious Rocks pays top dollar. The rock hums “Money, Money, Money” on its way out.' },
+      { label: '🏛️ Sell it to a museum', fx: { money: 2, mods: { happiness: -0.01 }, days: 120 }, out: 'The Museum of Suspicious Rocks pays top dollar. The rock hums “Money, Money, Money” on its way out. The kids who found it are inconsolable.' },
       { label: '✨ Put it on display in a park', fx: { mods: { tourism: 0.25, happiness: 0.02 }, days: 360, news: 'Humming space rock “Glowy” becomes {city}’s newest star attraction' }, out: 'Tourists flock to see “Glowy”. It has started taking requests.' },
       { label: '🤷 Leave it in the field', ignore: true, fx: {}, out: 'Nobody touches it. Every night at 3 a.m. it hums a lullaby, and the whole valley sleeps a little better.' },
     ],
@@ -41665,7 +41928,7 @@ const EVENTS = [
     text: 'The weather radar picked up a repeating signal from deep space: “CUBE. CUBE. CUBE.” Watt from Utilities is very excited and has not slept.',
     when: (c) => c.pop >= 4000,
     choices: [
-      { label: '👽 Broadcast a warm welcome', fx: { mods: { tourism: 0.2 }, days: 150 }, roll: { p: 0.25, fx: { money: 1.5 }, out: 'The aliens reply — with a coupon for a galactic furniture store. The city sells it for a fortune.', note: '🎲 They might reply' }, out: 'No reply yet, but UFO tourism is booming. T-shirts sell out.' },
+      { label: '👽 Broadcast a warm welcome', fx: { money: -0.3, mods: { tourism: 0.2, crime: 0.03 }, days: 150 }, roll: { p: 0.25, fx: { money: 1.5 }, out: 'The aliens reply — with a coupon for a galactic furniture store. The city sells it for a fortune.', note: '🎲 They might reply' }, out: 'No reply yet, but UFO tourism is booming. T-shirts sell out — and UFO chasers camp in every park.' },
       { label: '🤐 Keep it top secret', ignore: true, fx: {}, out: 'The signal stops. Probably nothing. Probably.' },
     ],
   },
@@ -41674,7 +41937,7 @@ const EVENTS = [
     text: 'Local farmers want to sell square watermelons in the town square every Saturday. They are very proud of the watermelons.',
     when: (c) => c.pop >= 200 && c.pop < 30000,
     choices: [
-      { label: '🥕 Approve the market', fx: { money: 0.2, mods: { health: 0.03, demandC: 0.03, happiness: 0.01 }, days: 240 }, out: 'Saturdays are now the best day of the week. The square watermelons stack beautifully.' },
+      { label: '🥕 Approve the market', fx: { money: 0.2, mods: { health: 0.03, demandC: 0.03, happiness: 0.01, traffic: 0.03, noise: 0.04 }, days: 240 }, out: 'Saturdays are now the best day of the week. The square watermelons stack beautifully — and so do the delivery trucks.' },
       { label: '🛒 Only once a month', fx: { mods: { health: 0.01 }, days: 180 }, out: 'A monthly market it is. People mark it on their calendars in green ink.' },
       { label: '🙅 Not in my square', ignore: true, fx: {}, out: 'The farmers go home. The watermelons are shipped to a city with more appreciation for geometry.' },
     ],
@@ -41891,7 +42154,7 @@ const EVENTS = [
     text: 'Since “Pets Welcome Everywhere” passed, a tabby named Sir Whiskers has been attending every school board meeting. Now he is officially on the ballot.',
     when: (c) => c.pol('pets'), weight: 2,
     choices: [
-      { label: '🗳️ Let democracy decide', fx: { mods: { happiness: 0.03, tourism: 0.08 }, days: 180, news: 'Cat named Sir Whiskers wins {city} school board seat in a landslide' }, out: 'Sir Whiskers wins in a landslide. His first act: longer nap time. Test scores somehow improve.' },
+      { label: '🗳️ Let democracy decide', fx: { mods: { happiness: 0.03, tourism: 0.08, education: -0.03 }, days: 180, news: 'Cat named Sir Whiskers wins {city} school board seat in a landslide' }, out: 'Sir Whiskers wins in a landslide. His first act: longer nap time. He sleeps through most board meetings.' },
       { label: '🐾 Make him honorary mascot', fx: { mods: { happiness: 0.015 }, days: 120 }, out: 'Sir Whiskers accepts the title, then knocks the certificate off the table.' },
       { label: '📋 Humans only, please', ignore: true, fx: { mods: { happiness: -0.01 }, days: 60 }, out: 'Sir Whiskers withdraws. He is seen glaring at City Hall from a windowsill.' },
     ],
@@ -41912,7 +42175,7 @@ const EVENTS = [
     when: (c) => c.pol('recycling_law'), weight: 2,
     choices: [
       { label: '🏆 Throw a (zero-waste) party', fx: { money: -0.4, mods: { happiness: 0.02, garbage: -0.05 }, days: 120 }, out: 'A party with reusable everything. Even the confetti gets collected afterwards.' },
-      { label: '💰 Sell the recycled glass', fx: { money: 1.2 }, out: 'A mountain of sorted glass becomes a very tidy sum.' },
+      { label: '💰 Sell the recycled glass', fx: { money: 0.8, mods: { garbage: 0.03 }, days: 60 }, out: 'A mountain of sorted glass becomes a very tidy sum. The bins overflow while crews haul it away.' },
       { label: '📰 Just a press release', ignore: true, fx: { mods: { happiness: 0.005 }, days: 60 }, out: 'The press release is printed on recycled paper. Of course it is.' },
     ],
   },
@@ -41959,8 +42222,8 @@ const signed = (v) => (v < 0 ? '−' : '+') + VC.fmt.money(Math.abs(v));
 function chipsFor(fx, k, roll) {
   const out = [];
   fx = fx || {};
-  if (fx.money) { const v = nice(fx.money * k); out.push({ t: signed(v), c: v < 0 ? 'bad' : 'gold' }); }
-  if (fx.monthly) { const v = nice(fx.monthly.k * k); out.push({ t: `${signed(v)}/mo × ${fx.monthly.months}`, c: v < 0 ? 'bad' : 'gold' }); }
+  if (fx.money) { const v = amount(fx.money, k); out.push({ t: signed(v), c: v < 0 ? 'bad' : 'gold' }); }
+  if (fx.monthly) { const v = amount(fx.monthly.k, k); out.push({ t: `${signed(v)}/mo × ${fx.monthly.months}`, c: v < 0 ? 'bad' : 'gold' }); }
   if (fx.mods) {
     for (const key in fx.mods) {
       const v = fx.mods[key];
@@ -42154,12 +42417,12 @@ function applyFx(S, fx, p, e, tag, force, label) {
   if (!fx) return;
   const k = p.k, day = S.time.day;
   if (fx.money) {
-    const v = nice(fx.money * k);
+    const v = amount(fx.money, k, S);
     if (v > 0) VC.money.earn(v, 'desk');
     else VC.money.spend(-v, 'desk', force);
   }
   if (fx.monthly && fx.monthly.months > 0) {
-    S.desk.recurring.push({ id: 'desk:' + p.seq + tag, label: label || e.title, title: e.title, amount: nice(fx.monthly.k * k), left: fx.monthly.months | 0 });
+    S.desk.recurring.push({ id: 'desk:' + p.seq + tag, label: label || e.title, title: e.title, amount: amount(fx.monthly.k, k, S), left: fx.monthly.months | 0 });
   }
   if (fx.mods) addTempMod({ id: 'desk:' + p.seq + tag, source: 'desk', label: e.title, mods: Object.assign({}, fx.mods), until: day + (fx.days || 90) });
   if (fx.demand && S.demand) for (const z in fx.demand) if (z in S.demand) S.demand[z] = M.clamp(S.demand[z] + fx.demand[z], -1, 1);
@@ -42195,7 +42458,8 @@ function resolve(S, i, auto) {
     label = 'No decision';
   }
   applyFx(S, fx, p, e, ':' + i, !!auto, label);
-  if (ch && ch.roll && Math.random() < ch.roll.p) {
+  // gambles are decided by the city's seed + this decision + the choice (no save / reload re-rolls)
+  if (ch && ch.roll && M.hash(p.seq | 0, 131 + i, S.seed | 0) < ch.roll.p) {
     applyFx(S, ch.roll.fx, p, e, ':' + i + 'r', true, label);
     out = ch.roll.out || out;
   }
@@ -42376,7 +42640,15 @@ VC.bus.on('boot', () => {
  *
  * SAVE/LOAD: active entries are persisted through VC.save.register('disasters') (plain JSON: Sets become
  * arrays, building references become ids) and resume after loading.
- * Persistent stats: S.disasterStats (= VC.disasters.stats) {count, byType, survived, destroyed, abducted, nextDay}.
+ * Persistent stats: S.disasterStats (= VC.disasters.stats) {count, byType, survived, destroyed, abducted, nextDay, relief}.
+ *
+ * FAIRNESS: random disasters strike after FIRST_YEARS and then every GAP_YEARS (per difficulty); tornadoes,
+ * meteors and Cubezilla need a big enough city (TYPE_MIN_POP). A random tornado's damage scales with the
+ * city's size (e.sizeF) and stops at 5% of its buildings (e.cap); any tornado destroys at most 2 power /
+ * water buildings. A random Cubezilla skips the far neighbourhood in cities under 20k and leaves once it has
+ * flattened 6% (e.sated, phase 'leave'). (Disasters the player triggers are not capped.) When a RANDOM
+ * disaster ends, the state pays relief: half the price of the public buildings lost + $50 per lost lot
+ * (ledger 'relief'; the 'end' event and the summary toast carry it).
  * Random disasters need S.disastersEnabled && VC.settings.disasters !== false; flipping the Settings
  * toggle also flips S.disastersEnabled of the running city (one switch from the player's view).
  */
@@ -42393,8 +42665,15 @@ const TYPES = [
 const TYPE = Object.create(null); // no prototype: trigger('toString') must not find anything
 for (const t of TYPES) TYPE[t.key] = t;
 // Relative odds of each random disaster (tornadoes in spring/summer, fires in summer, see seasonWeight).
-const ODDS = { fire: 30, tornado: 20, meteor: 12, earthquake: 16, ufo: 11, monster: 11 };
+const ODDS = { fire: 20, tornado: 20, meteor: 12, earthquake: 20, ufo: 11, monster: 11 };
 const RANDOM_MIN_POP = 2000;
+// the big ones only strike cities that can take them (random disasters; the Disasters window can still
+// trigger anything)
+const TYPE_MIN_POP = { tornado: 4000, meteor: 8000, monster: 15000 };
+// years until the first random disaster of a city / between random disasters, per difficulty
+const FIRST_YEARS = { easy: [5, 7], normal: [4, 5], hard: [3, 4] };
+const GAP_YEARS = { easy: [5, 8], normal: [3, 5], hard: [3, 4] };
+const RELIEF_SHARE = 0.5, RELIEF_PER_LOT = 50; // disaster relief: 50% of lost public buildings + $50 a lot
 const YEAR = C.DAYS_PER_MONTH * 12;
 
 let rnd = M.rng(1);
@@ -42515,8 +42794,15 @@ function shakeAt(x, z, amount, range = 40) {
 function wreck(b, e, opts = {}) {
   const S = S_();
   if (!b || !S.buildings.has(b.id)) return false;
+  // a capped disaster (tornado, monster: scaled to the city's size) stops flattening once it has taken its share
+  if (e && e.cap > 0 && (e.destroyed || 0) >= e.cap) return false;
   const wasRubble = b.key === 'rubble';
   const { x, z, w, d } = b;
+  if (e && !wasRubble) {
+    const def = VC.BLD[b.key];
+    if (def) e.lossValue = (e.lossValue || 0) + (def.cost || 0);
+    else if (b.key === 'grow') e.lossLots = (e.lossLots || 0) + 1;
+  }
   W_().removeBuilding(b, REASON().DISASTER);
   if (opts.rubble !== false && !wasRubble) {
     try {
@@ -42643,6 +42929,13 @@ H.tornado = {
     e.hits = new Set();
     e.tiles = new Set();
     e.phase = 'active';
+    // a random tornado's damage scales with the city (a small town loses fewer lots); utilities are
+    // sturdy either way (see update: at most 2 per tornado, so it never erases a utility cluster)
+    if (e.random) {
+      e.sizeF = M.clamp((S.stats.pop || 0) / 20000, 0.35, 1);
+      e.cap = Math.max(8, Math.round(standing() * 0.05));
+    }
+    e.utilHits = 0;
     return true;
   },
   update(e, gd) {
@@ -42673,11 +42966,17 @@ H.tornado = {
         e.hits.add(id);
         const b = S.buildings.get(id);
         if (!b || b.key === 'rubble') continue;
-        // small / low buildings are more likely to be flattened
-        const pD = b.key === 'grow' ? 0.45 + 0.2 * (1 - (b.level || 1) / 3) : 0.4;
+        // small / low buildings are more likely to be flattened; power plants, pumps and towers are
+        // sturdy (at most 2 per tornado)
+        const def = VC.BLD[b.key];
+        const util = !!(def && (def.power > 0 || def.water > 0));
+        const sf = Number.isFinite(e.sizeF) ? e.sizeF : 1;
+        let pD = (b.key === 'grow' ? 0.45 + 0.2 * (1 - (b.level || 1) / 3) : 0.4) * sf;
+        let pF = 0.28;
+        if (util) { pD = (e.utilHits || 0) >= 2 ? 0 : 0.15 * sf; pF = 0.1; }
         const roll = rnd();
-        if (roll < pD) wreck(b, e);
-        else if (roll < pD + 0.28) burn(b, e);
+        if (roll < pD) { if (wreck(b, e) && util) e.utilHits = (e.utilHits || 0) + 1; }
+        else if (roll < pD + pF) burn(b, e);
       }
   },
   startText: () => 'Tornado warning! A twister is tearing across the land.',
@@ -43014,10 +43313,12 @@ H.monster = {
     }
     e.x = sx; e.z = sz;
     e.y = groundAt(sx, sz);
-    // route: city centre -> a far-flung neighbourhood -> out the far side
+    // route: city centre -> a far-flung neighbourhood (only in big cities) -> out the far side
     const far = randomBuilding((b) => notRubble(b) && Math.hypot(b.x - cx, b.z - cz) > 8);
     const wp = [[cx + (rnd() - 0.5) * 6, cz + (rnd() - 0.5) * 6]];
-    if (far) wp.push(centerOf(far));
+    if (far && (!e.random || (S.stats.pop || 0) >= 20000)) wp.push(centerOf(far));
+    // a random Cubezilla loses interest once it has flattened its share of the city (6%, at least 12)
+    if (e.random) e.cap = Math.max(12, Math.round(standing() * 0.06));
     const last = wp[wp.length - 1];
     const ax = last[0] - sx, az = last[1] - sz, al = Math.hypot(ax, az) || 1;
     wp.push([last[0] + (ax / al) * S.W * 1.5, last[1] + (az / al) * S.H * 1.5]); // exit, clipped by inMap
@@ -43056,6 +43357,16 @@ H.monster = {
       if (e.waypoints.length === 1) e.phase = 'leave';
     }
     if (e.phase === 'enter' && inMap(e.x, e.z) && !W_().isWater(Math.floor(e.x), Math.floor(e.z))) e.phase = 'rampage';
+    if (!e.sated && e.cap > 0 && (e.destroyed || 0) >= e.cap) {
+      // had its fill: head straight out, away from the city centre, flattening nothing more
+      e.sated = true;
+      const [cx, cz] = cityCenter();
+      let ax = e.x - cx, az = e.z - cz, al = Math.hypot(ax, az);
+      if (al < 1) { ax = Math.cos(e.dir); az = Math.sin(e.dir); al = 1; }
+      e.waypoints = [[e.x + (ax / al) * S.W * 1.5, e.z + (az / al) * S.H * 1.5]];
+      e.phase = 'leave';
+      e.breath = null;
+    }
     if (e.waypoints.length <= 1 && !inMap(e.x, e.z, 3)) { e.done = true; return; }
     if (td > 90) { e.done = true; return; }
     // footfalls every half tile: stomp everything under the feet
@@ -43066,9 +43377,11 @@ H.monster = {
       if (inMap(e.x, e.z)) {
         shakeAt(e.x, e.z, 0.35, 30);
         if (foot % 2 === 0) sfx('stomp', e.x, e.z);
-        for (const { b } of buildingsNear(e.x, e.z, e.radius, notRubble)) {
-          if (rnd() < 0.8) wreck(b, e);
-          else burn(b, e);
+        if (!e.sated) {
+          for (const { b } of buildingsNear(e.x, e.z, e.radius, notRubble)) {
+            if (rnd() < 0.8) wreck(b, e);
+            else burn(b, e);
+          }
         }
         const tx = Math.floor(e.x), tz = Math.floor(e.z);
         for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) trample(tx + dx, tz + dz, 0.8);
@@ -43122,10 +43435,12 @@ function randomType() {
   const S = S_();
   const m = Math.floor(S.time.day / C.DAYS_PER_MONTH) % 12;
   const summer = m >= 5 && m <= 7, spring = m >= 2 && m <= 4;
+  const pop = S.stats.pop || 0;
   let tot = 0;
   const w = {};
   for (const t of TYPES) {
     let v = ODDS[t.key] || 10;
+    if (pop < (TYPE_MIN_POP[t.key] || 0)) v = 0;
     if (t.key === 'tornado') v *= spring || summer ? 1.6 : 0.5;
     if (t.key === 'fire') v *= summer ? 1.5 : 0.8;
     w[t.key] = v;
@@ -43135,8 +43450,17 @@ function randomType() {
   for (const t of TYPES) if ((r -= w[t.key]) <= 0) return t.key;
   return 'fire';
 }
-function scheduleNext(S, minYears = 3, maxYears = 5) {
-  stats().nextDay = S.time.day + Math.round(YEAR * (minYears + rnd() * (maxYears - minYears)));
+/** Schedules the next random disaster (first = the city's first one), spaced per difficulty. */
+function scheduleNext(S, first) {
+  const T = first ? FIRST_YEARS : GAP_YEARS;
+  const [a, b] = T[S.difficulty] || T.normal;
+  stats().nextDay = S.time.day + Math.round(YEAR * (a + rnd() * (b - a)));
+}
+/** Standing (non-rubble) buildings: the base for size-scaled damage caps. */
+function standing() {
+  const S = S_();
+  const st = S.stats || {};
+  return Math.max(0, st.buildings || S.buildings.size);
 }
 /** After random disasters get switched on, give the player 6-12 months of peace (nextDay may be long overdue). */
 function grace(S) {
@@ -43149,13 +43473,13 @@ function onDay() {
   const S = S_();
   if (!S || !D.randomEnabled()) return;
   const st = stats();
-  if (st.nextDay == null) scheduleNext(S, 2, 4);
+  if (st.nextDay == null) scheduleNext(S, true);
   if (S.time.day < st.nextDay) return;
   if (D.active.length || (S.stats.pop || 0) <= RANDOM_MIN_POP) {
     st.nextDay = S.time.day + (D.active.length ? 30 : 90);
     return;
   }
-  if (D.trigger(randomType(), null, null, { random: true })) scheduleNext(S);
+  if (D.trigger(randomType(), null, null, { random: true })) scheduleNext(S, false);
   else st.nextDay = S.time.day + 30;
 }
 
@@ -43255,7 +43579,7 @@ const D = (VC.disasters = {
     if (st.abducted == null) st.abducted = 0;
     for (const t of TYPES) if (st.byType[t.key] == null) st.byType[t.key] = 0;
     D.stats = st;
-    if (st.nextDay == null) scheduleNext(S, 2, 4);
+    if (st.nextDay == null) scheduleNext(S, true);
   },
 
   update(dt) {
@@ -43372,11 +43696,28 @@ const D = (VC.disasters = {
   focusPoint,
   /** Ends every active disaster immediately (debug / new game). */
   clear() {
-    for (const e of D.active.splice(0)) finish(e);
+    for (const e of D.active.splice(0)) finish(e, true);
   },
 });
 
-function finish(e) {
+/**
+ * Disaster relief for a RANDOM disaster (never one the player triggered): the state pays back half the
+ * price of the public buildings it destroyed plus a little per lost lot (clearing the rubble). Booked
+ * under ledger category 'relief'. Returns the amount.
+ */
+function relief(e) {
+  const S = S_();
+  if (!S || S.demo || S.sandbox || !e.random) return 0;
+  let mul = 1;
+  try { mul = VC.money.costMul(); } catch (err) { mul = 1; }
+  const v = Math.round(((e.lossValue || 0) * mul * RELIEF_SHARE + (e.lossLots || 0) * RELIEF_PER_LOT) / 100) * 100;
+  if (!(v > 0)) return 0;
+  VC.money.earn(v, 'relief');
+  const st = stats();
+  st.relief = (st.relief || 0) + v;
+  return v;
+}
+function finish(e, cleared) {
   const st = stats();
   st.survived[e.type] = (st.survived[e.type] || 0) + 1;
   if (e.lifting && e.lifting.b) delete e.lifting.b.disLift;
@@ -43385,8 +43726,11 @@ function finish(e) {
   const h = H[e.type];
   let text = '';
   try { text = h.endText(e); } catch (err) { text = `${e.name} is over.`; }
+  const aid = cleared ? 0 : relief(e);
+  if (aid) text += ` The state sends <b>${VC.fmt.money(aid)}</b> in disaster relief.`;
+  e.relief = aid;
   toast(text, e.destroyed > 5 ? 'warn' : 'info', e.icon);
-  emit(e, 'end', { destroyed: e.destroyed || 0, burned: e.burned || 0, abducted: e.abducted || 0 });
+  emit(e, 'end', { destroyed: e.destroyed || 0, burned: e.burned || 0, abducted: e.abducted || 0, relief: aid });
 }
 
 })();
@@ -43423,13 +43767,26 @@ function finish(e) {
  * active list for the UI.
  *
  * WAGES: service departments (police, fire, health, education, transit, parks, waste) pay city
- * wages that rise with population (wageMul: 1 at 4k residents, ~1.8 at 25k, ~2.3 at 100k), while
+ * wages that rise with population (wageMul: 1 at 4k residents, ~1.85 at 25k, ~2.45 at 100k), while
  * service buildings serve a limited number of residents (def.capacity) — big cities need
  * proportionally more of them. Utilities and roads are not affected.
  *
+ * AGING: a catalog building older than AGE_FREE (5) years costs AGE_RATE (2%) more upkeep per extra
+ * year, up to +AGE_MAX (30%) — the running costs of a mature city keep late-game money meaningful.
+ * upkeepOf(building) includes it; ageMul(b) -> the multiplier.
+ *
  * BANKRUPTCY: 6 months below -$10k -> one emergency loan (counts toward MAX_LOANS, capped at twice
- * the credit limit). Bankrupt again while it is outstanding -> STATE TAKEOVER: taxes raised to at
- * least 12%, department funding capped at 80%, paid policies repealed; bus 'econ' {type:'takeover'}.
+ * the credit limit). Bankrupt again while it is outstanding -> STATE TAKEOVER (harsher each time, see
+ * takeover()): taxes raised to at least 12% (+2 per repeat, max 16), department funding capped at 80%
+ * (-10 points per repeat, min 50%), paid and tax-cutting policies repealed, all debt + the deficit restructured into
+ * one 10% state loan (the treasury returns to about +$10k), and 12+ months of STATE ADMINISTRATION
+ * during which those floors / caps are enforced (setTax / setFunding clamp with a toast, paid or
+ * tax-cutting policies and new loans are refused) — receivership() -> {since, until, tax, funding, n} | null. Bus 'econ'
+ * {type:'takeover', count, tax, funding, restructured, until} / {type:'receiverEnd', early}.
+ *
+ * LOANS: a voluntary loan pays a 1% origination fee (ledger 'loanPayment'); paying one off costs the
+ * principal plus the interest accrued since its last instalment (at least one month before the
+ * first) — payoffCost(i) -> {principal, interest, total}. loanOptions() entries carry `fee`.
  *
  * forecast() evaluates the same model live for the budget window (per-building sums are cached
  * per sim day / building version, the final numbers per frame + settings change), so dragging a
@@ -43463,14 +43820,28 @@ const TAX_K = { R: 5.5, C: 7.0, I: 6.5 };
 const WEALTH_MUL = [0.75, 1.0, 1.3];
 const TOURISM_K = 6; // $ per tourism point per month
 // city wage level for service departments: 1 + WAGE_MAX * (1 - exp(-(pop - WAGE_POP0) / WAGE_SCALE))
-const WAGE_MAX = 1.35, WAGE_POP0 = 4000, WAGE_SCALE = 25000;
+const WAGE_MAX = 1.6, WAGE_POP0 = 4000, WAGE_SCALE = 25000;
+// AGING: a catalog building's upkeep rises AGE_RATE per year once it is AGE_FREE years old, up to
+// +AGE_MAX (old plants, stations and landmarks need renovations) — the running costs of a mature city
+const AGE_FREE = 5, AGE_RATE = 0.02, AGE_MAX = 0.3;
+const YEAR_DAYS = C.DAYS_PER_MONTH * 12;
+/** Upkeep multiplier for a building's age (days). */
+function ageMulOf(age) {
+  const y = (+age || 0) / YEAR_DAYS - AGE_FREE;
+  return y > 0 ? 1 + Math.min(AGE_MAX, y * AGE_RATE) : 1;
+}
 // state grant for young towns: GRANT_MAX * (pop / GRANT_POP) * exp(1 - pop / GRANT_POP) — peaks at
 // GRANT_POP residents, fades out by ~8k (x difficulty grantMul). Bridges the gap between the
 // first round of services and the tax base that pays for them.
 const GRANT_MAX = 450, GRANT_POP = 1500;
 const WAGE_DEPTS = { police: 1, fire: 1, health: 1, education: 1, transit: 1, parks: 1, waste: 1 };
-const TAKEOVER_TAX = 12; // % minimum tax rate imposed by a state takeover
-const TAKEOVER_FUNDING = 0.8; // department funding cap during a takeover
+const TAKEOVER_TAX = 12; // % minimum tax rate imposed by a state takeover (+2 per further takeover, max 16)
+const TAKEOVER_TAX_MAX = 16;
+const TAKEOVER_FUNDING = 0.8; // department funding cap during a takeover (-0.1 per further takeover, min 0.5)
+const TAKEOVER_FUNDING_MIN = 0.5;
+const RECEIVER_MONTHS = 12; // state administration lasts 12 months per takeover (max 36) or until healthy
+const RESTRUCTURE_RATE = 0.1, RESTRUCTURE_CUSHION = 10000; // debt restructuring on a takeover
+const LOAN_FEE = 0.01; // origination fee of a voluntary loan (booked as a loan payment)
 const HISTORY_CAP = 600;
 const HISTORY_KEYS = [
   'pop', 'money', 'happiness', 'income', 'expenses', 'net', 'demandR', 'demandC', 'demandI',
@@ -43509,6 +43880,7 @@ const CATEGORIES = {
   income: { name: 'Venues (casino, stadium)', icon: '🎟️' },
   reward: { name: 'Milestone rewards', icon: '🏆' },
   goal: { name: 'Goal rewards', icon: '🎯' },
+  relief: { name: 'Disaster relief', icon: '🆘' },
   desk: { name: 'Mayor’s Desk', icon: '📨' },
   deskDeal: { name: 'Mayor’s Desk commitments', icon: '📨' },
   loan: { name: 'Loans received', icon: '🏦' },
@@ -43654,7 +44026,7 @@ function scan(S, force) {
     const def = VC.BLD[b.key];
     if (!def) continue; // rubble & other non-catalog props
     const dept = def.dept || 'parks';
-    agg.upkeep[dept] = (agg.upkeep[dept] || 0) + (def.upkeep || 0);
+    agg.upkeep[dept] = (agg.upkeep[dept] || 0) + (def.upkeep || 0) * ageMulOf(b.age);
     agg.count[dept] = (agg.count[dept] || 0) + 1;
     if (def.housing && b.pop) agg.base.R[2] += b.pop; // arcology residents pay high-wealth taxes
     if (b.built >= 1) {
@@ -43848,6 +44220,18 @@ function debt(S) {
   for (const l of S.loans) d += l.remaining;
   return d;
 }
+/**
+ * What paying loan l off today costs: the principal plus the interest accrued since its last
+ * instalment (pro rata by days) — at least one month's interest while it has not paid one yet.
+ */
+function payoffOf(S, l) {
+  const since = Math.max(0, S.time.day - (isFinite(l.billedDay) ? l.billedDay : l.day || 0));
+  const unbilled = !(l.months < l.term);
+  const months = Math.max(unbilled ? 1 : 0, since / C.DAYS_PER_MONTH);
+  const interest = Math.ceil(l.remaining * (l.rate / 12) * Math.min(1, months));
+  const principal = Math.ceil(l.remaining);
+  return { principal, interest, total: principal + interest };
+}
 function creditLimit(S) {
   return 30000 + Math.max(S.peakPop || 0, population(S)) * 6;
 }
@@ -43864,12 +44248,18 @@ function addLoan(S, amount, rate, months, extra) {
     id: (S.econ.loanSeq = (S.econ.loanSeq || 0) + 1),
     amount, remaining: amount, rate, months, term: months,
     monthly: Math.round(amortized(amount, rate, months) * 100) / 100,
-    day: S.time.day,
+    day: S.time.day, billedDay: S.time.day,
   }, extra || {});
   S.loans.push(l);
   S.econ.loansTaken = (S.econ.loansTaken || 0) + 1;
   S.econ.hadLoan = true;
   VC.money.earn(amount, 'loan');
+  // a voluntary loan costs a 1% origination fee (an operating cost): taking one and paying it back
+  // before the first instalment is never free
+  if (!l.emergency && !S.sandbox) {
+    const fee = Math.round(amount * LOAN_FEE);
+    if (fee > 0) { VC.money.spend(fee, 'loanPayment', true); l.fee = fee; }
+  }
   rev++;
   VC.bus.emit('loanChanged', l);
   if (!l.emergency && !S.demo) VC.bus.emit('sfx', { name: 'cash' }); // emergency loans: the advisor card is the one cue
@@ -43928,6 +44318,7 @@ function monthly() {
     paid += due.pay;
     l.remaining = Math.max(0, l.remaining - due.principal);
     l.months--;
+    l.billedDay = S.time.day;
     l.paidInterest = (l.paidInterest || 0) + due.interest;
     if (l.months <= 0 || l.remaining < 0.5) done.push(l);
   }
@@ -43985,6 +44376,7 @@ function monthly() {
 
   sampleHistory(S);
   bankruptcyCheck(S, e);
+  receiverCheck(S, e);
   VC.bus.emit('budgetChanged');
 }
 
@@ -44045,31 +44437,90 @@ function bankruptcyCheck(S, e) {
 }
 
 /**
- * Second bankruptcy while an emergency loan is still open (or no loan slot left): the state
- * takes over the budget. Taxes go up to TAKEOVER_TAX, funding is capped, paid policies end.
- * The city keeps running; the mayor can undo the measures once the books are healthy.
+ * Second bankruptcy while an emergency loan is still open (or no loan slot left): the state takes
+ * over the budget, harder each time (the n-th takeover):
+ *  - taxes raised to at least TAKEOVER_TAX + 2 (n - 1) % (max 16), department funding capped at
+ *    TAKEOVER_FUNDING - 0.1 (n - 1) (min 50%), paid policies repealed;
+ *  - DEBT RESTRUCTURING: every loan plus the deficit (+ a $10k cushion) become one state loan at 10%
+ *    over 10 years, so the treasury is back in the black (money never sinks without limit);
+ *  - STATE ADMINISTRATION for 12 months per takeover (max 36): the floors / caps stay locked
+ *    (setTax / setFunding clamp, paid policies and new loans are refused) until it ends — early once
+ *    the city holds $25k and has balanced its budget 6 months running.
  */
 function takeover(S, e) {
-  e.takeovers = (e.takeovers || 0) + 1;
+  const n = (e.takeovers = (e.takeovers || 0) + 1);
   e.takeoverDay = S.time.day;
+  const tax = Math.min(TAKEOVER_TAX_MAX, TAKEOVER_TAX + 2 * (n - 1));
+  const fund = Math.max(TAKEOVER_FUNDING_MIN, Math.round((TAKEOVER_FUNDING - 0.1 * (n - 1)) * 100) / 100);
   for (const z of ZONES) {
     const t = S.tax[z];
-    if (t) for (let w = 0; w < 3; w++) t[w] = Math.max(t[w], TAKEOVER_TAX);
+    if (t) for (let w = 0; w < 3; w++) t[w] = Math.max(t[w], tax);
   }
-  for (const d of VC.DEPARTMENTS) if (funding(d.key) > TAKEOVER_FUNDING) S.budget[d.key] = TAKEOVER_FUNDING;
+  for (const d of VC.DEPARTMENTS) if (funding(d.key) > fund) S.budget[d.key] = fund;
   const repealed = [];
   for (const k of Object.keys(S.policies)) {
-    if (levelOf(S, k) > 0 && fullCost(S, k) > 0) { delete S.policies[k]; repealed.push(k); }
+    if (levelOf(S, k) > 0 && (fullCost(S, k) > 0 || cutsTaxes(k))) { delete S.policies[k]; repealed.push(k); }
   }
+  // debt restructuring: consolidate every loan + the deficit into one state loan
+  let restructured = 0;
+  if (S.money < 0) {
+    const old = debt(S);
+    restructured = Math.ceil((old - S.money + RESTRUCTURE_CUSHION) / 5000) * 5000;
+    S.loans = [];
+    addLoan(S, restructured, RESTRUCTURE_RATE, 120, { emergency: true, restructure: true });
+    if (old > 0) VC.money.spend(Math.ceil(old), 'loanPayoff', true);
+    e.emergency = true;
+  }
+  const months = Math.min(3, n) * RECEIVER_MONTHS;
+  e.receiver = { since: S.time.day, until: S.time.day + months * C.DAYS_PER_MONTH, tax, funding: fund, n };
   VC.econ.computeMods();
   rev++;
+  const until = dateOf(e.receiver.until);
   notify(S, {
     key: 'takeover', severity: 'bad', panel: 'budget',
-    title: 'State takeover!',
-    text: `Bankrupt again with the emergency loan still open — the state has taken over our budget: taxes raised to at least ${TAKEOVER_TAX}%, department funding capped at ${Math.round(TAKEOVER_FUNDING * 100)}%` + (repealed.length ? ', and paid policies repealed.' : '.') + ' Cut costs and get back in the black, Mayor.',
-  }, `Bankrupt again! The state took over the budget: taxes ≥ ${TAKEOVER_TAX}%, funding ≤ ${Math.round(TAKEOVER_FUNDING * 100)}%.`);
-  VC.bus.emit('econ', { type: 'takeover', repealed, tax: TAKEOVER_TAX, funding: TAKEOVER_FUNDING, count: e.takeovers });
+    title: n > 1 ? `State takeover #${n}!` : 'State takeover!',
+    text: `Bankrupt again with the emergency loan still open — the state has taken over our budget until ${until}: taxes at least ${tax}%, department funding at most ${Math.round(fund * 100)}%` +
+      (repealed.length ? ', costly policies and tax breaks repealed' : '') +
+      (restructured ? `, and all our debt rolled into one ${VC.fmt.money(restructured)} state loan at ${Math.round(RESTRUCTURE_RATE * 100)}%` : '') +
+      '. Balance the books for six months (with $25k in the bank) and they hand it back' + (n > 1 ? ' — every takeover is harsher than the last.' : '.'),
+  }, `Bankrupt again! State administration until ${until}: taxes ≥ ${tax}%, funding ≤ ${Math.round(fund * 100)}%.`);
+  VC.bus.emit('econ', { type: 'takeover', repealed, tax, funding: fund, count: n, restructured, until: e.receiver.until });
   VC.bus.emit('budgetChanged'); // (no 'policyChanged': it would add a second sound to this one event)
+}
+/** True for a policy that lowers a tax (e.g. Business Tax Breaks): it would undercut the takeover's tax floor. */
+function cutsTaxes(key) {
+  const fx = (VC.POLICY[key] && VC.POLICY[key].effects) || {};
+  return fx.taxR < 0 || fx.taxC < 0 || fx.taxI < 0;
+}
+/** Active state administration {since, until, tax, funding, n} or null. */
+function receiver(S) {
+  const r = S && !S.sandbox && S.econ && S.econ.receiver;
+  return r && S.time.day < r.until ? r : null;
+}
+/** Monthly: the state hands the budget back when its time is up, or early once the city is healthy. */
+function receiverCheck(S, e) {
+  const r = e.receiver;
+  if (!r) return;
+  const healthy = S.money >= 25000 && e.balancedMonths >= 6;
+  if (S.time.day < r.until && !healthy) return;
+  e.receiver = null;
+  rev++;
+  if (!S.demo) toast('The state administrator hands the budget back. Taxes, funding and policies are yours again, Mayor.', 'good', '🏛️');
+  VC.bus.emit('econ', { type: 'receiverEnd', early: healthy && S.time.day < r.until });
+}
+/** "Mar 2031" for a day index. */
+function dateOf(day) {
+  const m = Math.floor(day / C.DAYS_PER_MONTH) % 12;
+  const y = C.START_YEAR + Math.floor(day / (C.DAYS_PER_MONTH * 12));
+  return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m] + ' ' + y;
+}
+let lastRefusal = -1e9;
+/** One toast (at most every 4 s real time) when the state administrator overrides a setting. */
+function refuse(S, text) {
+  const t = performance.now();
+  if (S.demo || t - lastRefusal < 4000) return;
+  lastRefusal = t;
+  toast(text + ` <small>(state administration until ${dateOf(S.econ.receiver.until)})</small>`, 'warn', '🏛️');
 }
 
 /* ------------------------------------------------------------------ */
@@ -44129,6 +44580,8 @@ VC.econ = {
     const S = S_();
     if (!S) return;
     pct = Math.round(M.clamp(+pct || 0, 0, 20) * 10) / 10;
+    const r = receiver(S);
+    if (r && pct < r.tax) { pct = r.tax; refuse(S, `The state administrator keeps taxes at <b>${r.tax}%</b> or more.`); }
     for (const z of zone == null ? ZONES : [zone]) {
       const t = S.tax[z];
       if (!t) continue;
@@ -44147,7 +44600,8 @@ VC.econ = {
     return t[M.clamp(wealth | 0, 0, 2)];
   },
   /**
-   * Demand / happiness effect of taxes: +0.35 at 0%, 0 at 9%, -0.8 at 20% (steeper the higher).
+   * Demand / happiness effect of taxes: +0.35 at 0%, 0 at 9%, -0.14 at 12%, -0.4 at 15%, -1 at 20%
+   * (gentle for a small raise, steep beyond ~13%).
    * Uses the effective rate (policy tax modifiers). wealth null = average of the three levels.
    */
   taxEffect(zone, wealth) {
@@ -44156,7 +44610,7 @@ VC.econ = {
     let r = VC.econ.getTax(zone, wealth == null ? null : wealth);
     r *= Math.max(0, 1 + ((S.mods && S.mods['tax' + zone]) || 0));
     if (r <= 9) return 0.35 * ((9 - r) / 9);
-    return M.clamp(-0.8 * Math.pow((r - 9) / 11, 1.25), -1, 0);
+    return M.clamp(-Math.pow((r - 9) / 11, 1.5), -1, 0);
   },
 
   /* ---------------- budget ---------------- */
@@ -44165,6 +44619,8 @@ VC.econ = {
     const S = S_();
     if (!S) return;
     f = Math.round(M.clamp(+f || 0, 0, 1.5) * 100) / 100;
+    const r = receiver(S);
+    if (r && f > r.funding) { f = r.funding; refuse(S, `The state administrator caps department funding at <b>${Math.round(r.funding * 100)}%</b>.`); }
     for (const d of dept == null ? VC.DEPARTMENTS.map((x) => x.key) : [dept]) S.budget[d] = f;
     rev++;
     VC.bus.emit('budgetChanged');
@@ -44226,6 +44682,10 @@ VC.econ = {
     if (want > cur) {
       if (!VC.world.isUnlocked(key)) {
         toast(`${def.name} unlocks at ${VC.fmt.num(def.unlock)} citizens.`, 'warn', '🔒');
+        return false;
+      }
+      if (receiver(S) && (fullCost(S, key) > 0 || cutsTaxes(key))) {
+        refuse(S, `The state administrator approves no paid policies or tax breaks.`);
         return false;
       }
       const cost = Math.round(fullCost(S, key) * want);
@@ -44369,9 +44829,11 @@ VC.econ = {
       const monthly = Math.round(amortized(t.amount, rate, t.months));
       let reason = '';
       if (!S.sandbox && pop < t.pop) reason = `Requires ${VC.fmt.num(t.pop)} citizens`;
+      else if (receiver(S)) reason = 'The state administrator signs no new loans';
       else if (S.loans.length >= MAX_LOANS) reason = `At most ${MAX_LOANS} loans at once`;
       else if (!S.sandbox && d + t.amount > lim) reason = `Exceeds credit limit (${VC.fmt.money(lim)})`;
-      return { amount: t.amount, rate, months: t.months, monthly, total: monthly * t.months, available: !reason, reason };
+      const fee = S.sandbox ? 0 : Math.round(t.amount * LOAN_FEE);
+      return { amount: t.amount, rate, months: t.months, monthly, total: monthly * t.months, fee, available: !reason, reason };
     });
   },
   /** Takes a loan (amount from loanOptions, or an option object). Returns the loan or false. */
@@ -44385,6 +44847,7 @@ VC.econ = {
       toast('Loan denied: ' + opt.reason + '.', 'warn', '🏦');
       return false;
     }
+    // (opt.fee: the 1% origination fee is booked by addLoan)
     return addLoan(S, opt.amount, opt.rate, opt.months);
   },
   /** Pays off loan i (index into S.loans) in full if affordable. */
@@ -44392,14 +44855,28 @@ VC.econ = {
     const S = S_();
     const l = S && S.loans[i];
     if (!l) return false;
-    const cost = Math.ceil(l.remaining);
-    if (!VC.money.spend(cost, 'loanPayoff')) return false; // capital, not operating cost
+    const p = payoffOf(S, l);
+    if (!S.sandbox && !VC.money.canAfford(p.total)) { VC.money.spend(p.total, 'loanPayoff'); return false; } // the one 'noMoney'
+    VC.money.spend(p.principal, 'loanPayoff', true); // capital, not operating cost
+    if (p.interest > 0) VC.money.spend(p.interest, 'loanPayment', true); // accrued interest: operating cost
+    l.paidInterest = (l.paidInterest || 0) + p.interest;
     S.loans.splice(i, 1);
     if (!S.loans.length) S.econ.debtFreeDay = S.time.day;
     rev++;
     VC.bus.emit('loanChanged', null);
     VC.bus.emit('sfx', { name: 'cash' });
     return true;
+  },
+  /** What repaying loan i today costs: {principal, interest (accrued, >= 1 month before the first instalment), total}. */
+  payoffCost(i) {
+    const S = S_();
+    const l = S && S.loans[i];
+    return l ? payoffOf(S, l) : null;
+  },
+  /** State administration after a takeover: {since, until (day), tax (min %), funding (max), n} or null. */
+  receivership() {
+    const r = receiver(S_());
+    return r ? Object.assign({}, r) : null;
   },
   /** Total outstanding principal. */
   debt() {
@@ -44455,11 +44932,16 @@ VC.econ = {
    */
   upkeepOf(keyOrB) {
     const S = S_();
-    const key = keyOrB && typeof keyOrB === 'object' ? keyOrB.key : keyOrB;
+    const b = keyOrB && typeof keyOrB === 'object' ? keyOrB : null;
+    const key = b ? b.key : keyOrB;
     const def = VC.BLD[key];
     if (!S || !def || !def.upkeep) return 0;
     const dept = def.dept || 'parks';
-    return Math.round(def.upkeep * funding(dept) * costMul(S) * (WAGE_DEPTS[dept] ? wageMul(S) : 1));
+    return Math.round(def.upkeep * (b ? ageMulOf(b.age) : 1) * funding(dept) * costMul(S) * (WAGE_DEPTS[dept] ? wageMul(S) : 1));
+  },
+  /** Upkeep multiplier from a building's age (1 while young, up to 1 + AGE_MAX): see AGING in the header. */
+  ageMul(b) {
+    return ageMulOf(b && typeof b === 'object' ? b.age : b);
   },
   /** Tax rates (%) actually billed last month (day-weighted averages): {taxRates:{R:[..]…}, days}. */
   taxBilled() {
@@ -44492,9 +44974,17 @@ VC.econ = {
  *   runs (VC.hud.tutorialStep()).
  *
  * POPULATION goals aim at round numbers BETWEEN the milestones (POP_STEPS), never at a milestone itself:
- *   reaching a milestone is already celebrated by the advisors' banner. Problem goals (power, water,
- *   abandoned buildings) keep their title's count live. Cash rewards scale with the city (cash()) with a
- *   floor, so the first goals are worth a wind turbine or a few blocks of road. Ledger category 'goal'.
+ *   reaching a milestone is already celebrated by the advisors' banner; none while the population has
+ *   stalled (under 2% growth in a year, or no room left). Problem goals (power, water, abandoned
+ *   buildings) keep their title's count live. Cash rewards scale with the city (cash()) with a floor of
+ *   about a month of a small town's income, x VC.DIFFICULTY[..].rewardMul. Ledger category 'goal'.
+ * ANTI-FARMING: problem kinds (K.persist) only become goals once the problem has existed for that many
+ *   days (G.seen, checked every PROBLEM_EVERY days); a swap never draws a 'fix' goal; a fixed problem
+ *   must stay fixed for K.hold days before the goal completes (progress shows 99% "hold it"); the budget
+ *   goal needs 2 of the last 3 months in the red and pays at most 1.5x the average deficit; 'Save up'
+ *   does not count money borrowed since the goal started. (Undoing the build that completed a goal is
+ *   refused by VC.actions.) Stale rotations back a kind off (G.stale): 480, 960 … days, optional kinds
+ *   (trees, landmark) never return after two.
  *
  * STATE (plain JSON, saved with the game): S.goals = {
  *   active: [{id, kind, cat, title, desc, icon, target, base, cur, progress 0..1, text, unit,
@@ -44503,7 +44993,8 @@ VC.econ = {
  *             (best progress so far and the day it was reached), meta?}],
  *   done: [ids] (capped), log: [{id, kind, title, icon, day}] (last 30), seq, next (day the next goal may
  *   appear), cool: {kind: day} (per-kind cooldowns), count (goals completed), rotDay (last stale-goal
- *   rotation), v }
+ *   rotation), seen: {kind: day the problem was first seen}, stale: {kind: stale rotations}, v }
+ *   (goals also carry holdSince while a fixed problem is being held)
  *
  * API  list() -> active goals (live objects, read-only for callers), claim(id) -> bool, refresh() (debug:
  *   evaluate + fill every free slot now), swap(id) (replace a goal; its kind cools down), focusOf(id) ->
@@ -44523,11 +45014,13 @@ const FILL_DAYS = 1; // game days between goals while the card is filling up
 const FIRST_DAYS = 3; // a new city gets its first goal after this many days
 const AUTO_CLAIM_DAYS = 30; // unclaimed completed goals are claimed automatically after this ...
 const AUTO_CLAIM_SEC = 15; // ... once the card has also shown them this long (real seconds, see hud_goals.js)
-const STALE_DAYS = 300; // an open goal without any progress for this long rotates out …
+const STALE_DAYS = 150; // an open goal without any progress for this long rotates out …
 const ROTATE_GAP = 30; // … one at a time, at least this many days apart
-const CASH_FLOOR = 2500; // cash rewards never go below this x the goal's multiplier (starter goals: $2,000)
+const CASH_FLOOR = 1000; // cash rewards never go below this x the goal's multiplier (starter goals: $800)
+const PROBLEM_EVERY = 5; // days between checks of how long each city problem has existed (G.seen)
+const HOLD_DAYS = 10; // a fixed problem must stay fixed this long before its goal completes
 /** Population goal targets: round numbers between the milestones (never a milestone's own number). */
-const POP_STEPS = [100, 150, 400, 600, 800, 1500, 2000, 2500, 4000, 5000, 7500, 12500, 15000, 20000, 30000, 35000, 40000, 60000, 75000, 125000, 150000, 250000, 300000, 500000, 750000, 1000000];
+const POP_STEPS = [100, 150, 400, 600, 800, 1500, 2000, 2500, 4000, 5000, 7500, 12500, 15000, 20000, 30000, 35000, 40000, 60000, 75000, 125000, 150000, 175000, 250000, 300000, 350000, 450000, 500000, 750000, 1000000];
 const DONE_CAP = 100, LOG_CAP = 30;
 const ONCE = 1e9; // cooldown for one-time goals
 
@@ -44555,6 +45048,7 @@ const S_ = () => VC.state;
 const tutorialOn = () => !!(VC.hud && VC.hud.tutorialStep && VC.hud.tutorialStep() >= 0);
 const unlocked = (key) => { try { return VC.world.isUnlocked(key); } catch (e) { return true; } };
 const bldName = (key) => (VC.BLD[key] ? VC.BLD[key].name : key);
+const debtNow = () => { try { return (VC.econ && VC.econ.debt && VC.econ.debt()) || 0; } catch (e) { return 0; } };
 
 /* ------------------------------------------------------------------ */
 /* evaluation context: cheap fields up front, heavy ones lazily, once   */
@@ -44656,10 +45150,18 @@ function cleanShare() {
   cx._clean = tot > 0 ? clean / tot : 0;
   return cx._clean;
 }
-/** Cash reward scaled to the city size (x mul), with a floor for young towns; two significant digits. */
+/** Difficulty multiplier for cash rewards (VC.DIFFICULTY[..].rewardMul: easy 1.2, normal 1, hard 0.8). */
+function rewardMul(S) {
+  const d = S && VC.DIFFICULTY && VC.DIFFICULTY[S.difficulty];
+  return d && typeof d.rewardMul === 'number' ? d.rewardMul : 1;
+}
+/**
+ * Cash reward scaled to the city size (x mul, x difficulty), with a floor for young towns (about one
+ * month of a small town's income); two significant digits.
+ */
 function cash(mul) {
   mul = mul || 1;
-  return nice(Math.max(M.clamp(600 + Math.max(cx.pop, cx.peak * 0.8) * 0.3, 750, 40000), CASH_FLOOR) * mul);
+  return nice(Math.max(M.clamp(300 + Math.max(cx.pop, cx.peak * 0.8) * 0.3, 500, 40000), CASH_FLOOR) * mul * rewardMul(cx.S));
 }
 function nextMilestone() {
   const L = VC.MILESTONES || [];
@@ -44670,7 +45172,9 @@ function nextMilestone() {
 function popTarget(c) {
   const base = Math.max(c.pop, c.peak);
   const isMs = (v) => (VC.MILESTONES || []).some((m) => m.pop === v);
-  for (const v of POP_STEPS) if (v >= base * 1.15 && v - base >= 50 && !isMs(v)) return v;
+  // (big cities grow slowly: a smaller step keeps the goal reachable)
+  const step = base >= 100000 ? 1.08 : 1.15;
+  for (const v of POP_STEPS) if (v >= base * step && v - base >= 50 && !isMs(v)) return v;
   let t = niceUp(Math.max(1000, base * 1.4));
   while (isMs(t)) t = niceUp(t * 1.1);
   return t;
@@ -44715,9 +45219,15 @@ KINDS.first_water = {
   cur: () => counts().water,
   prog: (c, g, v) => (v > 0 ? 1 : 0),
 };
+/** Population has stopped growing (under 2% in the last year) or there is no room left to grow. */
+function popStalled(c) {
+  const h = c.S.history && c.S.history.pop;
+  if (h && h.length >= 12 && h[h.length - 1] < h[h.length - 12] * 1.02) return true;
+  return c.pop >= 5000 && (iss().zonedEmpty || 0) - (iss().zonedNoAccess || 0) < 8;
+}
 KINDS.pop = {
   cat: 'grow', cool: 0,
-  score: (c) => (roads() >= 10 ? 3 : 0),
+  score: (c) => (roads() >= 10 && !popStalled(c) ? 3 : 0),
   make(c) {
     // a round number between the milestones: the milestone itself has its own banner (no double party)
     const target = popTarget(c);
@@ -44758,7 +45268,7 @@ KINDS.density_high = {
   text: (g, v) => `${Math.max(0, v - g.base)} / ${g.target - g.base}`,
 };
 KINDS.level3 = {
-  cat: 'grow', cool: 360,
+  cat: 'grow', cool: 240,
   score: (c) => (c.pop >= 2500 && counts().grow >= 40 ? 2 : 0),
   make: (c) => ({ title: 'Grow 8 upscale buildings', desc: 'Buildings reach level 3 with high land value: parks, schools, landmarks and clean air nearby.', icon: '✨', target: counts().lvl3 + 8, base: cnt.lvl3, unit: 'step', focus: { overlay: 'landValue' }, reward: { money: cash(1.2) } }),
   cur: () => counts().lvl3,
@@ -44770,28 +45280,30 @@ KINDS.tourism = {
   score: (c) => (c.pop >= 4000 ? 2 : 0),
   make(c) {
     const t = c.st.tourism || 0;
-    return { title: `Attract ${num(niceUp(Math.max(60, t * 1.5 + 30)))} tourists`, desc: 'Landmarks, big parks and a tourism campaign bring visitors — and their wallets.', icon: '📸', target: niceUp(Math.max(60, t * 1.5 + 30)), base: t, unit: 'num', focus: { group: 'landmarks' }, reward: { money: cash(1.2) } };
+    const target = niceUp(Math.max(60, t * 1.25 + 30));
+    return { title: `Attract ${num(target)} tourists`, desc: 'Landmarks, big parks and a tourism campaign bring visitors — and their wallets.', icon: '📸', target, base: t, unit: 'num', focus: { group: 'landmarks' }, reward: { money: cash(1.2) } };
   },
   cur: (c) => c.st.tourism || 0,
   prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
 };
 KINDS.treasury = {
-  cat: 'grow', cool: 360,
+  cat: 'grow', cool: 240,
   score: (c) => (!c.S.sandbox && c.pop >= 500 && c.net > 0 && c.money < cash(12) ? 1.5 : 0),
   make(c) {
     const target = niceUp(c.money + Math.max(5000, c.net * 4));
-    return { title: `Save up ${money(target)}`, desc: 'A healthy reserve pays for the next big project — and for rainy days.', icon: '🏦', target, base: c.money, unit: 'money', focus: { panel: 'budget' }, reward: { mods: { happiness: 0.015 }, days: 120, label: 'Confident citizens' } };
+    return { title: `Save up ${money(target)}`, desc: 'A healthy reserve pays for the next big project — and for rainy days. (Borrowed money does not count.)', icon: '🏦', target, base: c.money, unit: 'money', focus: { panel: 'budget' }, reward: { mods: { happiness: 0.015 }, days: 120, label: 'Confident citizens' }, meta: { debt0: debtNow() } };
   },
-  cur: (c) => c.money,
+  // money borrowed since the goal started does not count as savings
+  cur: (c, g) => c.money - Math.max(0, debtNow() - ((g.meta && g.meta.debt0) || 0)),
   prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
 };
 KINDS.fix_power = {
-  cat: 'fix', cool: 60,
+  cat: 'fix', cool: 180, persist: 10, hold: HOLD_DAYS,
   score: (c) => (counts().power > 0 && (iss().unpowered || 0) >= 5 ? 8 : 0),
   make(c) {
     const n = iss().unpowered || 0;
     const short = iss().powerShortage;
-    return { title: powerTitle(n), desc: short ? 'Demand exceeds supply — build another power plant.' : 'Some buildings are not connected — link them to the grid with roads or power lines.', icon: '🔌', target: 0, base: n, unit: 'left', focus: { overlay: 'power', locate: 'unpowered', group: 'power' }, reward: { money: cash(0.8) } };
+    return { title: powerTitle(n), desc: short ? 'Demand exceeds supply — build another power plant.' : 'Some buildings are not connected — link them to the grid with roads or power lines.', icon: '🔌', target: 0, base: n, unit: 'left', focus: { overlay: 'power', locate: 'unpowered', group: 'power' }, reward: { money: nice(cash(0.8) * M.clamp(n / 40, 0.3, 1)) } };
   },
   cur: () => iss().unpowered || 0,
   prog: (c, g, v) => 1 - v / Math.max(1, g.base),
@@ -44803,11 +45315,11 @@ function powerTitle(n) { return `Restore power to ${num(n)} building${n === 1 ? 
 function waterTitle(n) { return `Bring water to ${num(n)} building${n === 1 ? '' : 's'}`; }
 function abandTitle(n) { return `Revive ${num(n)} abandoned building${n === 1 ? '' : 's'}`; }
 KINDS.fix_water = {
-  cat: 'fix', cool: 60,
+  cat: 'fix', cool: 180, persist: 10, hold: HOLD_DAYS,
   score: (c) => (counts().water > 0 && (iss().unwatered || 0) >= 5 ? 7 : 0),
   make(c) {
     const n = iss().unwatered || 0;
-    return { title: waterTitle(n), desc: iss().waterShortage ? 'The pumps can not keep up — add pumps or towers (and make sure they have power).' : 'Some buildings are cut off — connect them with roads to a pump or tower.', icon: '🚰', target: 0, base: n, unit: 'left', focus: { overlay: 'water', locate: 'unwatered', group: 'water' }, reward: { money: cash(0.8) } };
+    return { title: waterTitle(n), desc: iss().waterShortage ? 'The pumps can not keep up — add pumps or towers (and make sure they have power).' : 'Some buildings are cut off — connect them with roads to a pump or tower.', icon: '🚰', target: 0, base: n, unit: 'left', focus: { overlay: 'water', locate: 'unwatered', group: 'water' }, reward: { money: nice(cash(0.8) * M.clamp(n / 40, 0.3, 1)) } };
   },
   cur: () => iss().unwatered || 0,
   prog: (c, g, v) => 1 - v / Math.max(1, g.base),
@@ -44816,18 +45328,18 @@ KINDS.fix_water = {
   text: (g, v) => `${num(Math.max(0, g.base - v))} / ${num(g.base)} fixed`,
 };
 KINDS.fix_access = {
-  cat: 'fix', cool: 90,
+  cat: 'fix', cool: 240, persist: 30, hold: HOLD_DAYS,
   score: (c) => ((iss().zonedNoAccess || 0) >= 12 ? 7 : 0),
   make(c) {
     const n = iss().zonedNoAccess || 0;
-    return { title: 'Connect zones to roads', desc: `${num(n)} zoned tiles are more than ${C.ROAD_ACCESS} tiles from a street, so nothing can grow there. Add roads (or dezone).`, icon: '🚧', target: Math.floor(n * 0.2), base: n, unit: 'left', focus: { group: 'roads', locate: 'noaccess', tool: 'road_street' }, reward: { money: cash(0.8) } };
+    return { title: 'Connect zones to roads', desc: `${num(n)} zoned tiles are more than ${C.ROAD_ACCESS} tiles from a street, so nothing can grow there. Add roads (or dezone).`, icon: '🚧', target: Math.floor(n * 0.2), base: n, unit: 'left', focus: { group: 'roads', locate: 'noaccess', tool: 'road_street' }, reward: { money: nice(cash(0.8) * M.clamp(n / 60, 0.25, 1)) } };
   },
   cur: () => iss().zonedNoAccess || 0,
   prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
   text: (g, v) => `${num(Math.max(0, v - g.target))} tiles to go`,
 };
 KINDS.fix_abandoned = {
-  cat: 'fix', cool: 120,
+  cat: 'fix', cool: 120, hold: HOLD_DAYS,
   score: (c) => ((c.st.abandoned || 0) >= 4 ? 6 : 0),
   make(c) {
     const n = c.st.abandoned || 0;
@@ -44840,25 +45352,38 @@ KINDS.fix_abandoned = {
   text: (g, v) => `${num(M.clamp(g.base - v, 0, g.base - g.target))} / ${num(g.base - g.target)} done`,
 };
 KINDS.fix_traffic = {
-  cat: 'fix', cool: 180,
+  cat: 'fix', cool: 180, persist: 30, hold: HOLD_DAYS,
   score: (c) => ((iss().jammedRoads || 0) >= 12 ? 5 : 0),
   make(c) {
     const n = iss().jammedRoads || 0;
-    return { title: 'Unjam the streets', desc: `${num(n)} road tiles are jammed. Build avenues, alternative routes, bus depots — or try bike lanes.`, icon: '🚗', target: Math.floor(n / 3), base: n, unit: 'left', focus: { overlay: 'traffic' }, reward: { mods: { happiness: 0.02 }, days: 120, label: 'Smooth commutes' } };
+    return { title: 'Unjam the streets', desc: `${num(n)} road tiles are jammed — clear at least ${num(n - Math.floor(n * 0.7))} of them. Build avenues, alternative routes, bus depots — or try bike lanes.`, icon: '🚗', target: Math.floor(n * 0.7), base: n, unit: 'left', focus: { overlay: 'traffic' }, reward: { mods: { happiness: 0.02 }, days: 120, label: 'Smooth commutes' } };
   },
   cur: () => iss().jammedRoads || 0,
   prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
   text: (g, v) => `${num(Math.max(0, v - g.target))} jammed tiles to go`,
 };
+/**
+ * Average monthly deficit of the last 3 months when at least 2 of them were in the red and it is not
+ * trivial (>= $200 and 3% of income), else 0. A one-off bad month (or one staged on purpose) does not count.
+ */
+function deficit(c) {
+  const h = c.S.history && c.S.history.net;
+  if (!h || h.length < 3 || c.net >= 0) return 0;
+  let n = 0, sum = 0;
+  for (let i = h.length - 3; i < h.length; i++) if (h[i] < 0) { n++; sum -= h[i]; }
+  const avg = n ? sum / n : 0;
+  return n >= 2 && avg >= Math.max(200, 0.03 * (c.st.income || 0)) ? avg : 0;
+}
 KINDS.budget = {
-  cat: 'fix', cool: 240,
-  score: (c) => (!c.S.sandbox && c.pop >= 100 && c.net < 0 && ((c.S.history && c.S.history.net && c.S.history.net.length) || 0) >= 2 ? 6 : 0),
-  make: (c) => ({ title: 'Balance the budget for 3 months', desc: 'The monthly balance is in the red. Trim department funding, drop pricey policies or raise taxes a little.', icon: '⚖️', target: 3, base: 0, unit: 'months', focus: { panel: 'budget' }, reward: { money: cash(1.5) }, meta: { streak: 0 } }),
+  cat: 'fix', cool: 360,
+  score: (c) => (!c.S.sandbox && c.pop >= 100 && deficit(c) > 0 ? 6 : 0),
+  // the reward never exceeds 1.5x the deficit it fixes: running up deficits to farm it never pays
+  make: (c) => ({ title: 'Balance the budget for 3 months', desc: 'The monthly balance is in the red. Trim department funding, drop pricey policies or raise taxes a little.', icon: '⚖️', target: 3, base: 0, unit: 'months', focus: { panel: 'budget' }, reward: { money: Math.min(cash(1.5), nice(1.5 * deficit(c))) }, meta: { streak: 0 } }),
   cur: (c, g) => (g.meta && g.meta.streak) || 0,
   prog: (c, g, v) => v / g.target,
 };
 KINDS.happiness = {
-  cat: 'fix', cool: 240,
+  cat: 'fix', cool: 240, persist: 30,
   score: (c) => (c.pop >= 300 && (c.st.happiness || 0) < 0.62 ? 4 + (0.62 - c.st.happiness) * 8 : 0),
   make(c) {
     const h = c.st.happiness || 0;
@@ -44941,9 +45466,9 @@ KINDS.parks = {
   text: (g, v) => `${Math.max(0, Math.min(v - g.base, g.target - g.base))} / ${g.target - g.base}`,
 };
 KINDS.trees = {
-  cat: 'build', cool: ONCE,
+  cat: 'build', cool: ONCE, optional: true,
   score: (c) => (c.pop >= 80 ? 1.5 : 0),
-  make: (c) => ({ title: 'Plant 30 trees', desc: 'Trees soak up pollution and noise — and make every street prettier.', icon: '🌲', target: trees() + 30, base: trees(), unit: 'step', focus: { tool: 'trees', group: 'terrain' }, reward: { mods: { pollution: -0.06 }, days: 180, label: 'Fresh air' } }),
+  make: (c) => ({ title: 'Plant 30 trees', desc: 'Trees soak up pollution and noise — and make every street prettier.', icon: '🌲', target: trees() + 30, base: trees(), unit: 'step', focus: { tool: 'trees', group: 'parks' }, reward: { mods: { pollution: -0.06 }, days: 180, label: 'Fresh air' } }),
   cur: () => trees(),
   prog: (c, g, v) => (v - g.base) / Math.max(1, g.target - g.base),
   text: (g, v) => `${Math.max(0, Math.min(v - g.base, g.target - g.base))} / ${g.target - g.base}`,
@@ -44987,7 +45512,7 @@ function landmarkPick(c) {
   return best;
 }
 KINDS.landmark = {
-  cat: 'build', cool: 120,
+  cat: 'build', cool: 120, optional: true,
   score: (c) => (c.pop >= 200 && landmarkPick(c) ? 3 : 0),
   make(c) {
     const d = landmarkPick(c);
@@ -45060,6 +45585,8 @@ function ensure(S) {
   if (!Array.isArray(G.done)) G.done = [];
   if (!Array.isArray(G.log)) G.log = [];
   if (!G.cool || typeof G.cool !== 'object') G.cool = {};
+  if (!G.seen || typeof G.seen !== 'object') G.seen = {};
+  if (!G.stale || typeof G.stale !== 'object') G.stale = {};
   if (!(G.seq >= 0)) G.seq = 0;
   if (!(G.count >= 0)) G.count = 0;
   if (!isFinite(G.next)) G.next = S.time.day + FIRST_DAYS;
@@ -45113,6 +45640,16 @@ function evaluate(S) {
     // stale-goal bookkeeping: the best progress so far and when it was reached
     if (!(g.best >= 0)) { g.best = g.progress; g.lastProg = S.time.day; }
     else if (g.progress > g.best + 0.005) { g.best = g.progress; g.lastProg = S.time.day; }
+    if (p >= 1 && K.hold > 0) {
+      // a fixed problem has to STAY fixed for a while (undoing the cause of a staged problem is not enough)
+      if (!(g.holdSince >= 0)) g.holdSince = S.time.day;
+      const left = K.hold - (S.time.day - g.holdSince);
+      if (left > 0) {
+        g.progress = 0.99;
+        g.text = `Fixed — hold it ${left} more day${left === 1 ? '' : 's'}`;
+        continue;
+      }
+    } else if (g.holdSince != null) delete g.holdSince;
     if (p >= 1) complete(S, g);
   }
   lastEvalDay = S.time.day;
@@ -45133,11 +45670,17 @@ function complete(S, g) {
   if (G.log.length > LOG_CAP) G.log.length = LOG_CAP;
   const K = KINDS[g.kind];
   G.cool[g.kind] = S.time.day + ((K && K.cool) || 0);
+  if (G.stale) delete G.stale[g.kind];
   VC.bus.emit('goalDone', { goal: g });
   VC.bus.emit('goalsChanged', G.active);
 }
-/** Adds the most relevant new goal (or `forceKind`). Returns the goal or null. */
-function generate(S, forceKind) {
+/**
+ * Adds the most relevant new goal (or `forceKind`). opts.noFix: no 'fix' goal (a swap must not turn a
+ * problem created a moment ago into a goal). Problem kinds (K.persist) only come up once the problem
+ * has existed for K.persist days (G.seen, see trackProblems). Returns the goal or null.
+ */
+function generate(S, forceKind, opts) {
+  const noFix = !!(opts && opts.noFix);
   const G = S.goals;
   if (G.active.length >= MAX_ACTIVE && !forceKind) return null;
   prep(S);
@@ -45150,9 +45693,13 @@ function generate(S, forceKind) {
       const K = KINDS[key];
       if (G.active.some((g) => g.kind === key)) continue;
       if ((G.cool[key] || 0) > day) continue;
+      if (noFix && K.cat === 'fix') continue;
+      if (K.persist && !(G.seen[key] != null && day - G.seen[key] >= K.persist)) continue;
       let s = 0;
       try { s = +K.score(cx) || 0; } catch (e) { s = 0; }
       if (!(s > 0)) continue;
+      // kinds that went stale before are less likely to come back (prefer goals the city can finish)
+      if (G.stale[key]) s -= 1.5 * G.stale[key];
       // variety: a second goal of the same category has to be urgent to win
       if (s < 8 && G.active.some((g) => g.cat === K.cat)) s -= 2.5;
       // ... and two "X coverage to N%" goals at once only when the new one is urgent
@@ -45187,10 +45734,28 @@ function generate(S, forceKind) {
   }
   return null;
 }
+/**
+ * How long has each city problem (kinds with K.persist) existed? G.seen[kind] = the first check day its
+ * score was > 0, cleared as soon as it is 0 — so a problem created on purpose only becomes a goal after
+ * it has hurt the city for a while.
+ */
+function trackProblems(S) {
+  const G = S.goals, day = S.time.day;
+  prep(S);
+  for (const key in KINDS) {
+    const K = KINDS[key];
+    if (!K.persist) continue;
+    let sc = 0;
+    try { sc = +K.score(cx) || 0; } catch (e) { sc = 0; }
+    if (sc > 0) { if (G.seen[key] == null) G.seen[key] = day; }
+    else delete G.seen[key];
+  }
+}
 function onDay() {
   const S = S_();
   if (!live(S) || tutorialOn()) return;
   const G = S.goals, day = S.time.day;
+  if (day % PROBLEM_EVERY === 0) trackProblems(S);
   // auto-claim forgotten rewards so the slot frees up — only after the card has shown them a while
   // (real seconds, counted by the HUD; without a HUD the game days alone decide)
   const hudOn = !!(VC.hud && VC.hud.register);
@@ -45249,7 +45814,12 @@ function rotate(S, g) {
   const i = G.active.indexOf(g);
   if (i < 0) return;
   G.active.splice(i, 1);
-  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + 240);
+  // each stale rotation rests the kind twice as long (480, 960, … days); optional goals (trees,
+  // landmarks) that went stale twice do not come back
+  const st = (G.stale[g.kind] = (G.stale[g.kind] || 0) + 1);
+  const K = KINDS[g.kind];
+  const rest = K && K.optional && st >= 2 ? ONCE : Math.min(ONCE, 240 * Math.pow(2, st));
+  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + rest);
   const n = generate(S);
   G.next = S.time.day + (n ? NEXT_DAYS : 2);
   if (!n) VC.bus.emit('goalsChanged', G.active);
@@ -45264,7 +45834,7 @@ function swap(id) {
   if (i < 0 || G.active[i].done) return false;
   const g = G.active.splice(i, 1)[0];
   G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + 120);
-  const n = generate(S);
+  const n = generate(S, null, { noFix: true });
   G.next = S.time.day + (n ? NEXT_DAYS : 2);
   if (!n) VC.bus.emit('goalsChanged', G.active);
   return true;
@@ -45275,6 +45845,10 @@ function focusOf(id) {
   const g = list().find((x) => x.id === id);
   if (!S || !g) return null;
   const f = Object.assign({}, g.focus || {});
+  // "Show me" opens the palette the tool really lives in (older saves stored the trees goal under 'terrain')
+  if (f.tool && VC.tools && typeof VC.tools.info === 'function') {
+    try { const ti = VC.tools.info(f.tool); if (ti && ti.group) f.group = ti.group; } catch (e) { /* keep */ }
+  }
   const loc = f.locate;
   delete f.locate;
   if (loc) {
@@ -45876,6 +46450,8 @@ Object.assign(SIM, {
  *   frame on slow machines): a big city's day may span two frames, the month's bookkeeping gets its own
  *   slice, only one heavy pass runs (and finishes) per frame, and at high speed the passes run every
  *   N days such that they stay >= 1-2 s real time apart. tickDay() still does a whole day synchronously.
+ *   finishDay() completes a staged day now (save snapshots and city switches call it, so a save never
+ *   holds half a day or a month boundary whose billing has not run); dayPending() tells if one is open.
  * DAILY: construction, occupancy (move-ins / job filling), stats; for a quarter of the buildings
  *   ((id + day) & 3): happiness, garbage, abandonment, downgrade, level-up, fire ignition. Fire
  *   spread/extinguish, growth slice (1/4 of the map in a fixed random order), abandoned 12+ months
@@ -45891,6 +46467,10 @@ Object.assign(SIM, {
  * REDEVELOPMENT: repainting a developed lot with another density of the same zone type (up- or
  *   downzoning) makes the building redevelop to that density over the next weeks (upzoning needs
  *   demand and growth budget; the lot replays its construction).
+ * HAPPINESS & TAXES: a building's city-wide `happy` bonus counts once per building type (its best copy),
+ *   buildings together add at most BLD_HAPPY_MAX and buildings + policies + temporary modifiers at most
+ *   HAPPY_MOD_MAX. The tax term is applied AFTER the 100% ceiling, so taxes bite in a city maxed out on
+ *   services, and residential taxes above 9% also empty homes directly (X.taxLeave, TAX_LEAVE).
  * TRAFFIC: long congested commutes and jammed home streets cost happiness; jammed access roads
  *   lower shop/factory job fill; road funding below 60% adds a 'Road condition' penalty.
  * WEATHER: the sim keeps its own deterministic weather X.wx (VC.sim.weather()), derived from the
@@ -45914,6 +46494,7 @@ const C = VC.C, M = VC.M, F = VC.F;
 const ZK = [null, 'R', 'C', 'I'];
 
 const LABOR = 0.5; // share of residents who work
+const TAX_LEAVE = 0.12; // homes emptied per unit of residential tax penalty (ownTax < 0): 12% -> 2.5%, 20% -> 9%
 const LV_REQ = { 1: [0, 0, 80, 120], 2: [0, 0, 75, 110] }; // land value needed for level 2 / 3
 const EDU_REQ = [0, 0, 70, 140]; // industry: education coverage needed for level 2 / 3
 const GROW_DAYS = 5; // growables take 5..10 days to build
@@ -46041,6 +46622,9 @@ function progressConstruction(S, days) {
 /* ------------------------------------------------------------------ */
 /* happiness                                                             */
 /* ------------------------------------------------------------------ */
+const SVC_W = 0.4; // weight of good residential service coverage (above the basic need)
+const BLD_HAPPY_MAX = 0.08; // cap on the city-wide happiness bonus of buildings (landmarks, plants …)
+const HAPPY_MOD_MAX = 0.15; // cap on buildings + policies + temporary modifiers together
 /**
  * Target happiness 0..1 of a growable. When `out` is an array, pushes named factors
  * {label, value -1..1 (display scale), raw (additive contribution)}.
@@ -46053,7 +46637,7 @@ function evalHappy(S, b, out) {
   const ec = Math.min(1, m.edu[i] / 255 + (S.mods.education || 0) * 0.5);
   const rt = b.simRoad >= 0 ? m.traffic[b.simRoad] / 255 : 0;
   const tax = X.taxW[zt] ? X.taxW[zt][b.wealth | 0] : 0;
-  let h = 0.55;
+  let h = 0.55, tx = 0;
   if (b.simRoad < 0) h += fac(out, 'No road access', -0.3);
   if (zt === 1) {
     h += fac(out, 'Power', b.powered ? 0.04 : -0.32);
@@ -46063,10 +46647,10 @@ function evalHappy(S, b, out) {
     h += fac(out, 'Noise', -noi * 0.22);
     // missing services mostly block upgrades; good coverage makes people genuinely happy
     const sv = 0.22 * pc + 0.22 * fc + 0.22 * hc + 0.22 * ec + 0.12 * gc - (0.15 + 0.1 * (b.level - 1) + 0.05 * (den - 1));
-    h += fac(out, 'Services', sv > 0 ? sv * 0.45 : sv * 0.25);
+    h += fac(out, 'Services', sv > 0 ? sv * SVC_W : sv * 0.25);
     h += fac(out, 'Parks', (pk - 0.12) * 0.14);
     h += fac(out, 'Land value', (lv - 0.3) * 0.25);
-    h += fac(out, 'Taxes', tax * 0.35);
+    tx = fac(out, 'Taxes', tax * 0.35);
     // congestion-inflated travel time (street tiles) beyond a 12-tile commute, and jams at the door
     h += fac(out, 'Commute', b.simCommute < 0 ? -0.12 : -Math.min(0.12, Math.max(0, (b.simCommute - 12) / 100)));
     h += fac(out, 'Street traffic', -rt * 0.15);
@@ -46082,7 +46666,7 @@ function evalHappy(S, b, out) {
     const sv = 0.35 * pc + 0.35 * fc + 0.3 * gc - 0.2;
     h += fac(out, 'Services', sv > 0 ? sv * 0.3 : sv * 0.2);
     h += fac(out, 'Customers', clamp(S.demand.C, -1, 1) * 0.12 + (lv - 0.3) * 0.2);
-    h += fac(out, 'Taxes', tax * 0.4);
+    tx = fac(out, 'Taxes', tax * 0.4);
     h += fac(out, 'Workers', -(1 - X.fill) * 0.35);
     h += fac(out, 'Traffic', -rt * 0.1);
     if (X.roadPen) h += fac(out, 'Road condition', -X.roadPen * 0.5);
@@ -46095,7 +46679,7 @@ function evalHappy(S, b, out) {
     const sv = 0.5 * fc + 0.3 * pc + 0.2 * gc - 0.2;
     h += fac(out, 'Services', sv > 0 ? sv * 0.25 : sv * 0.15);
     h += fac(out, 'Trade', clamp(S.demand.I, -1, 1) * 0.15);
-    h += fac(out, 'Taxes', tax * 0.4);
+    tx = fac(out, 'Taxes', tax * 0.4);
     h += fac(out, 'Workers', -(1 - X.fill) * 0.4);
     if (b.level >= 2) h += fac(out, 'Skilled workforce', ((ec + X.cityEdu) * 0.5 - 0.3) * 0.2);
     h += fac(out, 'Freight traffic', -rt * 0.12);
@@ -46103,7 +46687,9 @@ function evalHappy(S, b, out) {
     if (b.simGarbage > 0.05) h += fac(out, 'Garbage', -b.simGarbage * 0.06);
     h += fac(out, 'Policies & landmarks', X.happyMod * 0.4);
   }
-  return clamp(h, 0, 1);
+  // taxes apply AFTER the ceiling: a city stacked with services and landmarks still feels a tax rise
+  // (and a tax cut cannot lift anyone past 100%)
+  return clamp(Math.min(h, 1) + tx, 0, 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -46114,7 +46700,7 @@ function newTot() {
     pop: 0, capR: 0, capRBuilt: 0, capC: 0, capCBuilt: 0, capI: 0, capIBuilt: 0, jobsSvc: 0, jobsFilled: 0,
     growables: 0, catalog: 0, rubble: 0, abandoned: 0, constructing: 0, burning: 0,
     happyS: 0, happyW: 0, eduS: 0, healthS: 0, crimeS: 0, polS: 0, polW: 0, lvS: 0, svcS: 0,
-    tourismRaw: 0, happyMod: 0, parks: 0, seaports: 0, airports: 0,
+    tourismRaw: 0, happyMod: 0, happyKeys: {}, parks: 0, seaports: 0, airports: 0,
     unpowered: 0, unwatered: 0, noAccess: 0, noCommute: 0, garbage: 0,
   };
 }
@@ -46239,7 +46825,12 @@ function* dailyBuildings(S, sim, live) {
         // amenities need their budget (and power, if they use any) to draw crowds
         const run = Math.min(1, X.effC[def.dept || 'parks'] != null ? X.effC[def.dept || 'parks'] : 1) * (b.powered ? 1 : 0.5);
         tot.tourismRaw += (def.tourism || 0) * run;
-        tot.happyMod += (def.happy || 0) * run;
+        if (def.happy) {
+          // a city-wide bonus counts once per building type (its best-running copy): a second water
+          // plant, library or statue adds nothing to every home's mood
+          const hk = tot.happyKeys, v = def.happy * run, prev = hk[key] || 0;
+          if (v > prev) { tot.happyMod += v - prev; hk[key] = v; }
+        }
       }
       if (jobs) {
         tot.jobsSvc += jobs;
@@ -46259,7 +46850,7 @@ function* dailyBuildings(S, sim, live) {
         // arcology: residents move in like a giant residential building
         b.cap = def.housing;
         if (sim) {
-          const occ = clamp(0.55 + 0.4 * (X.happyAvg || 0.6) + 0.3 * X.rAppeal - leave, 0.2, 1) * (b.powered ? 1 : 0.3) * (b.watered ? 1 : 0.5);
+          const occ = clamp(clamp(0.55 + 0.4 * (X.happyAvg || 0.6) + 0.3 * X.rAppeal - leave, 0.2, 1) - X.taxLeave[2], 0.1, 1) * (b.powered ? 1 : 0.3) * (b.watered ? 1 : 0.5);
           const target = Math.floor(def.housing * occ);
           if (b.pop < target) b.pop += Math.ceil((target - b.pop) * 0.04);
           else if (b.pop > target) b.pop -= Math.ceil((b.pop - target) * 0.05);
@@ -46316,7 +46907,8 @@ function* dailyBuildings(S, sim, live) {
     if (sim) {
       /* occupancy (daily) */
       if (zt === 1) {
-        let occ = clamp(0.5 + 0.45 * b.happy + 0.3 * X.rAppeal - leave, 0.15, 1);
+        // (high taxes also empty homes directly: families move away however nice the city is)
+        let occ = Math.max(0.1, clamp(0.5 + 0.45 * b.happy + 0.3 * X.rAppeal - leave, 0.15, 1) - X.taxLeave[b.wealth | 0]);
         if (!b.powered) occ *= 0.35;
         if (!b.watered && (b.den >= 2 || b.level >= 2)) occ *= 0.5;
         if (b.simRoad < 0) occ *= 0.3;
@@ -46474,7 +47066,7 @@ function updateStats(S) {
   const svcTerm = 0.65 * (1 - svcW) + Math.min(1, svc * 1.4) * svcW;
   st.approval = clamp(0.55 * st.happiness + 0.25 * (0.5 + taxAvg * 0.5) + 0.2 * svcTerm, 0, 1);
   if (pop > S.peakPop) S.peakPop = pop;
-  X.happyMod = (mods.happiness || 0) + t.happyMod;
+  X.happyMod = clamp((mods.happiness || 0) + Math.min(BLD_HAPPY_MAX, t.happyMod), -0.5, HAPPY_MOD_MAX);
 }
 
 /* ------------------------------------------------------------------ */
@@ -46571,12 +47163,15 @@ function stepDay(budgetMs) {
   for (;;) {
     if (pc.lastYield) pc.paused += performance.now() - pc.lastYield;
     let r;
+    X.dayBusy = true; // (finishDay from a bus listener inside this very day must not re-enter it)
     try {
       r = g.next();
     } catch (e) {
       X.dayJob = null;
       pc.lastYield = 0;
       throw e;
+    } finally {
+      X.dayBusy = false;
     }
     const tn = performance.now();
     sliceStat('day', r.done ? 'end' : r.value, tn - (pc.lastYield > t0 ? pc.lastYield : t0));
@@ -46604,6 +47199,7 @@ function refreshCity(S) {
   if (!X.taxZ) {
     X.taxZ = [0, 0, 0, 0];
     X.taxW = [null, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    X.taxLeave = [0, 0, 0];
   }
   for (let z = 1; z <= 3; z++) {
     const zk = ZK[z];
@@ -46613,6 +47209,8 @@ function refreshCity(S) {
     try { e = VC.econ && VC.econ.taxEffect ? VC.econ.taxEffect(zk) : null; } catch (err) { e = null; }
     X.taxZ[z] = typeof e === 'number' && isFinite(e) && e !== 0 ? clamp(e, -1, 1) : own;
   }
+  // share of homes (per wealth) left empty by residential taxes above the neutral 9%
+  for (let w = 0; w < 3; w++) X.taxLeave[w] = Math.max(0, -X.taxW[1][w]) * TAX_LEAVE;
   const mo = Math.floor(S.time.day / C.DAYS_PER_MONTH) % 12;
   X.seasonFire = mo >= 5 && mo <= 7 ? 1.4 : mo === 11 || mo <= 1 ? 0.7 : 1;
   // department effectiveness (funding, strikes) cached for the day
@@ -47251,6 +47849,8 @@ Object.assign(SIM, {
     // staged work of the previous city is dropped; the heavy passes start their cadence today
     X.job = null;
     X.dayJob = null;
+    X.dayJobS = null;
+    X.dayBusy = false;
     X.hold = null;
     X.want = { net: false, maps: false, traffic: false };
     X.jobDone = {};
@@ -47363,6 +47963,7 @@ Object.assign(SIM, {
           X.acc -= 1;
           n++;
           X.dayJob = dayGen(S, true);
+          X.dayJobS = S;
         }
         if (!stepDay(budget - (performance.now() - t0))) break;
         if (performance.now() - t0 >= budget) break;
@@ -47382,14 +47983,29 @@ Object.assign(SIM, {
     const S = VC.state;
     if (!S) return;
     if (!X.ready) SIM.reset(S);
-    // a day the frame loop is still working on finishes first
-    if (X.dayJob) {
-      const g = X.dayJob;
-      X.dayJob = null;
-      X.dayClock.lastYield = 0;
-      runSync(g);
-    }
+    SIM.finishDay(); // a day the frame loop is still working on finishes first
     runSync(dayGen(S, false));
+  },
+
+  /**
+   * Finishes the day the frame loop is still working on (a staged day can span frames), synchronously —
+   * including that day's month bookkeeping ('month' / 'year'). Call it before anything that must see whole
+   * days: save snapshots, replacing the running city. A staged day of a city that is no longer VC.state is
+   * dropped (its bus events would reach the new city). Returns true when a day was finished.
+   */
+  finishDay() {
+    const g = X.dayJob;
+    if (!g || X.dayBusy) return false; // (called from inside the running day: it finishes by itself)
+    X.dayJob = null;
+    if (X.dayClock) X.dayClock.lastYield = 0;
+    if (X.dayJobS && X.dayJobS !== VC.state) { X.dayJobS = null; return false; }
+    X.dayJobS = null;
+    runSync(g);
+    return true;
+  },
+  /** True while the frame loop is in the middle of a staged sim day (see finishDay). */
+  dayPending() {
+    return !!X.dayJob;
   },
 
   /* ---------------- fires ---------------- */
@@ -49474,8 +50090,9 @@ X.ensureTraffic = function (S) {
  *   TOP BAR     city name + milestone progress, date / weather / clock, speed controls, funds (animated,
  *               monthly net), population (+trend), approval face (neutral '—' until the first residents),
  *               RCI demand meter, power/water load pills, PROBLEMS CHIP, mute / fullscreen / pause-menu buttons.
- *               Rich live tooltips on every segment. Compacts (c1..c4) while overflowing; re-measured every 5 s
- *               so a transient overflow does not keep it compact.
+ *               Rich live tooltips on every segment. Compacts (c1..c5) while overflowing; re-measured every 5 s
+ *               so a transient overflow does not keep it compact. The problems chip narrows first; the monthly
+ *               net under the funds is the last thing hidden (c5).
  *   PROBLEMS    "Why isn't it growing?": a chip that cycles the city's blockers (every 1.5 s, only while the HUD
  *               shows; e.g. "⚡ 12 lots without power", "🚫 30 zoned tiles without road"). Counts: VC.sim.issues();
  *               power / water lots via VC.actions.zoneSupply (only lots the network cannot reach — inner lots
@@ -49488,7 +50105,8 @@ X.ensureTraffic = function (S) {
  *   DOCK        right-side manager buttons (VC.panels.list, or a built-in fallback list) + overlays,
  *               photo mode, settings, help. Active-window highlight, unread-advisor badge, auto-compacts.
  *   READOUT     bottom-right FPS (VC.settings.showFps) + hovered tile info (+ why an empty zoned lot is not
- *               growing, VC.sim.growReason).
+ *               growing, VC.sim.growReason); placed left of the dock's real width and above the toolbar top
+ *               (layoutReadout: --dock-w / --tb-clear on the HUD root).
  *   VISIBILITY  show()/hide() (game vs title screen), toggleUI(visible?) (H), photoMode(on?) (UI off +
  *               cinematic camera + screenshot button), floating money deltas over the funds display.
  *   HOTKEYS     fallback handling ONLY when VC.input has no KEYMAP (the foundation input); the real
@@ -49533,7 +50151,7 @@ const SEASONS = [
 const WEATHER_NAMES = { clear: 'Clear skies', cloudy: 'Cloudy', overcast: 'Overcast', rain: 'Rain', storm: 'Thunderstorm', snow: 'Snowfall', fog: 'Fog', windy: 'Windy' };
 
 const T = {}; // top bar element refs
-const D = { btns: new Map(), sig: '' }; // dock
+const D = { btns: new Map(), sig: '', dockW: null, tbClear: null }; // dock (+ readout placement vars)
 const cache = new Map(); // el -> last text (avoid redundant DOM writes)
 let tAcc = 0, slowAcc = 0, infoAcc = 0, fpsAcc = 0, layoutAcc = 0, probAcc = 1.5;
 let popRing = [];
@@ -49660,6 +50278,7 @@ const hud = (VC.hud = {
     if (slowAcc >= 1) {
       slowAcc = 0;
       safe(refreshDockBadges, 'badges');
+      safe(layoutReadout, 'readout'); // (after the show / hide slide-ins, a toolbar or dock size change)
       layoutAcc += 1;
       // numbers grew: compact further now; every 5 s re-measure from scratch so compaction is not sticky
       if (T.bar.scrollWidth > T.bar.clientWidth + 1 || layoutAcc >= 5) { layoutAcc = 0; layoutTop(); }
@@ -50262,12 +50881,15 @@ function refreshDockBadges() {
   }
   refreshDockActive();
 }
-/** Top bar: progressively hides secondary details (c1..c4) until everything fits the width. */
+/**
+ * Top bar: progressively hides secondary details (c1..c5) until everything fits the width. The problems chip
+ * narrows at c2 / c3 and drops its text at c4; the monthly net under the funds only goes at c5.
+ */
 function layoutTop() {
   const bar = T.bar;
   if (!bar || !hud.visible) return;
-  bar.classList.remove('c1', 'c2', 'c3', 'c4');
-  for (let lv = 1; lv <= 4 && bar.scrollWidth > bar.clientWidth + 1; lv++) bar.classList.add('c' + lv);
+  bar.classList.remove('c1', 'c2', 'c3', 'c4', 'c5');
+  for (let lv = 1; lv <= 5 && bar.scrollWidth > bar.clientWidth + 1; lv++) bar.classList.add('c' + lv);
 }
 /** Fits the dock between the top bar and the ticker: normal -> compact -> two columns. */
 function layoutDock() {
@@ -50277,11 +50899,32 @@ function layoutDock() {
   const avail = window.innerHeight - 66 - 40;
   D.el.classList.remove('compact', 'two');
   const need = (hh) => hh * s <= avail;
-  if (need(D.el.offsetHeight)) return;
-  D.el.classList.add('compact');
-  if (need(D.el.offsetHeight)) return;
-  D.el.classList.remove('compact');
-  D.el.classList.add('two');
+  if (!need(D.el.offsetHeight)) {
+    D.el.classList.add('compact');
+    if (!need(D.el.offsetHeight)) {
+      D.el.classList.remove('compact');
+      D.el.classList.add('two');
+    }
+  }
+  layoutReadout();
+}
+/**
+ * The bottom-right readout (tile info / FPS) sits left of the dock's REAL width (a two-column dock at a large
+ * UI scale is ~140 px wide) and above the toolbar's top edge when a large UI scale lifts the toolbar that
+ * high — never over the dock's Settings / Help buttons or the tool bar. CSS vars on the HUD root.
+ */
+function layoutReadout() {
+  const root = hud.root;
+  if (!root || !hud.visible) return;
+  let dw = '';
+  const dr = D.el && D.el.offsetParent ? D.el.getBoundingClientRect() : null;
+  if (dr && dr.width) dw = Math.max(0, Math.round(window.innerWidth - dr.left)) + 'px';
+  let clear = '';
+  const tb = root.querySelector('.hud-toolbar');
+  const tr = tb && tb.offsetParent ? tb.getBoundingClientRect() : null;
+  if (tr && tr.height) clear = Math.max(0, Math.round(window.innerHeight - tr.top + 6)) + 'px';
+  if (dw !== D.dockW) { D.dockW = dw; if (dw) root.style.setProperty('--dock-w', dw); else root.style.removeProperty('--dock-w'); }
+  if (clear !== D.tbClear) { D.tbClear = clear; if (clear) root.style.setProperty('--tb-clear', clear); else root.style.removeProperty('--tb-clear'); }
 }
 
 /* ================================================================== */
@@ -50624,10 +51267,14 @@ function onKeyFallback(e) {
  * slides in underneath it) — and its max-height stops above whatever HUD block lies below it in its lane:
  * the minimap (+ legend), the toolbar, the ticker, advisor cards and the dock when they reach that far
  * (measured with getBoundingClientRect, re-checked 5x a second, on show / state changes and on resize).
- * The desk card's body and the goals list scroll inside it instead of running into those blocks.
+ * The CHOICES ARE ALWAYS VISIBLE: the card's story (title + text) shrinks and scrolls, the header and the
+ * choices never do; when the lane above the minimap is too short for that (short viewport, overlay legend,
+ * large UI scale), the column moves into the lane beside the minimap while the decision is open (it never
+ * covers the minimap). Only on a viewport too small for either does the whole card scroll, with a sticky
+ * "↓ 3 choices" chip. A goals list peeked at meanwhile gets only the room the decision leaves.
  */
 const h = VC.h;
-const DK = { col: null, card: null, badge: null, v: null, state: 'none', acc: 0, lay: 0, outT: 0, hover: false, choices: [], daysEl: null, pillDays: null, badgeDays: null, timer: null, out: null, body: null };
+const DK = { col: null, card: null, badge: null, v: null, state: 'none', acc: 0, lay: 0, outT: 0, hover: false, choices: [], daysEl: null, pillDays: null, badgeDays: null, timer: null, out: null, body: null, story: null, full: null, chWrap: null, more: null, gFixed: 0, peekBest: Infinity, peekVar: undefined };
 const esc = (s) => (VC.ui && VC.ui.esc ? VC.ui.esc(s) : String(s == null ? '' : s));
 const demo = () => !!(VC.state && VC.state.demo) || !!(VC.menu && VC.menu.active);
 const OUT_MS = 14000;
@@ -50679,16 +51326,34 @@ function build(v) {
   });
   DK.out = h('div', { class: 'dk-out' });
   DK.timer = h('i');
-  // the body scrolls when the viewport is too short for the whole story (the column is height-capped)
-  DK.body = h('div', { class: 'dk-body' }, title, text, h('div', { class: 'dk-choices' }, DK.choices), DK.out);
-  DK.body.addEventListener('scroll', moreHint, { passive: true });
-  card.append(pill, h('div', { class: 'dk-full' }, head, DK.body), h('div', { class: 'dk-timer' }, DK.timer));
+  // the column is height-capped: the STORY (title + text) shrinks and scrolls, the choices never do (see
+  // goals.css); only when even the story's minimum does not fit does the whole card (.dk-full) scroll, with a
+  // sticky "↓ 3 choices" chip while choices are out of view
+  DK.story = h('div', { class: 'dk-story' }, title, text);
+  DK.chWrap = h('div', { class: 'dk-choices' }, DK.choices);
+  DK.body = h('div', { class: 'dk-body' }, DK.story, DK.chWrap, DK.out);
+  const n = DK.choices.length;
+  DK.more = h('button', { class: 'dk-more', 'aria-label': 'Scroll to the choices', onclick: () => { const f = DK.full; if (f) f.scrollTo({ top: f.scrollHeight, behavior: 'smooth' }); } }, '↓ ' + n + ' choice' + (n === 1 ? '' : 's'));
+  DK.full = h('div', { class: 'dk-full' }, head, DK.body, DK.more);
+  DK.story.addEventListener('scroll', moreHint, { passive: true });
+  DK.full.addEventListener('scroll', moreHint, { passive: true });
+  card.append(pill, DK.full, h('div', { class: 'dk-timer' }, DK.timer));
   return card;
 }
-/** Fades the bottom of the card body while more choices are scrolled out of view. */
+/**
+ * Fades the bottom of the story while more of it is scrolled out of view; shows the sticky "↓ N choices" chip
+ * while the card itself is cut above its last choice (tiny viewports only).
+ */
 function moreHint() {
-  const b = DK.body;
-  if (b) b.classList.toggle('more', b.scrollHeight - b.clientHeight - b.scrollTop > 4);
+  const st = DK.story, f = DK.full;
+  if (st) st.classList.toggle('more', st.scrollHeight - st.clientHeight - st.scrollTop > 4);
+  if (!f || !DK.chWrap) return;
+  let cut = false;
+  if (DK.state === 'open' && f.scrollHeight - f.clientHeight > 2) {
+    const last = DK.choices[DK.choices.length - 1];
+    cut = !!last && last.getBoundingClientRect().bottom > f.getBoundingClientRect().bottom + 1;
+  }
+  if (f.classList.contains('cut') !== cut) f.classList.toggle('cut', cut);
 }
 /** state: 'open' (full card) | 'min' (folded: header badge or pill) | 'done' (outcome) | 'none'. */
 function setState(st) {
@@ -50720,7 +51385,15 @@ function dock() {
       VC.ui && VC.ui.flash && VC.ui.flash(DK.badge, 'dk-badge-in');
     }
   } else if (DK.badge.parentNode) DK.badge.remove();
+  hasDesk();
   DK.card.classList.toggle('docked', !!head);
+}
+/** .has-desk on the goals header while the badge sits in it (goals.css shortens the label beside a Claim chip). */
+function hasDesk() {
+  const head = DK.col && DK.col.querySelector('.gl-head');
+  if (!head) return;
+  const on = !!(DK.badge && DK.badge.parentNode === head);
+  if (head.classList.contains('has-desk') !== on) head.classList.toggle('has-desk', on);
 }
 function show(v, sound, state) {
   if (!v) return;
@@ -50739,8 +51412,10 @@ function close(instant) {
   if (DK.badge) DK.badge.remove();
   DK.card = null;
   DK.badge = null;
+  hasDesk();
   DK.v = null;
   DK.choices = [];
+  DK.story = DK.full = DK.chWrap = DK.more = null;
   DK.hover = false;
   deskClass(false);
   DK.state = 'none';
@@ -50825,7 +51500,10 @@ function refresh() {
   }
 }
 /* ---------------- column layout (see header) ---------------- */
-const COL_TOP = 70, COL_W = 324, COL_GAP = 8, COL_MIN = 96;
+// COL_FLOOR: the smallest max-height (CSS px) — a card header — even when a block sits right under the top;
+// STORY_MIN: the desk story's min-height (goals.css .dk-story); PEEK_MIN: room wanted for a peeked goals list
+const COL_TOP = 70, COL_W = 324, COL_GAP = 8, COL_FLOOR = 44, STORY_MIN = 60, PEEK_MIN = 110;
+const LANE_BLOCKS = ['.hud-bl', '.hud-toolbar', '.hl-notes', '.hud-dock'];
 // size changes of the blocks around the column (minimap legend, tutorial card, …) re-layout it before the
 // next paint; the 5 Hz poll covers moves without a size change
 let colRO = null;
@@ -50846,9 +51524,45 @@ function rectOf(el) {
   return r.width > 0 && r.height > 0 ? r : null;
 }
 /**
+ * Room of the lane [x0, x1) (screen px) below top0: under the tutorial card while a desk card shows and the
+ * tutorial card overlaps the lane; down to the first HUD block that starts below the top and shares the lane
+ * (minimap + legend, toolbar, advisor cards, dock), and above the ticker. -> {x0, top, h}
+ */
+function lane(root, x0, x1, top0) {
+  const vh = window.innerHeight;
+  let top = top0;
+  // the tutorial card (z above the column) only shares the spot with a desk card: goals hide meanwhile
+  const tut = DK.card ? rectOf(root.querySelector('.tut-card:not(.out)')) : null;
+  if (tut && tut.right > x0 && tut.left < x1) top = Math.max(top, Math.round(tut.bottom + COL_GAP));
+  let bottom = vh - COL_GAP;
+  const tick = root.querySelector('.hud-ticker');
+  if (tick && !tick.classList.contains('hidden') && tick.offsetHeight) bottom = Math.min(bottom, vh - tick.offsetHeight - COL_GAP);
+  for (const sel of LANE_BLOCKS) {
+    for (const el of root.querySelectorAll(sel)) {
+      watch(el);
+      const r = rectOf(el);
+      // every block in the lane that starts below the column top caps it (one beside the top bar does not)
+      if (!r || r.right <= x0 || r.left >= x1 || r.top <= top) continue;
+      bottom = Math.min(bottom, Math.floor(r.top - COL_GAP));
+    }
+  }
+  return { x0, top, h: bottom - top };
+}
+/** CSS px the open desk card needs with its story at the minimum (header, choices / outcome in full). */
+function deskNeed() {
+  const c = DK.card, f = DK.full, st = DK.story;
+  if (!c || !f || !st) return 0;
+  const cut = Math.max(0, f.scrollHeight - f.clientHeight); // (the whole card scrolls: add what is cut off)
+  const chip = f.classList.contains('cut') && DK.more ? DK.more.offsetHeight + 2 : 0;
+  return c.offsetHeight + cut - chip - st.clientHeight + Math.min(st.scrollHeight, STORY_MIN);
+}
+/**
  * Places the shared left column: top under the top bar (or the tutorial card while it shows), max-height
  * down to the first HUD block below it that shares its lane (minimap + legend, toolbar, ticker, advisor
- * cards, dock). Sets --gl-avail (CSS px) for the goals list's peek cap.
+ * cards, dock). While a decision is open and that lane is too short for its choices (short viewports, the
+ * overlay legend, a large UI scale), the column moves into the lane beside the minimap when that one has
+ * more room — it never covers the minimap. Sets --gl-avail (CSS px, the goals list's 40 % peek cap) and
+ * --gl-peek (room a peeked goals list may take without pushing the decision's choices out).
  */
 function layoutCol() {
   const col = DK.col || ensureCol();
@@ -50856,39 +51570,101 @@ function layoutCol() {
   if (!col || !root || !VC.hud.visible) return;
   DK.col = col;
   const s = (VC.ui && VC.ui.scale && VC.ui.scale()) || 1;
-  const vh = window.innerHeight;
-  let top = COL_TOP;
+  let top0 = COL_TOP;
   const bar = root.querySelector('.hud-top');
   watch(bar);
   watch(root.querySelector('.hl-tut'));
-  if (bar && bar.offsetHeight) top = Math.max(top, Math.round(8 + bar.offsetHeight * s + COL_GAP));
-  // the tutorial card (z above the column) only shares the spot with a desk card: goals hide meanwhile
-  const tut = DK.card ? rectOf(root.querySelector('.tut-card:not(.out)')) : null;
-  if (tut) top = Math.max(top, Math.round(tut.bottom + COL_GAP));
-  const x0 = 10, x1 = 10 + COL_W * s;
-  let bottom = vh - COL_GAP;
-  const tick = root.querySelector('.hud-ticker');
-  if (tick && !tick.classList.contains('hidden') && tick.offsetHeight) bottom = Math.min(bottom, vh - tick.offsetHeight - COL_GAP);
-  for (const sel of ['.hud-bl', '.hud-toolbar', '.hl-notes', '.hud-dock']) {
-    for (const el of root.querySelectorAll(sel)) {
-      watch(el);
-      const r = rectOf(el);
-      // blocks in the column's lane that start below its top (a block beside the top would leave no room)
-      if (!r || r.right <= x0 || r.left >= x1 || r.top < top + COL_MIN * s) continue;
-      bottom = Math.min(bottom, Math.floor(r.top - COL_GAP));
+  if (bar && bar.offsetHeight) top0 = Math.max(top0, Math.round(8 + bar.offsetHeight * s + COL_GAP));
+  const w = Math.ceil(COL_W * s);
+  const N = lane(root, 10, 10 + w, top0);
+  const fits = (Ln, cssPx) => !!Ln && cssPx * s <= Ln.h;
+  // the lane beside the minimap — or, while the tutorial card sits above that lane, beside the tutorial
+  // card, whichever is taller (only measured when the usual lane is too short)
+  let B;
+  const beside = () => {
+    if (B !== undefined) return B;
+    B = null;
+    const bl = rectOf(root.querySelector('.hud-bl'));
+    if (!bl) return B;
+    const xs = [Math.round(bl.right + COL_GAP)];
+    const tut = rectOf(root.querySelector('.tut-card:not(.out)'));
+    if (tut && tut.right + COL_GAP > xs[0]) xs.push(Math.round(tut.right + COL_GAP));
+    for (const x0 of xs) {
+      if (x0 + w > window.innerWidth - 8) continue;
+      const Ln = lane(root, x0, x0 + w, top0);
+      if (!B || Ln.h > B.h) B = Ln;
     }
+    return B;
+  };
+  let L = N, peek = '', yieldGoals = false;
+  if (DK.card && (DK.state === 'open' || DK.state === 'done')) {
+    // the goals card above the decision: header (+ mini bars) always, a peeked list only if there is room.
+    // (Its folded height is remembered while it yields, so the choice below cannot flip back and forth.)
+    const gl = col.querySelector('.gl-card:not(.hide)');
+    let peeking = false;
+    if (!gl) DK.gFixed = 0;
+    else if (gl.offsetHeight) {
+      const list = gl.querySelector('.gl-list');
+      peeking = gl.classList.contains('peek');
+      DK.gFixed = gl.offsetHeight - (list && list.offsetHeight ? list.offsetHeight + 7 : 0) + COL_GAP;
+    }
+    const desk = deskNeed(), gFixed = DK.gFixed || 0;
+    // Where the decision's choices fit, in order: the usual lane with the goals header above them -> (a goals
+    // list being peeked at: beside the minimap with the goals) -> the usual lane, the goals card stepping aside
+    // until the decision is made or folded -> beside the minimap with / without the goals card -> the larger
+    // lane (the card then scrolls as a whole). The goals card's height is remembered while it steps aside,
+    // so this cannot flip back and forth.
+    let pick = null;
+    if (peeking) pick = fits(N, desk + gFixed + PEEK_MIN) ? N : fits(beside(), desk + gFixed + PEEK_MIN) ? beside() : null;
+    if (!pick && fits(N, desk + gFixed)) pick = N;
+    if (!pick && peeking && fits(beside(), desk + gFixed)) pick = beside();
+    if (!pick && gFixed && fits(N, desk)) { pick = N; yieldGoals = true; }
+    if (!pick && fits(beside(), desk + gFixed)) pick = beside();
+    if (!pick && gFixed && fits(beside(), desk)) { pick = beside(); yieldGoals = true; }
+    if (!pick) { pick = beside() && beside().h > N.h ? beside() : N; yieldGoals = !!gFixed; }
+    L = pick;
+    const need = desk + (yieldGoals ? 0 : gFixed);
+    peek = Math.max(0, Math.floor(L.h / s - need - 7)) + 'px';
+    // the most room a peeked goals list could get in either lane (hud_goals folds the decision instead of
+    // peeking into a sliver: VC.deskHud.peekRoom)
+    const room = (Ln) => (Ln ? Math.floor(Ln.h / s - desk - gFixed - 7) : -1);
+    DK.peekBest = gFixed ? Math.max(room(N), room(beside())) : -1;
+  } else {
+    DK.peekBest = Infinity;
+    // not even a card header fits above the minimap (tiny viewport, big UI scale, overlay legend): the goals
+    // card / decision pill go beside it rather than over it
+    if (!fits(N, COL_FLOOR) && fits(beside(), COL_FLOOR)) L = beside();
   }
-  const avail = Math.max(COL_MIN, (bottom - top) / s);
-  const t = top + 'px', mh = Math.floor(avail) + 'px';
+  if (col.classList.contains('gl-yield') !== yieldGoals) col.classList.toggle('gl-yield', yieldGoals);
+  const avail = Math.max(COL_FLOOR, L.h / s);
+  const x = L.x0 + 'px', t = L.top + 'px', mh = Math.floor(avail) + 'px';
+  if (col.style.left !== x) col.style.left = x;
   if (col.style.top !== t) col.style.top = t;
   if (col.style.maxHeight !== mh) {
     col.style.maxHeight = mh;
     col.style.setProperty('--gl-avail', mh);
   }
+  if (peek !== DK.peekVar) {
+    DK.peekVar = peek;
+    if (peek) col.style.setProperty('--gl-peek', peek);
+    else col.style.removeProperty('--gl-peek');
+  }
+  moreHint();
 }
 
-/** Shared with ui/hud_goals.js. */
-VC.deskHud = { layout: layoutCol };
+/**
+ * Shared with ui/hud_goals.js: layout(); peekRoom() -> CSS px a peeked goals list could get beside an open
+ * decision (Infinity without one); fold() -> folds an open decision into its header badge ("Decide later").
+ */
+VC.deskHud = {
+  layout: layoutCol,
+  peekRoom: () => (DK.card && (DK.state === 'open' || DK.state === 'done') ? (DK.peekBest == null ? Infinity : DK.peekBest) : Infinity),
+  fold() {
+    if (!DK.card || DK.state !== 'open') return false;
+    setState('min');
+    return true;
+  },
+};
 
 if (VC.hud && VC.hud.register) {
   VC.hud.register({
@@ -50939,19 +51715,24 @@ if (VC.hud && VC.hud.register) {
  * ui/hud_desk.js). The column stacks BELOW the windows layer (z 15 < 20): windows always cover it, never
  * the other way round.
  *   ITEMS     icon, title (live: problem goals keep their count current), why, live progress bar + text,
- *             reward, "Show me" (VC.goals.focusOf: camera, overlay, panel, palette, tool), "↻" swap (dim,
+ *             reward, "Show me" (VC.goals.focusOf: camera, overlay, panel, tool — in the palette of the tool's
+ *             own group (VC.tools.info), highlighted — else the focus group), "↻" swap (dim,
  *             full on hover). Completed goals glow gold with a Claim button; the real time a completed goal
  *             is on screen (game running) is counted into g.shown — VC.goals only auto-claims after
  *             AUTO_CLAIM_SEC of it, so fast-forwarding never skips the Claim button.
  *   HEADER    click to collapse / expand (remembered per browser); collapsed it shows mini progress bars and
- *             a "🎁 Claim" chip. While a desk decision is open the list folds away (the header peeks it;
- *             peeking, the list scrolls within ~40% of the column so the decision stays in view).
+ *             a "🎁 Claim" chip. A click never leaves keyboard focus on it (Space stays "pause"). While a
+ *             desk decision is open the list folds away (the header peeks it; peeking, the list scrolls in
+ *             at most ~40% of the column and never in the room the decision's choices need — with no useful
+ *             room left the decision folds into its header badge instead). Where even the header does not
+ *             fit beside the choices, the card steps aside until the decision is made (hud_desk.js).
  *   LAYOUT    the column is laid out by ui/hud_desk.js (VC.deskHud.layout): under the top bar / tutorial
  *             card, height-capped above the minimap, toolbar and ticker; the goals list scrolls when the
  *             column is too short for it.
  *   CELEBRATE bus 'goalDone' -> ONE toast (VC.ui.toast, sfx 'achievement') + VC.fx.confetti at the camera
- *             target — unless a milestone banner went up in the last MS_QUIET_MS (that party is enough;
- *             the item still glows gold). Claiming plays 'cash' and floats the reward over the item.
+ *             target (not with VC.settings.juice === false) — unless a milestone banner went up in the last
+ *             MS_QUIET_MS (that party is enough; the item still glows gold). Claiming plays 'cash' and floats
+ *             the reward over the item.
  *             A goal rotated out for lack of progress (bus 'goalRotated') gets a quiet info toast.
  *             Nothing in the demo.
  * Polls VC.goals.list() at 2 Hz (in-place DOM updates, no rebuild unless the set of goals changed).
@@ -50986,9 +51767,20 @@ function build() {
   GL.chip = h('span', { class: 'gl-claimchip' }, '🎁 Claim');
   GL.list = h('div', { class: 'gl-list' });
   GL.mini = h('div', { class: 'gl-mini' });
-  // a div (not a button): the folded desk badge (hud_desk.js) docks in here as its own button
-  const head = h('div', { class: 'gl-head', role: 'button', tabindex: '0', 'aria-label': 'Show or hide goals', onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } },
-    h('span', { class: 'gl-badge' }, h('span', { class: 'gl-target' }, '🎯'), 'Mayor’s Goals'), GL.count, GL.chip, h('span', { class: 'gl-chev', 'data-tip': 'Show / hide goals' }, '▾'));
+  // a div (not a button): the folded desk badge (hud_desk.js) docks in here as its own button.
+  // A mouse click / tap never focuses it (mousedown default prevented), so Space keeps meaning "pause"
+  // afterwards; with keyboard focus (Tab), Enter / Space only fold the card (stopPropagation: no pause too).
+  const head = h('div', { class: 'gl-head', role: 'button', tabindex: '0', 'aria-label': 'Show or hide goals', onclick: toggle,
+    onmousedown: (e) => e.preventDefault(),
+    onkeydown: (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      if (e.target !== e.currentTarget) return; // (Enter / Space on the docked desk badge: its own click)
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) toggle();
+    } },
+    // "Mayor’s" drops out when the Claim chip and a docked desk badge share the header (goals.css)
+    h('span', { class: 'gl-badge' }, h('span', { class: 'gl-target' }, '🎯'), h('span', { class: 'gl-btext' }, h('span', { class: 'gl-bpre' }, 'Mayor’s '), 'Goals')), GL.count, GL.chip, h('span', { class: 'gl-chev', 'data-tip': 'Show / hide goals' }, '▾'));
   GL.card = h('div', { class: 'gl-card pe hide' }, head, GL.mini, GL.list);
   GL.col.appendChild(GL.card);
   // the desk card opening / closing folds the list right away (hud_desk dispatches this on the column)
@@ -51003,13 +51795,18 @@ function moreHint() {
 function saveCollapsed() {
   try { localStorage.setItem(LS_KEY, GL.collapsed ? '1' : '0'); } catch (e) { /* private mode / blocked storage */ }
 }
+const PEEK_USEFUL = 64; // CSS px: a peeked list any shorter than this would show no whole goal
 function toggle() {
   VC.bus.emit('sfx', { name: 'click' });
   if (deskOpen()) {
-    // a decision is open (list folded for it): the click peeks at the goals / folds them again
+    // a decision is open (list folded for it): the click peeks at the goals / folds them again. Where the
+    // decision's choices leave no room for the list, the decision folds into the header badge instead
+    // ("Decide later": one click on the 📨 badge brings it back) and the goals open normally.
     if (GL.card.classList.contains('compact')) {
-      GL.peek = true;
       if (GL.collapsed) { GL.collapsed = false; saveCollapsed(); }
+      const D = VC.deskHud;
+      if (D && D.peekRoom && D.fold && D.peekRoom() < PEEK_USEFUL && D.fold()) { GL.peek = false; applyCompact(); return; }
+      GL.peek = true;
     } else GL.peek = false;
   } else {
     GL.collapsed = !GL.collapsed;
@@ -51100,6 +51897,7 @@ function syncItems(goals) {
   const txt = claimable ? '' : `${n} active`;
   if (GL.count.textContent !== txt) GL.count.textContent = txt;
   GL.chip.classList.toggle('show', claimable > 0);
+  GL.card.classList.toggle('claimable', claimable > 0);
 }
 function refresh() {
   if (!GL.card) return;
@@ -51124,8 +51922,14 @@ function showMe(id) {
     if (f.overlay && VC.gfx && VC.gfx.setOverlay) VC.gfx.setOverlay(f.overlay);
     if (isFinite(f.x) && isFinite(f.z) && VC.camera && VC.camera.focus) VC.camera.focus(f.x, f.z, f.dist || Math.min((VC.camera.goal && VC.camera.goal.dist) || 30, 30));
     if (f.panel && VC.hud.openPanel) VC.hud.openPanel(f.panel);
-    if (f.group && VC.hud.openPalette) VC.hud.openPalette(f.group);
-    if (f.tool && VC.tools && VC.tools.select && (!VC.tools.isTool || VC.tools.isTool(f.tool))) VC.tools.select(f.tool);
+    // the palette that really holds the tool (its registered group wins over the goal's hint) with the
+    // tool's card highlighted, as the tutorial does
+    const T = VC.tools;
+    const tool = f.tool && T && T.select && (!T.isTool || T.isTool(f.tool)) ? f.tool : null;
+    const info = tool && T.info ? T.info(tool) : null;
+    const group = (info && info.group) || f.group;
+    if (group && VC.hud.openPalette) VC.hud.openPalette(group, tool ? { highlight: tool } : undefined);
+    if (tool) T.select(tool);
   } catch (e) { console.error('[goals] show me', e); }
 }
 function claimGoal(it) {
@@ -51157,8 +51961,9 @@ function celebrate(g) {
     onClick: () => { if (GL.collapsed) toggle(); },
   });
   try {
+    // 'Growth popups & celebrations' off (VC.settings.juice === false): the toast only, no confetti
     const cam = VC.camera;
-    if (VC.fx && VC.fx.confetti && cam && isFinite(cam.tx)) VC.fx.confetti(cam.tx, cam.tz, 140);
+    if (!(VC.settings && VC.settings.juice === false) && VC.fx && VC.fx.confetti && cam && isFinite(cam.tx)) VC.fx.confetti(cam.tx, cam.tz, 140);
   } catch (e) { /* fx optional */ }
   refresh();
 }
@@ -51777,8 +52582,9 @@ VC.hud.debugMinimap = function () {
  *               colour, message, Details -> advisors panel, auto-dismiss timer). At most one new advisor card
  *               per 10 s; the rest wait in a short queue (bad first) and expire after 90 s.
  *               good -> one toast; info -> nothing here (the dock's inbox badge shows it).
- *   MILESTONE   bus 'milestone' {index, milestone, unlocked:[keys]} -> banner + confetti listing exactly
- *               `unlocked` (fallback when absent: items of the milestone's range not already announced).
+ *   MILESTONE   bus 'milestone' {index, milestone, unlocked:[keys]} -> banner (+ a DOM confetti shower unless
+ *               VC.settings.juice === false) listing exactly `unlocked` (fallback when absent: items of the
+ *               milestone's range not already announced).
  *               Milestones arriving while a banner is up merge into it (path, summed rewards, all unlocks).
  *               The banner sits above windows and toasts; toasts and advisor cards move out of its way.
  *   UNLOCK      bus 'unlock' {keys} -> one toast "New: A, B unlocked".
@@ -51787,7 +52593,7 @@ VC.hud.debugMinimap = function () {
  *   DISASTER    bus 'disaster' {phase:'start', type, x, z, id} -> one red alert card whose "Show me" follows
  *               the LIVE VC.disasters.active entry (by id; start point as fallback). Closes on phase 'end'.
  *   DEMO        nothing at all while VC.state.demo (title-screen city) or the title menu is up.
- *   JUICE       floating "+12 👥" / "⭐ Level 2!" / "💰 +$" pills over growing buildings, month-end cha-ching
+ *   JUICE       floating "+12 👥" / "⭐ Level 2!" / "💰 +$42/mo" pills over growing buildings, month-end cha-ching
  *               with coin showers, a small celebration every 25 % toward the next milestone (see JUICE below;
  *               VC.settings.juice === false turns it off). Never notifications: no toasts, at most one sound.
  * API (on VC.hud): pushNews(text, breaking?), showMilestone(index, milestone?, unlockItems?),
@@ -52265,7 +53071,8 @@ function renderBanner(fresh) {
     if (MS.banner) MS.banner.remove();
     MS.banner = h('div', { class: 'ms-banner pe', onclick: closeBanner }, kids);
     VC.hud.root.appendChild(MS.banner);
-    confetti();
+    // 'Growth popups & celebrations' off: the banner still shows, without the confetti shower
+    if (!(VC.settings && VC.settings.juice === false)) confetti();
   } else {
     MS.banner.innerHTML = '';
     MS.banner.append(...kids.filter(Boolean));
@@ -52329,7 +53136,8 @@ function claimNotifications() {
  *     move-in list (polled every 0.5 s for up to 60 game days): each bulk gain (>= 30 % of its capacity, at
  *     least 3 residents) floats "+N 👥" from its roof.
  *   - level-ups (bldChange with b.level above the level seen before, growables only): "⭐ Level N!", plus
- *     "💰 +$" and a small shower of 'coin' particles for commercial / industrial. The sparkle burst is the
+ *     "💰 +$42/mo" (the monthly tax of the new jobs at today's rates; "Business boom!" / "Industry boom!" when
+ *     that is under $5) and a small shower of 'coin' particles for commercial / industrial. The sparkle burst is the
  *     particle module's own level-up effect and the 'levelup' sound comes from the sim (no sound here).
  *   - month end (a profitable month, at most every 6 s real time, never in sandbox): ONE gentle 'chaching'
  *     (skipped while a milestone banner celebrates), a coin shower over the busiest commercial building on
@@ -52553,11 +53361,32 @@ function onJuiceBldChange(b) {
   J.lastPop.set(b.id, performance.now());
   popAt(x, y, z, jt('⭐ Level ' + b.level + '!', 'Level ' + b.level + '!'), 'jp-lvl', 0);
   if (b.zt === 2 || b.zt === 3) {
-    // the money side of it: a second pill beside the first (no extra token: same event) + coins
-    popAt(x, y, z, jt('💰 +$', '+$'), 'jp-cash', 400, 72, 22);
+    // the money side of it: a second pill beside the first (no extra token: same event) + coins. It shows
+    // the monthly tax the new jobs bring at today's rates, or a word when that is only a few dollars.
+    const gain = levelTaxGain(b, prev);
+    const word = b.zt === 2 ? 'Business boom!' : 'Industry boom!';
+    const txt = gain >= 5 ? '+' + VC.fmt.money(gain) + '/mo' : word;
+    popAt(x, y, z, jt('💰 ' + txt, txt), 'jp-cash', 400, 72, 22);
     const Pt = VC.particles;
     if (Pt && Pt.coins) Pt.coins(x, y - 0.2, z, 8 + b.w * b.d * 2);
   }
+}
+/**
+ * Monthly tax ($, rounded) the extra jobs of a commercial / industrial growable's level-up bring in at the
+ * current tax rate — the same per-job model as VC.econ's forecast (TAX_K x wealth x tax modifiers). 0 when
+ * unknown.
+ */
+function levelTaxGain(b, prev) {
+  const S = VC.state, E = VC.econ, Z = VC.ZONES && VC.ZONES[b.zt];
+  const g = Z && VC.GROW && VC.GROW[Z.key] && VC.GROW[Z.key][b.den];
+  if (!S || !E || !g || !g.cap || !S.tax || !S.tax[Z.key] || S.sandbox) return 0;
+  const cap = (l) => (+g.cap[VC.M.clamp(l | 0, 1, 3) - 1] || 0) * (b.w || 1) * (b.d || 1);
+  const jobs = cap(b.level) - cap(prev);
+  const w = VC.M.clamp(b.wealth | 0, 0, 2);
+  const k = (E.TAX_K && +E.TAX_K[Z.key]) || 0, wm = (E.WEALTH_MUL && +E.WEALTH_MUL[w]) || 1;
+  const mul = Math.max(0, 1 + ((S.mods && +S.mods['tax' + Z.key]) || 0));
+  const v = jobs * ((+S.tax[Z.key][w] || 0) / 100) * wm * k * mul;
+  return v > 0 && isFinite(v) ? Math.round(v) : 0;
 }
 function pollBuilding(S) {
   if (!J.building.size) return;
@@ -52795,8 +53624,9 @@ Object.assign(VC.hud, { pushNews, showMilestone, unlocksBetween, describeUnlocks
  *       VC.disasters.setEnabled, new cities = VC.settings.disasters; autosave, edge scrolling, invert zoom,
  *       grid, tutorial hints + restart), Interface (UI scale, news ticker, reset). Every settings change is
  *       persisted with VC.saveSettings() (emits 'settings'); sliders apply live while dragging.
- *   VC.hud.openHelp(tab?)      window 'help': Controls (VC.input.KEYMAP or built-in list), How to Play
- *       (illustrated guide), Overlays (every overlay + "try it"), Tips.
+ *   VC.hud.openHelp(tab?)      window 'help': Controls (VC.input.KEYMAP or built-in list: alternatives ', ' or
+ *       ' / ', chords ' + ', see keyChips; the camera rows carry this keyboard layout's labels, with a note while
+ *       VC.input does not know them yet), How to Play (illustrated guide), Overlays (every overlay + "try it"), Tips.
  * Both toggle when called while open with no tab argument.
  */
 const h = VC.h;
@@ -52998,13 +53828,16 @@ function openHelp(tab) {
 }
 const MOUSE_RE = /drag|click|wheel|scroll|tap|pinch/i;
 /**
- * 'Wheel / + / −' -> [Wheel] or [+] or [−]; 'Ctrl + Z' -> [Ctrl]+[Z]; 'W A S D / Arrows' -> 4 caps or [Arrows].
- * Alternatives are separated by a slash with spaces around it, chords by a plus with spaces around it (or
- * glued, as in 'Ctrl+Z'); a lone '+' or '/' is a key of its own. Mouse gestures render as mouse chips.
+ * KEYMAP key strings -> chips: 'Wheel, Pinch, +, −' -> 🖱 Wheel or 🖱 Pinch or [+] or [−]; 'Ctrl + Z' ->
+ * [Ctrl]+[Z]; 'W A S D, Arrows' -> 4 caps or [Arrows]; 'Right-click, Esc' -> 🖱 Right-click or [Esc].
+ * Alternatives are separated by ', ' (VC.input.KEYMAP) or ' / ' (the built-in list), chords by ' + ' (or glued,
+ * as in 'Ctrl+Z'); a lone ',' '+' '/' or '−' is a key of its own. Each chord part is a mouse chip when it names
+ * a mouse gesture, else a key cap.
  */
 function keyChips(keys) {
   const wrap = h('span', { class: 'hk-keys' });
-  const alts = String(keys).trim().split(/\s+\/\s+/);
+  const str = String(keys).trim();
+  const alts = str.length === 1 ? [str] : str.split(/\s*,\s+|\s+\/\s+/).filter((a) => a !== '');
   alts.forEach((alt, i) => {
     if (i) wrap.appendChild(h('span', { class: 'hk-or' }, 'or'));
     let chord = alt.split(/\s+\+\s+/);
@@ -53013,7 +53846,7 @@ function keyChips(keys) {
       if (j) wrap.appendChild(h('span', { class: 'hk-or' }, '+'));
       if (MOUSE_RE.test(k)) { wrap.appendChild(h('span', { class: 'hk-mouse' }, '🖱️ ' + k)); return; }
       // "W A S D" -> four caps; multi-word labels stay together
-      const parts = /^([A-Z0-9] )+[A-Z0-9]$/.test(k) ? k.split(' ') : [k];
+      const parts = /^([A-Za-z0-9À-ɏͰ-ӿ] )+[A-Za-z0-9À-ɏͰ-ӿ]$/.test(k) ? k.split(' ') : [k];
       parts.forEach((p) => wrap.appendChild(h('kbd', { class: 'kbd' }, p)));
     });
   });
@@ -53032,6 +53865,11 @@ function renderControls(c) {
     grid.appendChild(h('div', { class: 'hk-group' }, h('div', { class: 'section-title' }, g), list.map((k) => h('div', { class: 'hk-row' }, keyChips(k.keys || k.key || ''), h('span', { class: 'hk-act' }, k.action || k.desc || '')))));
   }
   c.appendChild(grid);
+  // the camera letter keys work by POSITION: until VC.input knows this keyboard's labels for them, say so
+  const I = VC.input;
+  if (I && typeof I.posKnown === 'function' && !I.posKnown()) {
+    c.appendChild(VC.ui.note('⌨️ The camera keys work by position: W A S D and Q E are the keys where those letters sit on a US keyboard (Z Q S D and A E on a French AZERTY keyboard).'));
+  }
 }
 function renderGuide(c) {
   const list = h('div', { class: 'guide' });
@@ -53745,7 +54583,7 @@ const STEPS = [
     check: () => wiring('power').live > 0, why: powerWhy },
   { key: 'water', icon: '💧', title: 'Turn on the taps', text: 'Place a <b>water pump</b> by a river or lake, or a <b>water tower</b> anywhere <kbd>4</kbd> — beside a road, where the pipes run. Both need power. Low density grows without water; medium and high density need it.', group: 'water', hl: 'bld:water_tower',
     check: () => wiring('water').live > 0, why: waterWhy },
-  { key: 'grow', icon: '🏗️', title: 'Watch your city grow', text: 'Let time run — press <kbd>]</kbd> to speed up. Low density needs a street and power; medium and high density also need water. Buildings appear where there is demand. The ⚠ chip in the top bar tells you what is blocking growth.', check: () => growCount() > 5, progress: () => Math.min(1, growCount() / 6), why: growWhy },
+  { key: 'grow', icon: '🏗️', title: 'Watch your city grow', text: 'Let time run — press <kbd>]</kbd> or click ⏩ in the top bar to speed up. Low density needs a street and power; medium and high density also need water. Buildings appear where there is demand. When something blocks growth, the <b>“Why no growth?”</b> chip in the top bar names it — click it to see where.', check: () => growCount() > 5, progress: () => Math.min(1, growCount() / 6), why: growWhy },
   { key: 'budget', icon: '💰', title: 'Check the budget', text: 'Click your <b>funds</b> in the top bar or press <kbd>M</kbd>. Taxes pay for everything, and every building costs monthly <b>upkeep</b> — keep the ▲ balance under your funds green!', panel: 'budget', check: () => !!TUT.flags.budget },
   { key: 'services', icon: '🚓', title: 'Keep citizens safe & happy', text: 'Every city needs services. Each one costs monthly upkeep, so add them as the town grows and watch the ▲/▼ under your funds. Click a row to find it:',
     list: [
@@ -53979,6 +54817,8 @@ Object.assign(VC.hud, { startTutorial, stopTutorial, resumeTutorial, tutorialSte
  *                 menu: extruded voxel-letter logo (canvas-drawn cubes, floating wave), tagline, Continue
  *                 (latest save), New City (menu_newcity.js), Load City (save list + import), Settings,
  *                 How to Play, Credits, rotating tips. The demo state is flagged S.demo = true.
+ *                 fitMenu() keeps the block inside the viewport at any UI scale (--menu-scale; on show,
+ *                 resize, settings and when the buttons change); the logo is at most half the screen wide.
  *   PAUSE MENU    pause(): Resume, Save City, Settings, How to Play, Main Menu (confirm). Pauses the sim
  *                 and restores the previous speed on resume(). The overlay sits above every window: windows
  *                 open when pausing are hidden until resume; windows opened from the pause card come on top
@@ -54069,8 +54909,10 @@ function letterCanvas(ch, s) {
 function buildLogo() {
   const box = MN.logo;
   if (!box) return;
-  const w = Math.min(window.innerWidth * 0.5, 860);
-  const s = VC.M.clamp(Math.floor(w / 62), 7, 15);
+  // at most half the screen wide ON SCREEN whatever the UI scale (the menu block is scaled by --menu-scale)
+  const us = (VC.ui && VC.ui.scale && VC.ui.scale()) || 1;
+  const w = Math.min(window.innerWidth * 0.5, 860) / us;
+  const s = VC.M.clamp(Math.floor(w / 62), 5, 15);
   if (s === MN.logoW && box.children.length) return;
   MN.logoW = s;
   box.innerHTML = '';
@@ -54148,7 +54990,29 @@ function build() {
     h('div', { class: 'vpm-foot' }, h('span', null, 'v' + VC.VERSION), h('span', null, '100% procedural · one HTML file · zero cubes harmed')));
   const ui = VC.ui;
   ui.root.insertBefore(MN.el, ui.layer);
-  window.addEventListener('resize', () => { if (menu.active) buildLogo(); });
+  window.addEventListener('resize', () => { if (menu.active) fitMenu(); });
+  // the Interface scale can change from the Settings window over the title screen
+  VC.bus.on('settings', () => { if (menu.active) fitMenu(); });
+}
+const MENU_TOP = 14, MENU_FOOT = 46; // screen px kept free above the menu block / for the footer line
+/**
+ * Fits the title menu (logo, tagline, buttons) to the viewport height: --menu-scale = the UI scale, or less
+ * when the block would not fit between the top edge and the footer (then the tagline / button gaps tighten
+ * first, .tight). The block is centred in the space above the footer, so the footer never sits on a button.
+ */
+function fitMenu() {
+  if (!MN.main || !MN.el) return;
+  buildLogo();
+  const us = (VC.ui && VC.ui.scale && VC.ui.scale()) || 1;
+  const avail = Math.max(120, window.innerHeight - MENU_TOP - MENU_FOOT);
+  MN.el.classList.remove('tight');
+  let hgt = MN.main.offsetHeight; // (layout size: the `scale` property does not change it)
+  if (hgt * us > avail) {
+    MN.el.classList.add('tight');
+    hgt = MN.main.offsetHeight;
+  }
+  const fit = hgt > 0 ? Math.min(us, avail / hgt) : us;
+  MN.el.style.setProperty('--menu-scale', String(Math.round(fit * 1000) / 1000));
 }
 function menuBtn(icon, label, sub, onClick, cls) {
   return h('button', { class: 'vpm-btn ' + (cls || ''), onclick: () => { VC.bus.emit('sfx', { name: 'click' }); onClick(); } },
@@ -54162,8 +55026,14 @@ function renderButtons(list) {
   const add = (b, i) => { b.style.animationDelay = 0.35 + i * 0.06 + 's'; MN.btns.appendChild(b); };
   let i = 0;
   if (latest) {
-    const sub = [latest.name, latest.pop != null ? VC.fmt.short(latest.pop) + ' citizens' : null, ago(latest.time)].filter(Boolean).join(' · ');
-    add(menuBtn('▶️', 'Continue', sub, () => loadGame(latest.slot), 'primary'), i++);
+    // "Port Cobbleholm · 228 citizens · 9 min ago": a long city name is what gets the ellipsis, never the
+    // citizens / save age
+    const meta = [latest.pop != null ? VC.fmt.short(latest.pop) + ' citizens' : null, ago(latest.time)].filter(Boolean).join(' · ');
+    const sub = [h('span', { class: 'vpm-sub-name' }, latest.name), meta ? h('span', { class: 'vpm-sub-meta' }, ' · ' + meta) : null];
+    const b = menuBtn('▶️', 'Continue', sub, () => loadGame(latest.slot), 'primary');
+    const sm = b.querySelector('small');
+    if (sm) { sm.classList.add('vpm-sub-split'); sm.title = [latest.name, meta].filter(Boolean).join(' · '); }
+    add(b, i++);
   }
   add(menuBtn('🏗️', 'New City', 'Found a brand-new metropolis', () => menu.newCity && menu.newCity(), latest ? '' : 'primary'), i++);
   const nc = list && list.length ? cityCount(list) : 0;
@@ -54171,6 +55041,7 @@ function renderButtons(list) {
   add(menuBtn('⚙️', 'Settings', 'Graphics, audio, controls', () => VC.hud.openSettings('graphics')), i++);
   add(menuBtn('❓', 'How to Play', 'Controls and a quick guide', () => VC.hud.openHelp('guide')), i++);
   add(menuBtn('🎬', 'Credits', 'The people (and cubes) behind it', openCredits), i++);
+  if (menu.active) fitMenu(); // (a Continue button adds a row)
 }
 function rotateTip() {
   const tips = (VC.hud && VC.hud.TIPS) || TIPS_FALLBACK;
@@ -54482,8 +55353,8 @@ const menu = (VC.menu = {
     void MN.el.offsetWidth; // restart entrance animations
     MN.el.classList.add('show');
     MN.logoW = 0;
-    buildLogo();
     refreshButtons();
+    fitMenu();
     rotateTip();
     clearInterval(MN.tipTimer);
     MN.tipTimer = setInterval(rotateTip, 9000);
@@ -56475,6 +57346,10 @@ function makeWhatIf(c, o = {}) {
 /* ---------------- Overview ---------------- */
 function tabOverview(c) {
   const kNet = U.kpi('Monthly net', { icon: '📊', tip: 'Forecast of next month: all recurring income minus all recurring expenses.', cls: 'big' });
+  // the amount + a small, never-clipped '/mo' unit (the big value would otherwise ellipsize 5-digit nets)
+  const netNum = h('span', { class: 'pn-kpi-num' });
+  kNet.val.textContent = '';
+  kNet.val.append(netNum, h('small', { class: 'pn-kpi-unit' }, '/mo'));
   const kBal = U.kpi('Treasury', { icon: '🏦', tip: 'Cash on hand right now.' });
   const kProj = U.kpi('In 12 months', { icon: '🔮', tip: 'Projected treasury if the current monthly net holds for a year.' });
   const spark = U.spark(150, 34);
@@ -56541,7 +57416,11 @@ function tabOverview(c) {
       const r = typeof run === 'number' ? run : S.money > 0 ? S.money / -f.net : 0;
       if (isFinite(r)) netSub = r < 1 ? 'Out of money!' : 'Runway ' + Math.floor(r) + ' month' + (Math.floor(r) === 1 ? '' : 's');
     }
-    kNet.set(U.smoney(f.net) + ' /mo', netSub, f.net > 0 ? 'good' : f.net < 0 ? 'bad' : '');
+    // six-figure nets in the short form (+$124k); the exact figure is in the forecast table below
+    const an = Math.abs(f.net);
+    U.txt(netNum, an >= 1e5 && an < 1e6 ? (f.net < 0 ? '−' : '+') + '$' + VC.fmt.short(an) : U.smoney(f.net));
+    U.txt(kNet.sub, netSub);
+    U.tone(kNet.val, f.net > 0 ? 'good' : f.net < 0 ? 'bad' : '');
     kBal.set(U.money(S.money), S.sandbox ? 'Sandbox: unlimited funds' : S.money < 0 ? 'In debt!' : S.loans && S.loans.length ? S.loans.length + ' loan' + (S.loans.length > 1 ? 's' : '') + ' outstanding' : 'No debt', S.money < 0 ? 'bad' : '');
     const proj = S.money + f.net * 12;
     kProj.set(U.money(proj), U.smoney(f.net * 12) + ' over the year', proj < 0 ? 'bad' : flat ? '' : proj > S.money ? 'good' : 'warn');
@@ -56803,7 +57682,10 @@ function tabLoans(c) {
   const offerCard = () => {
     const amt = h('div', { class: 'pn-loan-amt' });
     const terms = h('div', { class: 'pn-loan-terms' });
-    const pay = h('div', { class: 'pn-loan-pay' });
+    // monthly payment and total on lines of their own: side by side they were cut off in a 150 px card
+    const payMo = h('div', { class: 'pn-loan-paymo' });
+    const payTot = h('div', { class: 'pn-loan-paytot' });
+    const pay = h('div', { class: 'pn-loan-pay' }, payMo, payTot);
     const btn = VC.ui.button('Borrow', () => {
       const o = el._o;
       if (o.available === false) return;
@@ -56824,7 +57706,9 @@ function tabLoans(c) {
       el._o = o;
       U.txt(amt, U.money(o.amount));
       U.txt(terms, `${U.rate(o.rate)} APR · ${o.months >= 24 && o.months % 12 === 0 ? o.months / 12 + ' years' : o.months + ' months'}`);
-      U.txt(pay, U.money(o.monthly) + '/mo' + (o.total ? ' · ' + U.money(o.total) + ' total' : ''));
+      U.txt(payMo, U.money(o.monthly) + '/mo');
+      U.txt(payTot, o.total ? U.money(o.total) + ' in total' : '');
+      U.show(payTot, !!o.total);
       const na = o.available === false;
       U.cls(el, 'na', na);
       btn.disabled = na;
@@ -57787,7 +58671,8 @@ P.defs.inspector = {
  * state, description, effect chips scaled live to the level, an INTENSITY SLIDER (0-100 %, step 5,
  * labelled with def.unit, e.g. "Patrol hours") and the monthly cost at that level vs. at 100 %.
  * Binary policies (def.levels === false) only get the on/off toggle. Slider cards also keep a
- * toggle: on = the level last used for that policy (100 % the first time), off = repeal.
+ * toggle: on = the level last used for that policy in this city (100 % the first time; forgotten on New City /
+ * load: bus 'started' + panel reset), off = repeal.
  *
  * DRAG = PREVIEW, RELEASE = COMMIT: while a slider moves, chips, cost and the header totals preview
  * the new level locally; on release VC.econ.setPolicy(key, level) is called once. One change -> one
@@ -58077,11 +58962,21 @@ function tempPill() {
   return el;
 }
 
+/** A new city / a loaded save: no slider level (or drag preview) carries over from the previous city. */
+function forgetLevels() {
+  for (const k in lastLevel) delete lastLevel[k];
+  for (const k in preview) delete preview[k];
+}
+
 P.defs.policies = {
   title: 'Policies & Ordinances',
   icon: '📜',
   width: 720,
   place: 'center',
+  init() {
+    VC.bus.on('started', forgetLevels);
+  },
+  reset: forgetLevels,
   build(p) {
     const kAct = U.kpi('Active', { icon: '✅' });
     const kCost = U.kpi('Monthly cost', { icon: '💸', tip: 'Total monthly cost of all active policies at their current levels and population. Updates live while you drag a slider.' });

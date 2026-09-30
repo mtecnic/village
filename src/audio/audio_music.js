@@ -165,7 +165,7 @@ function ensureInst(name) {
     A.job(() => {
       const D = A.dsp;
       const t0 = performance.now();
-      list.push({ midi: m, buf: A.toBuffer(I.render(D, m, D.rng(m * 131 + name.length))) });
+      list.push({ midi: m, buf: A.toBuffer(I.render(D, m, D.rng(m * 131 + name.length)), true) });
       list.sort((a, b) => a.midi - b.midi);
       A.stats.renders++;
       A.stats.renderMs += performance.now() - t0;
@@ -176,7 +176,7 @@ function ensureInst(name) {
 function ensureDrums() {
   if (drums._q) return;
   drums._q = true;
-  for (const k in DRUMS) A.job(() => { drums[k] = A.toBuffer(DRUMS[k](A.dsp)); }, true);
+  for (const k in DRUMS) A.job(() => { drums[k] = A.toBuffer(DRUMS[k](A.dsp), k !== 'vinyl'); }, true); // vinyl is a loop
 }
 
 /* ------------------------------------------------------------------ */

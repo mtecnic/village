@@ -318,12 +318,16 @@ const D = {
     for (let i = 0; i < n; i++) dst[i0 + i] += src[i] * g;
     return dst;
   },
-  /** Seamless loop: buffer rendered with an extra `fadeSec` tail -> crossfaded loop of loopSec. */
-  loopify(buf, loopSec, fadeSec) {
+  /**
+   * Seamless loop: buffer rendered with an extra `fadeSec` tail -> crossfaded loop of loopSec.
+   * Equal-power fade for noise-like material; `linear` for tonal / phase-coherent material
+   * (equal-power would bulge +3 dB on correlated signals).
+   */
+  loopify(buf, loopSec, fadeSec, linear) {
     const L = Math.round(loopSec * SR), F = Math.min(Math.round(fadeSec * SR), buf.length - L);
     const out = buf.slice(0, L);
     for (let i = 0; i < F; i++) {
-      const t = i / F, a = Math.sqrt(t), b = Math.sqrt(1 - t);
+      const t = i / F, a = linear ? t : Math.sqrt(t), b = linear ? 1 - t : Math.sqrt(1 - t);
       out[i] = buf[i] * a + buf[L + i] * b;
     }
     return out;
@@ -338,9 +342,23 @@ const D = {
 };
 A.dsp = D;
 
-/** Float32Array | [L, R] -> AudioBuffer. */
-function toBuffer(data) {
-  const chans = Array.isArray(data) ? data : [data];
+/** Length without the trailing near-silence (< -80 dB), plus a short safety tail. */
+function trimmedLength(chans) {
+  let end = 0;
+  for (const c of chans) {
+    let i = c.length - 1;
+    while (i > end && Math.abs(c[i]) < 1e-4) i--;
+    if (i > end) end = i;
+  }
+  return Math.min(chans[0].length, end + 1 + Math.round(0.005 * SR));
+}
+/** Float32Array | [L, R] -> AudioBuffer. trim: drop trailing silence (one-shots; never for loops). */
+function toBuffer(data, trim) {
+  let chans = Array.isArray(data) ? data : [data];
+  if (trim) {
+    const n = trimmedLength(chans);
+    if (n < chans[0].length) chans = chans.map((c) => c.subarray(0, n));
+  }
   const ab = A.ctx.createBuffer(chans.length, chans[0].length, SR);
   for (let c = 0; c < chans.length; c++) {
     if (ab.copyToChannel) ab.copyToChannel(chans[c], c);
@@ -570,7 +588,7 @@ A.buffer = function (name, variant = 0) {
   if (!R) return null;
   const t0 = performance.now();
   try {
-    b = toBuffer(R.render(D, rng(hashName(name) + variant * 7919 + 1), variant));
+    b = toBuffer(R.render(D, rng(hashName(name) + variant * 7919 + 1), variant), true);
   } catch (e) {
     console.error('[audio] render ' + name, e);
     b = A.ctx.createBuffer(1, 16, SR);

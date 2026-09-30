@@ -22,8 +22,8 @@ const AMB = (A.amb = { on: false, beds: {}, env: null, targets: {} });
 /* Bed renderers                                                        */
 /* ------------------------------------------------------------------ */
 /** Renders a stereo loop of `sec` seconds (+0.6 s crossfade tail) and normalizes to `peak`. */
-function loopStereo(D, sec, seed, peak, fn) {
-  return D.stereo(sec + 0.6, seed, fn).map((c) => D.normalize(D.loopify(c, sec, 0.6), peak));
+function loopStereo(D, sec, seed, peak, fn, tonal) {
+  return D.stereo(sec + 0.6, seed, fn).map((c) => D.normalize(D.loopify(c, sec, 0.6, tonal), peak));
 }
 /** Band-passed noise whose centre wanders (wind / howl). */
 function wander(D, b, r, f0, f1, q, amp, rate, color = 'pink') {
@@ -44,11 +44,12 @@ const BEDS = {
     D.noise(b, 0, 6.6, 0.22, { color: 'pink', f: 'bp', f0: 850, q: 0.5, rnd: r });
     for (let k = 0; k < 5; k++) D.noise(b, r() * 5.4, 1.3, 0.3, { color: 'pink', f: 'bp', f0: 380, f1: 950, q: 0.9, rnd: r, env: (x) => Math.sin(Math.PI * x) ** 2 });
   }) },
+  // tonal loops use whole numbers of cycles per loop (multiples of 1/4 Hz for 4 s) so they wrap seamlessly
   industry: { vol: 0.4, render: (D) => loopStereo(D, 4, 5, 0.75, (b, r, ch) => {
-    for (const [f, a] of [[50, 0.6], [100, 0.35], [150, 0.2], [200.6, 0.12]]) D.tone(b, 0, 4.6, f * (1 + ch * 0.002), f * (1 + ch * 0.002), a, { a: 0.1 });
+    for (const [f, a] of [[50, 0.6], [100, 0.35], [150, 0.2], [200.5, 0.12]]) D.tone(b, 0, 4.6, f + ch * 0.25, f + ch * 0.25, a, { a: 0.001 });
     for (let t = 0.1; t < 4.5; t += 0.5) D.modal(b, t + r() * 0.03, 0.3, 140 + r() * 30, [[1, 1, 0.05], [2.8, 0.5, 0.03], [5.3, 0.3, 0.012]], 0.35);
     D.noise(b, 0, 4.6, 0.25, { color: 'pink', f: 'bp', f0: 1800, q: 0.7, rnd: r });
-  }) },
+  }, true) },
   wind: { vol: 0.55, render: (D) => loopStereo(D, 8, 7, 0.8, (b, r) => {
     wander(D, b, r, 280, 900, 1.4, 1, 0.09);
     wander(D, b, r, 1400, 3000, 3, 0.15, 0.13, 'white');
@@ -87,10 +88,10 @@ const BEDS = {
     D.crackle(b, 0, 5.6, 60, 0.3, { f: 1500, q: 0.8, len: 0.006, rnd: r });
   }) },
   ufo: { vol: 0.35, pos: true, render: (D) => loopStereo(D, 4, 23, 0.7, (b, r, ch) => {
-    D.tone(b, 0, 4.6, 110, 110, 0.5, { a: 0.2 });
-    D.tone(b, 0, 4.6, 165.8 + ch, 165.8 + ch, 0.3, { a: 0.2 });
-    D.tone(b, 0, 4.6, 620, 620, 0.22, { a: 0.3, vib: [5, 0.03] });
-  }) },
+    D.tone(b, 0, 4.6, 110, 110, 0.5, { a: 0.001 });
+    D.tone(b, 0, 4.6, 165.75 + ch, 165.75 + ch, 0.3, { a: 0.001 });
+    D.tone(b, 0, 4.6, 620, 620, 0.22, { a: 0.001, vib: [5, 0.03] });
+  }, true) },
   quake: { vol: 0.8, pos: true, render: (D) => loopStereo(D, 4, 29, 0.85, (b, r) => {
     D.noise(b, 0, 4.6, 1, { color: 'brown', f: 'lp', f0: 95, q: 1, rnd: r, env: (x) => 0.6 + 0.4 * Math.sin(x * 37) * Math.sin(x * 11) });
     D.crackle(b, 0, 4.6, 25, 0.4, { f: 700, q: 0.8, len: 0.012, rnd: r });
@@ -99,7 +100,7 @@ const BEDS = {
     D.tone(b, 0, 4.6, 52, 52, 0.8, { type: 'saw', a: 0.2, env: (x) => 0.5 + 0.5 * Math.sin(x * 4.6 * TAU * 0.5) ** 2 });
     D.filter(b, 'lp', 420, 1.5);
     D.noise(b, 0, 4.6, 0.2, { color: 'brown', f: 'bp', f0: 300, q: 1.5, rnd: r, env: (x) => 0.5 + 0.5 * Math.sin(x * 4.6 * TAU * 0.5) ** 2 });
-  }) },
+  }, true) },
 };
 AMB.BEDS = BEDS;
 
@@ -108,6 +109,12 @@ AMB.BEDS = BEDS;
 /* ------------------------------------------------------------------ */
 const R = A.RECIPES;
 const mt = (m) => 440 * Math.pow(2, (m - 69) / 12);
+/** One bird syllable: swept tone with a quiet 2nd harmonic and a fast syrinx warble. */
+function syllable(D, b, t, dur, fa, fb, amp, o) {
+  const wob = [45 + (o.w || 0) * 40, 0.012 + (o.w || 0) * 0.02];
+  D.tone(b, t, dur, fa, fb, amp, { a: o.a || 0.004, hold: o.hold || 0, d: o.d || dur * 0.4, vib: wob });
+  D.tone(b, t, dur, fa * 2, fb * 2, amp * 0.12, { a: o.a || 0.004, hold: o.hold || 0, d: (o.d || dur * 0.4) * 0.6, vib: wob });
+}
 R.bird = {
   vol: 0.2, group: 'bird', win: 90, variants: 7, pitch: 0.08, prio: 0, bus: 'amb', wet: 0.12,
   render(D, r, v) {
@@ -116,15 +123,15 @@ R.bird = {
     const f0 = 2600 + r() * 2200;
     if (v % 3 === 0) { // trill
       const n = 5 + Math.floor(r() * 8), dt = 0.04 + r() * 0.03;
-      for (let k = 0; k < n; k++) D.tone(b, k * dt, dt * 0.8, f0 * (1 + 0.15 * Math.sin(k)), f0 * 1.2, 0.6, { a: 0.004, d: dt * 0.4 });
+      for (let k = 0; k < n; k++) syllable(D, b, k * dt, dt * 0.8, f0 * (1 + 0.15 * Math.sin(k)), f0 * 1.2, 0.6 * (1 - k / (n * 1.6)), { d: dt * 0.4, w: r() });
     } else if (v % 3 === 1) { // two-note whistle ("fee-bee")
-      D.tone(b, 0, 0.28, f0 * 1.25, f0 * 1.22, 0.7, { a: 0.03, hold: 0.15, d: 0.05 });
-      D.tone(b, 0.35, 0.3, f0, f0 * 0.97, 0.7, { a: 0.03, hold: 0.15, d: 0.05 });
+      syllable(D, b, 0, 0.28, f0 * 1.25, f0 * 1.22, 0.7, { a: 0.03, hold: 0.15, d: 0.05 });
+      syllable(D, b, 0.35, 0.3, f0, f0 * 0.97, 0.7, { a: 0.03, hold: 0.15, d: 0.05 });
     } else { // chirps with fast sweeps
       const n = 2 + Math.floor(r() * 4);
       for (let k = 0; k < n; k++) {
         t += 0.06 + r() * 0.12;
-        D.tone(b, t, 0.07, f0 * (0.8 + r() * 0.5), f0 * (1.3 + r() * 0.5), 0.6, { a: 0.004, d: 0.025, vib: [60, 0.02] });
+        syllable(D, b, t, 0.07, f0 * (0.8 + r() * 0.5), f0 * (1.3 + r() * 0.5), 0.6, { d: 0.025, w: 1 });
       }
     }
     return D.fade(D.normalize(b, 0.8), 0.001, 0.05);

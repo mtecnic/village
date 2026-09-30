@@ -51,7 +51,7 @@ const PP = (VC.post = {
     prog('ssao12', DEPTH_FN + '#define AO_SAMPLES 12\n' + FS_SSAO);
     prog('aoblur', DEPTH_FN + FS_AOBLUR);
     prog('dofprep', DEPTH_FN + TILT_FN + FS_DOFPREP);
-    prog('dof', DEPTH_FN + FS_DOF);
+    prog('dof', DEPTH_FN + '#define DOF_TAPS 24\n' + FS_DOF);
     prog('raymask', FS_RAYMASK);
     prog('rays', FS_RAYS);
     prog('comp', DEPTH_FN + TILT_FN + EXPO + FS_COMP);
@@ -626,8 +626,8 @@ void main(){
   if (r0 < 0.5) { fragColor = c0; return; }
   float z0 = linZ(texture(uDepth, vUv).r);
   vec3 acc = c0.rgb; float ws = 1.0;
-  for (int i = 0; i < 24; i++) {
-    vec2 o = DISK[i] * r0;
+  for (int i = 0; i < DOF_TAPS; i++) {
+    vec2 o = DISK[i * (24 / DOF_TAPS)] * r0;
     vec2 uv = vUv + o * uTexel;
     vec4 s = texture(uSrc, uv);
     float zi = linZ(texture(uDepth, uv).r);

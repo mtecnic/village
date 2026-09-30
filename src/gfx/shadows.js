@@ -81,7 +81,7 @@ const SH = (VC.shadows = {
     const keyLum = (env.sunColor[0] * 0.2126 + env.sunColor[1] * 0.7152 + env.sunColor[2] * 0.0722) * env.keyVis;
     if (env.keyVis < 0.01 || keyLum < 0.004) return;
     const q = G.quality();
-    const want = Math.min(q.shadow | 0, 3072, (G.caps.maxTex || 4096) >> 1);
+    const want = Math.min(q.shadow | 0, G.caps.software ? 1024 : 3072, (G.caps.maxTex || 4096) >> 1);
     if (want < 256) return;
     const allowTwo = want >= 2048;
     if (!ensureTarget(gl, want, allowTwo)) return;
@@ -110,7 +110,7 @@ const SH = (VC.shadows = {
     // map is reused as long as it still covers the view (moving casters lag one frame at most).
     const C = SH.cache;
     const moon = env.sunUp < -0.02;
-    const interval = (VC.settings && VC.settings.quality) === 'ultra' ? 1 : SH.interval;
+    const interval = G.caps.software ? 3 : (VC.settings && VC.settings.quality) === 'ultra' ? 1 : SH.interval;
     const due = !wasValid || SH._realloc || C.n !== n || C.moon !== moon || C.size !== SH.size || G.frameCount - C.frame >= interval ||
       L[0] * C.L[0] + L[1] * C.L[1] + L[2] * C.L[2] < 0.99996 || !covers(list, SH.size);
     if (!due) {

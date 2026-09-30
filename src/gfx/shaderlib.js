@@ -150,7 +150,7 @@ float shadowAt(vec3 wp, vec3 n){
   float wpt = 1.0 / (sqrt(s2) * tsz.y);                // world size of one near-cascade texel
   // receiver plane (normal n): depth change per local uv step inside the plane (orthographic light)
   float nz = dot(n, r2);
-  nz = sign(nz) * max(abs(nz), zpw * 0.08) + (nz == 0.0 ? zpw * 0.08 : 0.0);
+  nz = (nz < 0.0 ? -1.0 : 1.0) * max(abs(nz), zpw * 0.08);  // avoid the singularity for faces parallel to the light
   vec2 grad = -vec2(dot(n, r0), dot(n, r1)) * (zpw * zpw) / (s2 * nz);
   float glim = zpw * wpt * tsz.y * 4.0;                // clamp: <= 4 world units of depth per uv at grazing angles
   grad = clamp(grad, -glim, glim) * vec2(1.0 / cw, 1.0);
@@ -330,5 +330,6 @@ vec3 overlayRamp(float v, float kind){
 /** Returns the full source for a stage. stage: 'vs' | 'fs'. */
 VC.shaderlib.build = function (stage, body, defines = '') {
   const L = VC.shaderlib;
-  return L.header + defines + '\n' + L.common + (stage === 'fs' ? L.lighting : '') + '\n#line 1\n' + body;
+  const soft = VC.gfx && VC.gfx.caps && VC.gfx.caps.software ? '#define LIB_SOFT 1\n' : '';
+  return L.header + soft + defines + '\n' + L.common + (stage === 'fs' ? L.lighting : '') + '\n#line 1\n' + body;
 };

@@ -31,6 +31,19 @@
  *   VC.post.render(ctx)     — full post-processing chain from VC.gfx.hdr (color + depth textures)
  *                             to the default framebuffer. If absent, a basic tonemap is used.
  *   VC.post.resize(w, h)    — called when the internal render size changes.
+ *
+ * ENVIRONMENT (G.env, recomputed every frame by computeEnv from time of day, season and S.weather):
+ *   tod, sunDir (KEY light: sun by day, moon by night), sun (true sun dir), moon, sunColor (key radiance),
+ *   keyVis, night, dusk, golden, blueHour, sunUp (sun elevation), sunAngle (path angle, = UBO uPad.w),
+ *   skyAmb, groundAmb, fog (horizon color), fogDensity (already scaled for the camera distance), season,
+ *   snow, wet, cloud, fogWeather, wind [x,z], windStrength, lightning, exposure (base exposure for post),
+ *   weather (type string). Arrays are reused between frames (copy them if you keep them).
+ *   The palette is the TOD_KEYS table below (keyed by sun elevation) + weather modifiers.
+ *
+ * EXTRA HELPERS: G.frustumPlanes(m, out), G.boxVisible(planes, x0,y0,z0,x1,y1,z1), G.sphereVisible(planes,
+ *   x,y,z,r), G.depthProgram(name, vsBody, opts) (empty-FS program for shadow casters), G.sunDirection(a,
+ *   season, out), G.profile() -> per-phase GPU ms (debug; stalls), G.camFrustum (camera planes this frame).
+ * DYNAMIC RESOLUTION: autoQuality() scales the internal resolution (settings.autoQuality) with hysteresis.
  */
 const M = VC.M, V3 = VC.V3;
 const G = (VC.gfx = {
@@ -85,6 +98,11 @@ G.init = function (canvas) {
     const dbg = gl.getExtension('WEBGL_debug_renderer_info');
     return dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
   })();
+  // CPU rasterizers (SwiftShader, llvmpipe, WARP): shaders get `#define LIB_SOFT` (layers may skip costly
+  // extras) and the shadow map is smaller / refreshed less often, so headless tests stay responsive.
+  // URL ?soft=0 / ?soft=1 overrides the detection (e.g. full-quality screenshots in headless tests).
+  const softParam = new URLSearchParams(location.search).get('soft');
+  G.caps.software = softParam != null ? softParam === '1' : /swiftshader|llvmpipe|softpipe|software|basic render|warp/i.test(String(G.caps.renderer || ''));
 
   // Frame UBO
   G.ubo = gl.createBuffer();
@@ -807,10 +825,57 @@ function drawGizmos() {
 /* ------------------------------------------------------------------ */
 /* Frame                                                                */
 /* ------------------------------------------------------------------ */
-G.render = function (dt, rdt) {
+/*
+ * FRAME PACING: a fence is inserted after every rendered frame and at most 2 frames may be in flight on the
+ * GPU. While the GPU is behind, render() skips the frame (the canvas keeps the previous image, game logic keeps
+ * running), which bounds input latency on slow GPUs and lets the resolution controller see the real frame rate
+ * (the requestAnimationFrame interval alone does not reflect GPU cost everywhere). Fence status only updates
+ * between tasks; a generous timeout guards against a fence that never reports.
+ */
+const FP = { fences: [], times: [], lagMs: 16 };
+function gpuReady(gl, now) {
+  while (FP.fences.length) {
+    if (gl.getSyncParameter(FP.fences[0], gl.SYNC_STATUS) !== gl.SIGNALED) break;
+    FP.lagMs = M.lerp(FP.lagMs, now - FP.times[0], 0.3);
+    gl.deleteSync(FP.fences.shift());
+    FP.times.shift();
+  }
+  if (FP.fences.length < 2) return true;
+  if (now - FP.times[0] > Math.max(1000, FP.lagMs * 3)) { // never wait forever
+    gl.deleteSync(FP.fences.shift());
+    FP.times.shift();
+    return true;
+  }
+  return false;
+}
+function gpuFence(gl, now) {
+  const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (!f) return;
+  FP.fences.push(f);
+  FP.times.push(now);
+  while (FP.fences.length > 3) { gl.deleteSync(FP.fences.shift()); FP.times.shift(); }
+  gl.flush();
+}
+G.framesSkipped = 0;
+
+/**
+ * Renders one frame (shadows -> layers -> post). dt/rdt as in main.js. force = render even if the GPU is
+ * behind (used by capture/profiling code that needs a frame now).
+ */
+G.render = function (dt, rdt, force) {
   const gl = G.gl;
   if (!gl) return;
   G.time += rdt;
+  G._accDt = (G._accDt || 0) + dt;
+  G._accRdt = (G._accRdt || 0) + rdt;
+  const now = performance.now();
+  if (!force && !gpuReady(gl, now)) {
+    G.framesSkipped++;
+    return;
+  }
+  dt = Math.min(G._accDt, 0.25);
+  rdt = Math.min(G._accRdt, 0.25);
+  G._accDt = G._accRdt = 0;
   G.frameCount++;
   G.frameMs = M.lerp(G.frameMs, rdt * 1000, 0.05);
   G.fps = 1000 / Math.max(1, G.frameMs);
@@ -900,6 +965,7 @@ G.render = function (dt, rdt) {
     G.fullscreen();
   }
   gl.enable(gl.DEPTH_TEST);
+  gpuFence(gl, now);
   if (G._prof) profMark('post');
   if (G._captures && G._captures.length) {
     const list = G._captures;
@@ -941,7 +1007,7 @@ G.profile = function () {
   gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, _profPx);
   const t0 = performance.now();
   G._prof = { _t: t0 };
-  try { G.render(0, 1 / 60); } finally {
+  try { G.render(0, 1 / 60, true); } finally {
     const p = G._prof;
     G._prof = null;
     delete p._t;

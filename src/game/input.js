@@ -354,7 +354,7 @@ function onDblClick(e) {
   const b = hit.building;
   if (b) {
     const c = VC.world.center(b);
-    cam().focus(c[0], c[2], M.clamp(Math.max(b.w, b.d) * 5 + (b.hgt || 1) * 2 + 6, 10, 48));
+    cam().focus(c[0], c[2], M.clamp(Math.max(b.w, b.d) * 4 + (b.hgt || 1) * 1.2 + 8, 10, 40));
   } else {
     cam().focus(hit.wx, hit.wz, Math.min(cam().goal.dist, 40));
   }
@@ -506,10 +506,13 @@ function onKeyDown(e) {
     case 'Escape':
       escape();
       break;
-    case 'Space':
+    case 'Space': {
       e.preventDefault();
+      const ae = document.activeElement;
+      if (ae && ae !== cv && ae.blur && ae.tagName === 'BUTTON') ae.blur(); // no double action on a focused button
       VC.togglePause();
       break;
+    }
     case 'Comma':
     case 'BracketLeft':
       VC.setSpeed(Math.max(0, VC.speed() - 1));

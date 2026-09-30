@@ -261,7 +261,7 @@ let policyVer = 0;
 let gridA = 0;
 let ghostSig = '';
 let label = null, labelHtml = '', labelShown = false, labelX = -1, labelY = -1;
-let lastToast = 0, lastSfx = 0, lastFrame = -1;
+let lastToast = 0, lastSfx = 0;
 let camSig = new Float32Array(16), camPx = -1, camPy = -1, camVer = -1;
 let svcCache = { ver: -1, list: [] };
 
@@ -282,6 +282,7 @@ const T = (VC.tools = {
 
   init() {
     registry();
+    if (VC.gfx && VC.gfx.addLayer) VC.gfx.addLayer(LAYER);
     const root = document.getElementById('ui') || document.body;
     label = VC.h('div', { class: 'tool-cursor' });
     root.appendChild(label);
@@ -348,6 +349,7 @@ const T = (VC.tools = {
     dlClear();
     setGhost(null);
     if (T.kind !== 'select') T.hoverId = 0;
+    camPx = -1; // re-pick: select/bulldoze pick buildings, the other tools only the ground
     VC.bus.emit('tool', { key });
   },
   /** Grid visibility for the terrain shader: fades in while a build tool is active. */
@@ -375,7 +377,7 @@ const T = (VC.tools = {
   /** Rotates the building ghost (R). Returns true if a building tool is active. */
   rotate(dir = 1) {
     if (T.kind !== 'bld') return false;
-    T.rotation = (T.ghostRot + (dir < 0 ? 3 : 1)) & 3;
+    T.rotation = ((T.manualRot ? T.rotation : T.ghostRot) + (dir < 0 ? 3 : 1)) & 3;
     T.manualRot = true;
     planDirty = true;
     VC.bus.emit('sfx', { name: 'click', vol: 0.5 });
@@ -515,17 +517,26 @@ const T = (VC.tools = {
       stepDrag(rdt || 0.016);
     }
     refreshPlan();
-    // the core clears gizmos after each rendered frame: submit once per frame even if update() runs twice
-    const fc = VC.gfx.frameCount;
-    if (fc !== lastFrame) {
-      lastFrame = fc;
-      replay();
-      if (T.kind === 'select') drawSelect();
-    }
     updateGhost();
     updateLabel();
   },
 });
+
+/**
+ * Gizmo submission happens from a (GL-free) transparent render-layer callback: the core draws and clears
+ * the gizmo buffers right after the transparent layers, so previews are emitted exactly once per rendered
+ * frame no matter how often update() runs.
+ */
+const LAYER = {
+  name: 'tools',
+  order: 990,
+  transparent() {
+    const S = VC.state;
+    if (!S || S.demo || (VC.menu && VC.menu.active) || !VC.gfx.gizmo) return;
+    replay();
+    if (T.kind === 'select') drawSelect();
+  },
+};
 
 /* ------------------------------------------------------------------ */
 /* Picking                                                              */
@@ -1104,7 +1115,7 @@ function labelContent(p) {
 function safeGrowName(b) {
   try { return VC.sim.buildingName(b) || 'Building'; } catch (e) { return 'Building'; }
 }
-let labelCls = '';
+let labelCls = '', labelW = 0, labelH = 0;
 function updateLabel() {
   if (!label) return;
   const p = T.plan;
@@ -1125,12 +1136,16 @@ function updateLabel() {
       if (c.cls) label.classList.add(c.cls);
       labelCls = c.cls;
     }
+    labelW = 0; // re-measure (only when the content changed: avoids a forced layout every frame)
+  }
+  if (!labelW) {
+    labelW = label.offsetWidth || 120;
+    labelH = label.offsetHeight || 30;
   }
   // follow the cursor (canvas px == client px: the canvas is fixed at 0,0), keep inside the viewport
-  const cv = VC.gfx.canvas;
-  const vw = (cv && cv.clientWidth) || window.innerWidth, vh = (cv && cv.clientHeight) || window.innerHeight;
+  const vw = window.innerWidth, vh = window.innerHeight;
   let x = Math.round(T.px + 18), y = Math.round(T.py + 20);
-  const lw = label.offsetWidth || 120, lh = label.offsetHeight || 30;
+  const lw = labelW, lh = labelH;
   if (x + lw > vw - 6) x = Math.round(T.px - lw - 12);
   if (y + lh > vh - 6) y = Math.round(T.py - lh - 14);
   x = M.clamp(x, 4, Math.max(4, vw - lw - 4));

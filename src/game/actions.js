@@ -5,7 +5,7 @@
  * cursor moves) and a COMMIT that re-validates, charges VC.money and mutates the world through VC.world.
  * All costs are multiplied by VC.money.costMul() (0 in sandbox). Commits emit bus 'built'
  * {kind, x, z, w, d, key, cost, count} (x/z/w/d = bounding box of the edit) and 'sfx' {name, x, z}
- * (unless opts.quiet), plus a few particle bursts for feedback.
+ * (unless opts.quiet). Particles are left to the fx module, which reacts to 'built' and 'bldRemove'.
  *
  *   roadPath(x0,z0,x1,z1, straight)    -> [{x,z}] L-shaped (longer axis first) or straight (dominant axis)
  *   canBuildRoad(tiles, type)          -> plan {ok, cost, reason, bad:[i], count, bridges, levelCost, status, levels}
@@ -77,13 +77,6 @@ function fail(reason, extra) {
 function sfx(name, x, z, opts, vol) {
   if (opts && opts.quiet) return;
   VC.bus.emit('sfx', vol != null ? { name, x, z, vol } : { name, x, z });
-}
-function burst(type, x, z, n, opts) {
-  const P = VC.particles;
-  if (!P || !P.burst || !VC.state) return;
-  try {
-    P.burst(type, x, W.groundY(x, z) + 0.15, z, n, opts || {});
-  } catch (e) { /* particles are cosmetic */ }
 }
 function built(kind, box, key, cost, count, extra) {
   VC.bus.emit('built', Object.assign({ kind, x: box.x, z: box.z, w: box.w, d: box.d, key, cost, count }, extra || {}));
@@ -338,7 +331,6 @@ const A = (VC.actions = {
       built('road', box, rd.key, p.cost, p.count, { bridges: p.bridges });
       const mid = tiles[tiles.length >> 1];
       sfx('road', mid.x + 0.5, mid.z + 0.5, opts);
-      if (p.leveled) burst('dust', mid.x + 0.5, mid.z + 0.5, 6);
       return { ok: true, cost: p.cost, count: p.count, bridges: p.bridges };
     });
   },
@@ -411,10 +403,7 @@ const A = (VC.actions = {
     const box = { x: r.x0, z: r.z0, w: r.w, d: r.d };
     return journaled(code ? 'Zoning' : 'Dezoning', () => {
       if (!pay([[p.cost, code ? 'zoning' : 'demolish']])) return fail('Not enough money', { plan: p });
-      for (const b of p.remove) {
-        burst('dust', b.x + b.w / 2, b.z + b.d / 2, 6);
-        removeB(b, 'bulldoze');
-      }
+      for (const b of p.remove) removeB(b, 'bulldoze');
       for (let z = r.z0; z <= r.z1; z++)
         for (let x = r.x0; x <= r.x1; x++) {
           const st = p.status[(z - r.z0) * r.w + (x - r.x0)];
@@ -517,7 +506,6 @@ const A = (VC.actions = {
       const box = { x, z, w, d };
       built('building', box, key, p.cost, 1, { id: b.id });
       sfx('build', x + w / 2, z + d / 2, opts);
-      burst('dust', x + w / 2, z + d / 2, 6 + w * d * 2, { radius: Math.max(w, d) * 0.5 });
       return { ok: true, cost: p.cost, b };
     });
   },
@@ -566,16 +554,11 @@ const A = (VC.actions = {
     const r = p.rect, o = p.opts;
     return journaled('Bulldoze', () => {
       if (!pay([[p.cost, 'demolish']])) return fail('Not enough money', { plan: p });
-      let bx0 = r.x0, bz0 = r.z0, bx1 = r.x1, bz1 = r.z1, big = 0, n = 0;
+      let bx0 = r.x0, bz0 = r.z0, bx1 = r.x1, bz1 = r.z1, big = 0;
       for (const b of p.buildings) {
         bx0 = Math.min(bx0, b.x); bz0 = Math.min(bz0, b.z);
         bx1 = Math.max(bx1, b.x + b.w - 1); bz1 = Math.max(bz1, b.z + b.d - 1);
-        big = Math.max(big, b.w * b.d);
-        if (n++ < 12) {
-          const cx = b.x + b.w / 2, cz = b.z + b.d / 2;
-          burst('dust', cx, cz, 8 + b.w * b.d * 3, { radius: Math.max(b.w, b.d) * 0.5 });
-          if (!isRubble(b)) burst('debris', cx, cz, 4 + b.w * b.d * 2, { radius: Math.max(b.w, b.d) * 0.4 });
-        }
+        if (!isRubble(b)) big = Math.max(big, b.w * b.d);
         removeB(b, 'bulldoze');
       }
       for (let z = r.z0; z <= r.z1; z++)
@@ -587,7 +570,6 @@ const A = (VC.actions = {
           if (o.zones && S.zone[i]) setZ(x, z, 0);
         }
       if (big >= 9 && VC.camera && VC.camera.shake) VC.camera.shake(Math.min(0.35, big * 0.02));
-      if (!p.buildings.length && p.roads) burst('dust', r.x0 + r.w / 2, r.z0 + r.d / 2, 6);
       const box = { x: bx0, z: bz0, w: bx1 - bx0 + 1, d: bz1 - bz0 + 1 };
       built('bulldoze', box, 'bulldoze', p.cost, p.count, { buildings: p.buildings.length, roads: p.roads, trees: p.trees, plines: p.plines });
       sfx('bulldoze', r.x0 + r.w / 2, r.z0 + r.d / 2, opts);
@@ -689,7 +671,6 @@ const A = (VC.actions = {
       built('trees', box, 'trees', p.cost, p.count);
       const c = p.tiles[p.tiles.length >> 1];
       sfx('plant', c.x + 0.5, c.z + 0.5, opts);
-      burst('leaf', c.x + 0.5, c.z + 0.5, Math.min(14, 3 + p.count));
       return { ok: true, cost: p.cost, count: p.count };
     });
   },
@@ -764,7 +745,6 @@ const A = (VC.actions = {
       const box = tilesBox(p.tiles);
       built('terraform', box, mode, p.cost, p.count, { level: p.level });
       sfx('terraform', x + 0.5, z + 0.5, opts);
-      if (!(opts && opts.quiet)) burst('dust', x + 0.5, z + 0.5, 4 + p.count);
       return { ok: true, cost: p.cost, count: p.count, levels: p.levels };
     });
   },

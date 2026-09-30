@@ -18,6 +18,11 @@
  *     stuck for a while briefly "ghost" through to avoid gridlock
  *   - density ∝ population x time of day x local traffic, capped by quality().cars, spawned / despawned
  *     around the camera target so the density is where the player looks
+ * RENDERING: every vehicle within the draw distance goes into the ModelBatch (VC.fxgl), which culls per
+ *   pass against ctx.frustum — so cars just off screen still cast their shadows into the view — and uses
+ *   a depth-only program for the shadow cascades (tiny casters skipped in the far one); light sprites are
+ *   only built for vehicles the camera sees. The render loop passes typed scratch arrays (poseV / addX /
+ *   addv) instead of double arguments: no per-frame garbage. init() compiles the shared fx programs.
  *
  * API
  *   dispatch(kind, x, z)   'firetruck' | 'police_car' | 'ambulance' (aliases: fire, police, health):
@@ -31,6 +36,8 @@
  * Air, sea, birds and balloons live in gfx/fx_air.js (VC.fxAir), updated and drawn from here.
  */
 const M = VC.M, C = VC.C;
+/** Vector length without Math.hypot (V8's hypot allocates its argument list; this is on per-frame paths). */
+const hyp = (x, z) => Math.sqrt(x * x + z * z);
 const DX = [1, -1, 0, 0], DZ = [0, 0, 1, -1], OPP = [1, 0, 3, 2];
 const RX = [0, 0, -1, 1], RZ = [1, -1, 0, 0]; // right-hand side of travel direction d
 const RIGHT_OF = [2, 3, 1, 0], LEFT_OF = [3, 2, 0, 1];
@@ -106,6 +113,10 @@ const A = (VC.agents = {
 
   init() {
     if (VC.fxModels) VC.fxModels.ensure();
+    // compile the shared lazily created programs now (vehicle / shadow / glow): no mid-game compile hitch;
+    // also registered with the core's warmup (context restore, loading screens) when it offers one
+    VC.fxgl.registerWarmup('fxgl', VC.fxgl.warmup);
+    VC.fxgl.warmup();
     A.batch = VC.fxgl.modelBatch(1024);
     A.glows = VC.fxgl.glowBatch(2048);
     VC.gfx.addLayer(A);
@@ -126,7 +137,7 @@ const A = (VC.agents = {
     bfsStamp = 1;
     dirty = { x0: 0, z0: 0, x1: W - 1, z1: H - 1 };
     roadsDirty = true;
-    rnd = M.rng((st.seed ^ 0xa9e7) >>> 0);
+    rnd = VC.fxgl.rng((st.seed ^ 0xa9e7) >>> 0);
     clearAll();
     A.clock = 0;
     popT = 0; nearT = 0;
@@ -145,9 +156,10 @@ const A = (VC.agents = {
     if (gdt > 0) step(gdt);
     if (VC.fxAir) VC.fxAir.update(gdt, rdt, S);
     buildRender();
-    A.stats.ms = +(performance.now() - t0).toFixed(2);
+    A.stats.ms = Math.round((performance.now() - t0) * 100) / 100;
   },
 
+  /** Shadow casters: the batch culls against ctx.frustum per cascade (depth-only program, see fx_gl.js). */
   shadow(ctx) {
     A.batch.draw(ctx, true);
   },
@@ -436,7 +448,7 @@ function enterTile(i, j, dIn, forcedOut) {
   const o = i * 8;
   curve[o] = p0x; curve[o + 1] = p0z; curve[o + 2] = c1x; curve[o + 3] = c1z;
   curve[o + 4] = c2x; curve[o + 5] = c2z; curve[o + 6] = p3x; curve[o + 7] = p3z;
-  const l = (Math.hypot(c1x - p0x, c1z - p0z) + Math.hypot(c2x - c1x, c2z - c1z) + Math.hypot(p3x - c2x, p3z - c2z) + Math.hypot(p3x - p0x, p3z - p0z)) * 0.5;
+  const l = (hyp(c1x - p0x, c1z - p0z) + hyp(c2x - c1x, c2z - c1z) + hyp(p3x - c2x, p3z - c2z) + hyp(p3x - p0x, p3z - p0z)) * 0.5;
   clen[i] = Math.max(0.2, l);
   // heights at entry / middle / exit (sampled just inside the tile)
   const mx = 0.125 * (p0x + 3 * c1x + 3 * c2x + p3x), mz = 0.125 * (p0z + 3 * c1z + 3 * c2z + p3z);
@@ -596,7 +608,7 @@ function dispatch(kindName, x, z) {
   let st = null, sd = 1e9;
   for (const b of S.buildings.values()) {
     if (svc.keys.indexOf(b.key) < 0 || b.built < 1 || b.abandoned) continue;
-    const d = Math.hypot(b.x + b.w / 2 - tx, b.z + b.d / 2 - tz);
+    const d = hyp(b.x + b.w / 2 - tx, b.z + b.d / 2 - tz);
     if (d < sd) { sd = d; st = b; }
   }
   if (!st) return 0;
@@ -658,7 +670,7 @@ function dispatchLogic(i, dt) {
       // water cannon arc toward the fire
       if (burning && VC.particles && rnd() < dt * 30) {
         const bx = b.x + b.w / 2, bz = b.z + b.d / 2, by = VC.world.topY(b.x, b.z) + (b.hgt || 1) * 0.7;
-        const dx = bx - posX[i], dz = bz - posZ[i], dl = Math.max(0.3, Math.hypot(dx, dz));
+        const dx = bx - posX[i], dz = bz - posZ[i], dl = Math.max(0.3, hyp(dx, dz));
         const tFlight = 0.55 + dl * 0.12;
         const vy = (by - posY[i] - 0.3) / tFlight + 3 * tFlight;
         VC.particles.emit('fountain', posX[i], posY[i] + 0.3, posZ[i], { vx: dx / tFlight, vy, vz: dz / tFlight, life: tFlight * 1.1, size: 0.05 });
@@ -717,7 +729,7 @@ function recurve(i, dOut) {
   const p0x = posX[i], p0z = posZ[i];
   const fx = Math.cos(hdg[i]), fz = Math.sin(hdg[i]);
   const p3x = x + 0.5 + DX[dOut] * 0.5 + RX[dOut] * loOut, p3z = z + 0.5 + DZ[dOut] * 0.5 + RZ[dOut] * loOut;
-  const L = Math.hypot(p3x - p0x, p3z - p0z);
+  const L = hyp(p3x - p0x, p3z - p0z);
   const k = 0.35 + L * 0.3;
   const o = i * 8;
   curve[o] = p0x; curve[o + 1] = p0z;
@@ -778,7 +790,7 @@ function leaderGap(i) {
 let lastHonk = -1e9;
 function honk(i) {
   const cam = VC.camera;
-  if (A.clock - lastHonk < 5 || rnd() > 0.35 || Math.hypot(posX[i] - cam.tx, posZ[i] - cam.tz) > 25 || cam.dist > 45) return;
+  if (A.clock - lastHonk < 5 || rnd() > 0.35 || hyp(posX[i] - cam.tx, posZ[i] - cam.tz) > 25 || cam.dist > 45) return;
   lastHonk = A.clock;
   VC.bus.emit('sfx', { name: 'horn', x: posX[i], z: posZ[i], vol: 0.5 });
 }
@@ -909,14 +921,15 @@ function manage(rdt) {
     A.stats.near = nearCount;
   }
   // despawn far vehicles
-  const Rd = R * 1.3, F = VC.fxgl.frustum;
+  const Rd = R * 1.3;
   let excess = nCars - A.desired;
   for (let i = 0; i < CAP; i++) {
     if (!alive[i] || role[i] === R_DISPATCH) continue;
     if (fade[i] < 0) { excess--; continue; } // already leaving
-    const d = Math.hypot(posX[i] - cam.tx, posZ[i] - cam.tz);
-    if (d > Rd && (d > Rd * 1.3 || !F.sphere(posX[i], posY[i], posZ[i], 0.6))) { free(i); excess--; continue; }
-    if (excess > A.desired * 0.12 + 2 && fade[i] >= 1 && !F.sphere(posX[i], posY[i], posZ[i], 0.6)) { fade[i] = -0.001; excess--; }
+    const ddx = posX[i] - cam.tx, ddz = posZ[i] - cam.tz;
+    const d = Math.sqrt(ddx * ddx + ddz * ddz);
+    if (d > Rd && (d > Rd * 1.3 || !onScreen(i))) { free(i); excess--; continue; }
+    if (excess > A.desired * 0.12 + 2 && fade[i] >= 1 && !onScreen(i)) { fade[i] = -0.001; excess--; }
   }
   // spawn toward the desired count (fast when far below, a trickle otherwise)
   if (nCars < A.desired && nearCount) {
@@ -944,6 +957,12 @@ function manage(rdt) {
   A.stats.special = nSpecial;
 }
 
+/** Vehicle i (radius 0.6) inside the camera frustum of the last render list (index argument: no boxing). */
+function onScreen(i) {
+  const PL = VC.fxgl.frustum.planes, x = posX[i], y = posY[i], z = posZ[i];
+  for (let p = 0; p < 24; p += 4) if (PL[p] * x + PL[p + 1] * y + PL[p + 2] * z + PL[p + 3] < -0.6) return false;
+  return true;
+}
 function acceptSpawn(j, initial, cam, R) {
   if (!mask[j]) return false;
   const x = (j % W) + 0.5, z = ((j / W) | 0) + 0.5;
@@ -957,7 +976,7 @@ function acceptSpawn(j, initial, cam, R) {
   // prefer spawning out of view once the initial fill is done
   if (!initial) {
     const y = VC.world.topY(Math.min(W - 1, x | 0), Math.min(H - 1, z | 0));
-    if (VC.fxgl.frustum.sphere(x, y, z, 0.8) && Math.hypot(x - cam.tx, z - cam.tz) < R * 0.7 && rnd() < 0.85) return false;
+    if (VC.fxgl.frustum.sphere(x, y, z, 0.8) && hyp(x - cam.tx, z - cam.tz) < R * 0.7 && rnd() < 0.85) return false;
   }
   // clearance
   const h = j & (HB - 1);
@@ -1021,8 +1040,14 @@ function pickKind(j) {
 /* ------------------------------------------------------------------ */
 /* Render lists                                                          */
 /* ------------------------------------------------------------------ */
+/* scratch for the render loop (typed: no boxed doubles in calls) */
+const T16 = new Float32Array(16), PV7 = new Float32Array(7), GV = new Float32Array(12);
+/**
+ * Fills the vehicle batch + light sprites. Every vehicle within the draw distance goes into the batch (it
+ * culls per pass: off-screen cars still cast their shadows into the view); lights only for visible ones.
+ */
 function buildRender() {
-  const cam = VC.camera, FXg = VC.fxgl, F = FXg.frustum;
+  const cam = VC.camera, FXg = VC.fxgl, F = FXg.frustum, PL = F.planes;
   F.update(cam.viewProj);
   const B = A.batch, G = A.glows;
   B.begin();
@@ -1034,20 +1059,33 @@ function buildRender() {
   const lightsOn = M.smoothstep(0.1, 0.5, night + (env.cloud || 0) * 0.15 + (env.wet || 0) * 0.2);
   const cx = cam.pos[0], cy = cam.pos[1], cz = cam.pos[2];
   const TIME = VC.gfx.time;
+  T16[13] = 0;
+  T16[14] = FXg.WHITE;
   let drawn = 0;
   for (let i = 0; i < CAP; i++) {
     if (!alive[i]) continue;
     const x = posX[i], y = posY[i], z = posZ[i];
-    const f = fade[i] < 0 ? Math.max(0, 1 + fade[i] * 0.5) : Math.min(1, 0.3 + fade[i] * 0.7);
+    const fd = fade[i];
+    const f = fd < 0 ? Math.max(0, 1 + fd * 0.5) : Math.min(1, 0.3 + fd * 0.7);
     if (f <= 0.02) continue;
-    if (!F.sphere(x, y + 0.15, z, Math.max(0.5, vlen[i]))) continue;
-    const dist = Math.hypot(x - cx, y - cy, z - cz);
+    const ex = x - cx, ey = y - cy, ez = z - cz;
+    const dist = Math.sqrt(ex * ex + ey * ey + ez * ez);
     if (dist > drawDist) continue;
     const m = models[i];
     const h = hdg[i];
-    FXg.pose(T12, m, x, y, z, h, pitch[i], 0, vscale[i] * f);
+    PV7[0] = x; PV7[1] = y; PV7[2] = z; PV7[3] = h; PV7[4] = pitch[i]; PV7[5] = 0; PV7[6] = vscale[i] * f;
+    FXg.poseV(T16, m, PV7);
     const siren = (role[i] === R_DISPATCH && vstate[i] !== D_BACK) || (role[i] === R_PATROL && vstate[i] === 1);
-    B.add(m, dist > 38, T12, siren ? FXg.F.SIREN : 0, 0, FXg.WHITE, vseed[i]);
+    T16[12] = siren ? FXg.F.SIREN : 0;
+    T16[15] = vseed[i];
+    B.addX(m, dist > 38, T16);
+    // camera visibility (inline sphere test) for the light sprites
+    const r = vlen[i] > 0.5 ? vlen[i] : 0.5, sy = y + 0.15;
+    let vis = true;
+    for (let p = 0; p < 24; p += 4) {
+      if (PL[p] * x + PL[p + 1] * sy + PL[p + 2] * z + PL[p + 3] < -r) { vis = false; break; }
+    }
+    if (!vis) continue;
     drawn++;
     // ---- lights ----
     const fx = Math.cos(h), fz = Math.sin(h), rx = -fz, rz = fx;
@@ -1056,25 +1094,40 @@ function buildRender() {
       const ph = (TIME * 2.4 + vseed[i]) % 1;
       const red = ph < 0.5;
       const on = (ph * 4) % 1 > 0.2 ? 1 : 0.15;
-      const ly = y + (m.sy * m.vox * vscale[i]) + 0.05;
       const k = (2.2 + 4 * night) * on;
-      G.add(x + rx * hw, ly, z + rz * hw, 0.32, 1, 0.1, 0.08, red ? k : k * 0.05, 0, 0, 1, 0.5);
-      G.add(x - rx * hw, ly, z - rz * hw, 0.32, 0.15, 0.3, 1, red ? k * 0.05 : k, 0, 0, 1, 0.5);
-      if (dist < 80) G.add(x, y + 0.03, z, 0.9, red ? 1 : 0.2, 0.15, red ? 0.1 : 1, (0.35 + night * 0.9) * on, 1, h, 1, 0);
+      GV[1] = y + m.sy * m.vox * vscale[i] + 0.05; GV[3] = 0.32; GV[8] = 0; GV[9] = 0; GV[10] = 1; GV[11] = 0.5;
+      GV[0] = x + rx * hw; GV[2] = z + rz * hw; GV[4] = 1; GV[5] = 0.1; GV[6] = 0.08; GV[7] = red ? k : k * 0.05;
+      G.addv(GV);
+      GV[0] = x - rx * hw; GV[2] = z - rz * hw; GV[4] = 0.15; GV[5] = 0.3; GV[6] = 1; GV[7] = red ? k * 0.05 : k;
+      G.addv(GV);
+      if (dist < 80) {
+        GV[0] = x; GV[1] = y + 0.03; GV[2] = z; GV[3] = 0.9; GV[4] = red ? 1 : 0.2; GV[5] = 0.15; GV[6] = red ? 0.1 : 1;
+        GV[7] = (0.35 + night * 0.9) * on; GV[8] = 1; GV[9] = h; GV[10] = 1; GV[11] = 0;
+        G.addv(GV);
+      }
     }
     if (lightsOn > 0.01 && dist < 110) {
       const hx = x + fx * hl, hz = z + fz * hl, hy = y + 0.07;
       const k = lightsOn * (dist < 60 ? 1 : 1 - (dist - 60) / 50);
       // headlight flares
-      G.add(hx + rx * hw, hy, hz + rz * hw, 0.07, 1, 0.9, 0.7, 1.6 * k, 0, 0, 1, 0.7);
-      G.add(hx - rx * hw, hy, hz - rz * hw, 0.07, 1, 0.9, 0.7, 1.6 * k, 0, 0, 1, 0.7);
+      GV[1] = hy; GV[3] = 0.07; GV[4] = 1; GV[5] = 0.9; GV[6] = 0.7; GV[7] = 1.6 * k; GV[8] = 0; GV[9] = 0; GV[10] = 1; GV[11] = 0.7;
+      GV[0] = hx + rx * hw; GV[2] = hz + rz * hw;
+      G.addv(GV);
+      GV[0] = hx - rx * hw; GV[2] = hz - rz * hw;
+      G.addv(GV);
       // light pool on the road ahead
-      if (dist < 70) G.add(hx + fx * 0.32, y + 0.025, hz + fz * 0.32, 0.17, 1, 0.82, 0.55, 0.55 * k, 1, h, 2.1, 0.9);
+      if (dist < 70) {
+        GV[0] = hx + fx * 0.32; GV[1] = y + 0.025; GV[2] = hz + fz * 0.32; GV[3] = 0.17; GV[4] = 1; GV[5] = 0.82; GV[6] = 0.55;
+        GV[7] = 0.55 * k; GV[8] = 1; GV[9] = h; GV[10] = 2.1; GV[11] = 0.9;
+        G.addv(GV);
+      }
       // tail / brake lights
-      const tx = x - fx * hl, tz = z - fz * hl;
-      const br = 0.5 + brake[i] * 1.6;
-      G.add(tx + rx * hw, hy, tz + rz * hw, 0.05 + brake[i] * 0.02, 1, 0.06, 0.03, br * k, 0, 0, 1, 0.6);
-      G.add(tx - rx * hw, hy, tz - rz * hw, 0.05 + brake[i] * 0.02, 1, 0.06, 0.03, br * k, 0, 0, 1, 0.6);
+      const tx = x - fx * hl, tz = z - fz * hl, br = brake[i];
+      GV[1] = hy; GV[3] = 0.05 + br * 0.02; GV[4] = 1; GV[5] = 0.06; GV[6] = 0.03; GV[7] = (0.5 + br * 1.6) * k; GV[8] = 0; GV[9] = 0; GV[10] = 1; GV[11] = 0.6;
+      GV[0] = tx + rx * hw; GV[2] = tz + rz * hw;
+      G.addv(GV);
+      GV[0] = tx - rx * hw; GV[2] = tz - rz * hw;
+      G.addv(GV);
     }
   }
   A.stats.drawn = drawn;

@@ -21,6 +21,13 @@
  *   construction dust (and welding sparks at night); debris + dust on bldRemove (bulldoze/disaster/fire)
  *   coloured from the building's model; dust puffs for 'built' events; sparkles on level-ups;
  *   seasonal ambience (spring petals, autumn leaves, summer-night fireflies, winter chimney smoke).
+ *   Buildings are found through VC.fxgl.cells (8x8-tile cells around the camera, kept up to date from
+ *   bldAdd / bldRemove / bldChange) and their models only through VC.fxgl.cachedModel: particles never
+ *   build a model synchronously (a building whose model is not built yet joins a later scan).
+ * WATER: the water surface writes no depth, so sprites below SEA_Y over water are clipped in the shaders
+ *   and retired once fully submerged.
+ * PERF: per-type parameters live in typed arrays and the per-particle loops call no helpers with double
+ *   arguments (no boxed HeapNumbers: near-zero garbage per frame).
  */
 const M = VC.M, C = VC.C;
 const MAX = 6000;
@@ -60,6 +67,24 @@ const TYPE_NAMES = Object.keys(TYPES);
 const TYPE_LIST = TYPE_NAMES.map((k) => TYPES[k]);
 const TYPE_ID = {};
 TYPE_NAMES.forEach((k, i) => (TYPE_ID[k] = i));
+/*
+ * Per-type parameters flattened into typed arrays for the per-particle loops: reading doubles from ~20
+ * differently shaped type objects is a megamorphic load that boxes a fresh HeapNumber every time.
+ */
+const NT = TYPE_LIST.length;
+const TK = new Uint8Array(NT), TDRAG = new Float32Array(NT), TWIND = new Float32Array(NT), TBUOY = new Float32Array(NT);
+const TGRAV = new Float32Array(NT), TFLUT = new Float32Array(NT), TBOUNCE = new Float32Array(NT);
+const TFLICK = new Float32Array(NT), TPULSE = new Float32Array(NT);
+const TJIT = new Float32Array(NT), TSPREAD = new Float32Array(NT), TVY = new Float32Array(NT), TGROW = new Float32Array(NT);
+const TLIFE0 = new Float32Array(NT), TLIFE1 = new Float32Array(NT), TSIZE0 = new Float32Array(NT), TSIZE1 = new Float32Array(NT), TA = new Float32Array(NT);
+const DK = new Float32Array(NT), DKY = new Float32Array(NT); // per-frame drag decay (xz, y)
+for (let t = 0; t < NT; t++) {
+  const T = TYPE_LIST[t];
+  TK[t] = T.k; TDRAG[t] = T.drag || 0; TWIND[t] = T.wind || 0; TBUOY[t] = T.buoy || 0; TGRAV[t] = T.grav || 0;
+  TFLUT[t] = T.flutter || 0; TBOUNCE[t] = T.bounce || 0.2; TFLICK[t] = T.flicker || 0; TPULSE[t] = T.pulse || 0;
+  TJIT[t] = T.jit || 0; TSPREAD[t] = T.spread || 0; TVY[t] = T.vy || 0; TGROW[t] = T.grow || 1; TA[t] = T.a == null ? 1 : T.a;
+  TLIFE0[t] = T.life[0]; TLIFE1[t] = T.life[1]; TSIZE0[t] = T.size[0]; TSIZE1[t] = T.size[1];
+}
 const CONFETTI_COLS = [[1, 0.2, 0.25], [1, 0.8, 0.1], [0.2, 0.6, 1], [0.3, 0.9, 0.35], [0.9, 0.35, 1], [1, 0.55, 0.1], [1, 1, 1]];
 const LEAF_COLS = [[0.2, 0.42, 0.1], [0.32, 0.5, 0.12], [0.55, 0.45, 0.1], [0.7, 0.32, 0.08]];
 const SMOKE_DARK = [0.1, 0.095, 0.09], SMOKE_WOOD = [0.55, 0.55, 0.58];
@@ -84,7 +109,7 @@ const softIdx = new Int32Array(MAX), softDepth = new Float32Array(MAX), order = 
 const NB = 64, bucketCount = new Int32Array(NB), bucketOff = new Int32Array(NB);
 let nSoft = 0, nAdd = 0, nCube = 0;
 
-let rnd = M.rng(99);
+let rnd = VC.fxgl.rng(99);
 const tmp3 = [0, 0, 0];
 const Pt = (VC.particles = {
   name: 'particles',
@@ -97,6 +122,7 @@ const Pt = (VC.particles = {
     initGL();
     Pt.glows = VC.fxgl.glowBatch(256);
     VC.gfx.addLayer(Pt);
+    VC.fxgl.cells.init(); // building registry per 8x8 cell (emitter / fire scans near the camera)
     VC.bus.on('bldAdd', onBldAdd);
     VC.bus.on('bldRemove', onBldRemove);
     VC.bus.on('bldChange', onBldChange);
@@ -104,12 +130,21 @@ const Pt = (VC.particles = {
   },
   reset(S) {
     Pt.clear();
-    rnd = M.rng((S.seed ^ 0x9a17) >>> 0);
+    rnd = VC.fxgl.rng((S.seed ^ 0x9a17) >>> 0);
     scanT = 0;
+    scanN = 0;
+    scanI = 0;
+    nearBuf.length = 0;
     emitList.length = 0;
     burnList.length = 0;
+    hearthList.length = 0;
     buildList.length = 0;
-    for (const b of S.buildings.values()) if (b.built < 1) buildList.push(b);
+    burnSet.clear();
+    for (const b of S.buildings.values()) {
+      if (b.built < 1) buildList.push(b);
+      if (b.fire > 0) burnSet.add(b);
+    }
+    VC.fxgl.cells.sync();
   },
   clear() {
     nActive = 0;
@@ -148,7 +183,7 @@ const Pt = (VC.particles = {
     }
     buildInstances();
     Pt.stats.active = nActive;
-    Pt.stats.ms = +(performance.now() - t0).toFixed(2);
+    Pt.stats.ms = Math.round((performance.now() - t0) * 100) / 100;
   },
 
   opaque(ctx) {
@@ -169,7 +204,7 @@ function spawn(tid, x, y, z, o, isBurst) {
   const i = freeList[--nFree];
   active[nActive++] = i;
   const r = rnd;
-  const j = o && o.jitter != null ? o.jitter : isBurst ? T.jit || 0 : 0;
+  const j = o && o.jitter != null ? o.jitter : isBurst ? TJIT[tid] : 0;
   px[i] = x + (j ? (r() - 0.5) * 2 * j : 0);
   py[i] = y + (j ? (r() - 0.5) * j : 0);
   pz[i] = z + (j ? (r() - 0.5) * 2 * j : 0);
@@ -179,23 +214,23 @@ function spawn(tid, x, y, z, o, isBurst) {
       vx[i] += (r() - 0.5) * o.spread; vy[i] += (r() - 0.5) * o.spread; vz[i] += (r() - 0.5) * o.spread;
     }
   } else {
-    const sp = o && o.spread != null ? o.spread : T.spread || 0;
+    const sp = o && o.spread != null ? o.spread : TSPREAD[tid];
     if (isBurst && (tid === TYPE_ID.firework || tid === TYPE_ID.spark || tid === TYPE_ID.willow)) {
       // spherical shell
       const u = r() * 2 - 1, a = r() * M.PI2, s = Math.sqrt(1 - u * u), m = sp * (0.55 + 0.45 * Math.cbrt(r()));
-      vx[i] = Math.cos(a) * s * m; vy[i] = u * m + (T.vy || 0) * 0.3; vz[i] = Math.sin(a) * s * m;
+      vx[i] = Math.cos(a) * s * m; vy[i] = u * m + TVY[tid] * 0.3; vz[i] = Math.sin(a) * s * m;
     } else {
       const a = r() * M.PI2, m = sp * (isBurst ? 0.3 + r() * 0.7 : r() * 0.5);
       vx[i] = Math.cos(a) * m;
       vz[i] = Math.sin(a) * m;
-      vy[i] = (T.vy || 0) * (isBurst ? 0.6 + r() * 0.6 : 0.8 + r() * 0.4);
+      vy[i] = TVY[tid] * (isBurst ? 0.6 + r() * 0.6 : 0.8 + r() * 0.4);
     }
   }
-  const lf = o && o.life != null ? o.life : M.lerp(T.life[0], T.life[1], r());
+  const lf = o && o.life != null ? o.life : TLIFE0[tid] + (TLIFE1[tid] - TLIFE0[tid]) * r();
   life[i] = Math.max(0.05, lf);
   age[i] = 0;
-  size0[i] = o && o.size != null ? o.size * (0.85 + r() * 0.3) : M.lerp(T.size[0], T.size[1], r());
-  grow[i] = o && o.grow != null ? o.grow : T.grow || 1;
+  size0[i] = o && o.size != null ? o.size * (0.85 + r() * 0.3) : TSIZE0[tid] + (TSIZE1[tid] - TSIZE0[tid]) * r();
+  grow[i] = o && o.grow != null ? o.grow : TGROW[tid];
   let col = T.col;
   if (o && o.colors && o.colors.length) col = o.colors[Math.floor(r() * o.colors.length)];
   else if (o && o.color != null) col = o.color;
@@ -204,11 +239,11 @@ function spawn(tid, x, y, z, o, isBurst) {
   if (typeof col === 'number') col = VC.fxgl.palRGB(col, tmp3);
   else if (typeof col === 'string') col = VC.color.toLinear(VC.color.rgb(col));
   if (!col || col.length < 3) col = T.col;
-  const jv = T.k === K_SOFT ? 0.9 + r() * 0.2 : 1;
+  const jv = TK[tid] === K_SOFT ? 0.9 + r() * 0.2 : 1;
   cr[i] = col[0] * jv; cg[i] = col[1] * jv; cb[i] = col[2] * jv;
-  ca[i] = o && o.alpha != null ? o.alpha : T.a == null ? 1 : T.a;
+  ca[i] = o && o.alpha != null ? o.alpha : TA[tid];
   rot[i] = r() * M.PI2;
-  rotV[i] = (r() - 0.5) * (T.k === K_CUBE ? 14 : 1.2);
+  rotV[i] = (r() - 0.5) * (TK[tid] === K_CUBE ? 14 : 1.2);
   seed[i] = r();
   emis[i] = o && o.emissive ? o.emissive : 0;
   ptype[i] = tid;
@@ -229,60 +264,74 @@ function simulate(S, dt) {
   const wx = S.weather || {};
   const wa = wx.windDir || 0, ws = 0.4 + (wx.wind == null ? 0.5 : wx.wind) * 2.2;
   const windX = Math.cos(wa) * ws, windZ = Math.sin(wa) * ws;
-  const STEP = C.STEP, W = S.W, H = S.H, hgt = S.height, SEA_Y = C.SEA_Y;
+  const STEP = C.STEP, W = S.W, H = S.H, hgt = S.height, SEA_Y = C.SEA_Y, SEA = C.SEA;
+  for (let t = 0; t < NT; t++) {
+    const d = TDRAG[t];
+    DK[t] = d ? Math.exp(-d * dt) : 1;
+    DKY[t] = TBUOY[t] ? Math.exp(-d * 0.5 * dt) : DK[t];
+  }
   for (let k = nActive - 1; k >= 0; k--) {
     const i = active[k];
     const a = (age[i] += dt);
     if (a >= life[i]) { kill(k); continue; }
-    const T = TYPE_LIST[ptype[i]];
     if (rest[i]) continue;
+    const ty = ptype[i], kind = TK[ty];
     // forces
-    const drag = T.drag || 0;
-    const dk = drag ? Math.exp(-drag * dt) : 1;
-    if (T.wind) {
+    const dk = DK[ty], wf = TWIND[ty];
+    if (wf) {
       const f = 1 - dk;
-      vx[i] += (windX * T.wind - vx[i]) * f;
-      vz[i] += (windZ * T.wind - vz[i]) * f;
+      vx[i] += (windX * wf - vx[i]) * f;
+      vz[i] += (windZ * wf - vz[i]) * f;
     } else {
       vx[i] *= dk;
       vz[i] *= dk;
     }
-    vy[i] = vy[i] * (T.buoy ? Math.exp(-drag * 0.5 * dt) : dk) + ((T.buoy || 0) - (T.grav || 0)) * dt;
-    if (T.flutter) {
+    vy[i] = vy[i] * DKY[ty] + (TBUOY[ty] - TGRAV[ty]) * dt;
+    const fl = TFLUT[ty];
+    if (fl) {
       const s = seed[i] * 40;
-      vx[i] += Math.sin(a * 5.3 + s) * T.flutter * dt * 3;
-      vz[i] += Math.cos(a * 4.1 + s) * T.flutter * dt * 3;
+      vx[i] += Math.sin(a * 5.3 + s) * fl * dt * 3;
+      vz[i] += Math.cos(a * 4.1 + s) * fl * dt * 3;
     }
     px[i] += vx[i] * dt;
     py[i] += vy[i] * dt;
     pz[i] += vz[i] * dt;
     rot[i] += rotV[i] * dt;
-    // ground collision for cubes and droplets
-    if (T.k === K_CUBE || T.k === K_DROP) {
+    if (kind === K_CUBE || kind === K_DROP) {
+      // ground collision for cubes and droplets
       const tx = px[i] | 0, tz = pz[i] | 0;
       let gy = SEA_Y;
       let water = true;
       if (tx >= 0 && tz >= 0 && tx < W && tz < H) {
         const h = hgt[tz * W + tx];
-        if (h >= C.SEA) { gy = h * STEP; water = false; }
+        if (h >= SEA) { gy = h * STEP; water = false; }
       }
-      const half = T.k === K_CUBE ? size0[i] * 0.5 : 0;
+      const half = kind === K_CUBE ? size0[i] * 0.5 : 0;
       if (py[i] < gy + half) {
-        if (water || T.k === K_DROP) {
+        if (water || kind === K_DROP) {
           // sink / vanish in water or on ground (droplets)
           if (age[i] < life[i] - 0.25) age[i] = life[i] - 0.25;
-          if (water && T.k === K_CUBE) { vy[i] *= 0.2; vx[i] *= 0.5; vz[i] *= 0.5; }
+          if (water && kind === K_CUBE) { vy[i] *= 0.2; vx[i] *= 0.5; vz[i] *= 0.5; }
           else { vy[i] = 0; vx[i] = vz[i] = 0; py[i] = gy + half; }
         } else {
           py[i] = gy + half;
           if (vy[i] < -0.6) {
-            vy[i] = -vy[i] * (T.bounce || 0.2);
+            vy[i] = -vy[i] * TBOUNCE[ty];
             vx[i] *= 0.65; vz[i] *= 0.65; rotV[i] *= 0.6;
           } else {
             vy[i] = 0; vx[i] *= 0.5; vz[i] *= 0.5; rotV[i] = 0;
             if (Math.abs(vx[i]) + Math.abs(vz[i]) < 0.05) rest[i] = 1;
           }
         }
+      }
+    } else if (py[i] < SEA_Y && kind !== K_RING && kind !== K_FLAT) {
+      // sprites entirely below the water surface (over water or off the map) are invisible: the water
+      // writes no depth, so they would otherwise draw on top of it (the shaders clip partly submerged ones)
+      const tx = Math.floor(px[i]), tz = Math.floor(pz[i]);
+      if (tx < 0 || tz < 0 || tx >= W || tz >= H || hgt[tz * W + tx] < SEA) {
+        const u = 1 - a / life[i];
+        const s = size0[i] * (1 + (grow[i] - 1) * (1 - u * u));
+        if (py[i] + s < SEA_Y) kill(k);
       }
     }
   }
@@ -292,7 +341,7 @@ function simulate(S, dt) {
 /* Instance building (camera-sorted)                                    */
 /* ------------------------------------------------------------------ */
 function buildInstances() {
-  const cam = VC.camera, F = VC.fxgl.frustum;
+  const cam = VC.camera, F = VC.fxgl.frustum, PL = F.planes;
   F.update(cam.viewProj);
   const cx = cam.pos[0], cy = cam.pos[1], cz = cam.pos[2];
   // camera forward from the view matrix (third row, negated)
@@ -303,40 +352,55 @@ function buildInstances() {
   const TIME = VC.gfx.time;
   for (let k = 0; k < nActive; k++) {
     const i = active[k];
-    const T = TYPE_LIST[ptype[i]];
-    const t = age[i] / life[i];
-    const s = size0[i] * (1 + (grow[i] - 1) * (1 - (1 - t) * (1 - t)));
-    if (!F.sphere(px[i], py[i], pz[i], s + 0.2)) continue;
-    const kind = T.k;
+    const ty = ptype[i], kind = TK[ty];
+    const t = age[i] / life[i], u = 1 - t;
+    const s = size0[i] * (1 + (grow[i] - 1) * (1 - u * u));
+    const x = px[i], y = py[i], z = pz[i], rr = s + 0.2;
+    // frustum test (inlined)
+    let vis = true;
+    for (let p = 0; p < 24; p += 4) {
+      if (PL[p] * x + PL[p + 1] * y + PL[p + 2] * z + PL[p + 3] < -rr) { vis = false; break; }
+    }
+    if (!vis) continue;
     if (kind === K_CUBE) {
       const o = nCube++ * 12, d = cubeData;
       const sc = t > 0.85 ? s * (1 - (t - 0.85) / 0.15) : s;
-      d[o] = px[i]; d[o + 1] = py[i]; d[o + 2] = pz[i]; d[o + 3] = sc;
+      d[o] = x; d[o + 1] = y; d[o + 2] = z; d[o + 3] = sc;
       d[o + 4] = cr[i]; d[o + 5] = cg[i]; d[o + 6] = cb[i]; d[o + 7] = emis[i];
       const sd = seed[i] * 6.2831;
       d[o + 8] = Math.cos(sd); d[o + 9] = 0.6; d[o + 10] = Math.sin(sd); d[o + 11] = rot[i];
       continue;
     }
-    // alpha envelope: quick fade in, fade out at the end
-    let a = ca[i] * Math.min(1, t * 10) * (1 - M.smoothstep(0.55, 1, t));
     if (kind === K_ADD || kind === K_STAR || kind === K_FIRE) {
-      if (T.flicker) a *= 1 - T.flicker * (0.5 + 0.5 * Math.sin(TIME * 23 + seed[i] * 50)) * M.smoothstep(0.4, 1, t);
-      if (T.pulse) a *= 0.1 + 0.9 * Math.max(0, Math.sin(TIME * T.pulse + seed[i] * 40));
+      // alpha envelope: quick fade in, fade out at the end (smoothstep(0.55, 1, t))
+      let e = (t - 0.55) / 0.45;
+      e = e < 0 ? 0 : e > 1 ? 1 : e;
+      let a = ca[i] * (t < 0.1 ? t * 10 : 1) * (1 - e * e * (3 - 2 * e));
+      const fl = TFLICK[ty];
+      if (fl) {
+        let e2 = (t - 0.4) / 0.6;
+        e2 = e2 < 0 ? 0 : e2 > 1 ? 1 : e2;
+        a *= 1 - fl * (0.5 + 0.5 * Math.sin(TIME * 23 + seed[i] * 50)) * e2 * e2 * (3 - 2 * e2);
+      }
+      const pu = TPULSE[ty];
+      if (pu) {
+        const sn = Math.sin(TIME * pu + seed[i] * 40);
+        a *= 0.1 + 0.9 * (sn > 0 ? sn : 0);
+      }
       const o = nAdd++ * 12, d = addData;
       let r = cr[i], g = cg[i], b = cb[i];
       if (kind === K_FIRE) {
         // incandescent gradient: white-yellow -> orange -> deep red, tinted by the particle colour
-        const h = 1 - t;
-        r *= 1.2 + 3.8 * h; g *= 0.25 + 2.3 * h * h; b *= 0.05 + 1.2 * h * h * h;
+        r *= 1.2 + 3.8 * u; g *= 0.25 + 2.3 * u * u; b *= 0.05 + 1.2 * u * u * u;
         a *= 0.85 + 0.3 * Math.sin(TIME * 30 + seed[i] * 70);
       }
-      d[o] = px[i]; d[o + 1] = py[i]; d[o + 2] = pz[i]; d[o + 3] = s;
+      d[o] = x; d[o + 1] = y; d[o + 2] = z; d[o + 3] = s;
       d[o + 4] = r; d[o + 5] = g; d[o + 6] = b; d[o + 7] = a;
       d[o + 8] = rot[i]; d[o + 9] = kind; d[o + 10] = seed[i]; d[o + 11] = 0;
       continue;
     }
     const n = nSoft++;
-    const dd = (px[i] - cx) * fx + (py[i] - cy) * fy + (pz[i] - cz) * fz;
+    const dd = (x - cx) * fx + (y - cy) * fy + (z - cz) * fz;
     softIdx[n] = i;
     softDepth[n] = dd;
     if (dd < dmin) dmin = dd;
@@ -356,14 +420,17 @@ function buildInstances() {
     for (let n = 0; n < nSoft; n++) order[bucketOff[softDepth[n]]++] = softIdx[n];
     for (let n = 0; n < nSoft; n++) {
       const i = order[n];
-      const T = TYPE_LIST[ptype[i]];
-      const t = age[i] / life[i];
-      const s = size0[i] * (1 + (grow[i] - 1) * (1 - (1 - t) * (1 - t)));
-      const a = ca[i] * Math.min(1, t * 8) * (1 - M.smoothstep(T.k === K_RING ? 0.2 : 0.5, 1, t));
+      const kind = TK[ptype[i]];
+      const t = age[i] / life[i], u = 1 - t;
+      const s = size0[i] * (1 + (grow[i] - 1) * (1 - u * u));
+      const e0 = kind === K_RING ? 0.2 : 0.5;
+      let e = (t - e0) / (1 - e0);
+      e = e < 0 ? 0 : e > 1 ? 1 : e;
+      const a = ca[i] * (t < 0.125 ? t * 8 : 1) * (1 - e * e * (3 - 2 * e));
       const o = n * 12, d = softData;
       d[o] = px[i]; d[o + 1] = py[i]; d[o + 2] = pz[i]; d[o + 3] = s;
       d[o + 4] = cr[i]; d[o + 5] = cg[i]; d[o + 6] = cb[i]; d[o + 7] = a;
-      d[o + 8] = rot[i]; d[o + 9] = T.k; d[o + 10] = seed[i]; d[o + 11] = emis[i] * (1 - t) * (1 - t);
+      d[o + 8] = rot[i]; d[o + 9] = kind; d[o + 10] = seed[i]; d[o + 11] = emis[i] * u * u;
     }
   }
   Pt.stats.soft = nSoft;
@@ -387,88 +454,122 @@ function so(vx, vy, vz, size, life, alpha, color, emissive) {
   SO.spread = null; SO.jitter = null; SO.grow = null;
   return SO;
 }
-const emitList = []; // buildings with emitters near the camera
-const hearthList = []; // winter: small houses with a chimney fire near the camera
+let emitList = []; // cell-registry entries (VC.fxgl.cells) of buildings with emitters near the camera
+let hearthList = []; // winter: small houses with a chimney fire near the camera
+let nextEmit = [], nextHearth = []; // being filled by the running (sliced) scan
 let season = 1, natureAcc = 0;
+const burnSet = new Set(); // burning buildings (from bldChange: sim.ignite announces every fire)
 const burnList = []; // burning buildings near the camera
 const buildList = []; // buildings under construction
-const emCache = new WeakMap(); // building -> { model, rot, x, z, pts: Float32Array(x,y,z,typeId,rate), acc }
+const nearBuf = []; // entries of the running scan (VC.fxgl.cells.near)
 const levelSeen = new WeakMap();
-let scanT = 0;
+let scanT = 0, scanI = 0, scanN = 0, scanR2 = 0, scanH2 = 0;
+const SCAN_SLICE = 2500; // entries examined per frame by a running scan
 const EM_TYPES = { smoke: 0, steam: 1, fire: 2, sparkle: 3, fountain: 4 };
 const EM_NAMES = ['smoke', 'steam', 'fire', 'sparkle', 'fountain'];
 const EM_RATE = [1.4, 1.7, 6, 2, 26];
 
-/** VC.models.forBuilding(b) memoized per building (re-resolved when a model-affecting field changes). */
-const modelMemo = new WeakMap();
+/**
+ * Building b's model ONLY if it is already built (VC.fxgl.cachedModel): particles never generate / mesh /
+ * upload models synchronously; the building renderer builds them within its frame budget and the next
+ * scan picks them up.
+ */
 function modelOf(b) {
-  const sig = (b.level | 0) + (b.den | 0) * 4 + (b.zt | 0) * 16 + (b.wealth | 0) * 64 + (b.rot | 0) * 256 + (b.w | 0) * 1024 + (b.d | 0) * 65536 + (b.variant | 0) * 4194304;
-  let e = modelMemo.get(b);
-  if (e && e.sig === sig && e.key === b.key) return e.m;
-  let m = null;
-  try { m = VC.models.forBuilding(b); } catch (err) { m = null; }
-  modelMemo.set(b, { sig, key: b.key, m });
-  return m;
+  return VC.fxgl.cachedModel(b);
 }
 VC.fxgl.modelOf = modelOf;
 
-function emittersOf(b, m) {
-  let c = emCache.get(b);
+/** World-space emitter points of entry e's building (cached on the entry: e.pEm). */
+function emittersOf(e, m) {
+  const b = e.b;
+  let c = e.pEm;
   if (c && c.model === m && c.rot === b.rot && c.x === b.x && c.z === b.z) return c;
   const list = (m && m.emitters) || [];
   const pts = new Float32Array(list.length * 5);
   for (let k = 0; k < list.length; k++) {
-    const e = list[k];
-    const w = VC.models.localToWorld(b, m, e.x, e.y, e.z);
+    const em = list[k];
+    const w = VC.models.localToWorld(b, m, em.x, em.y, em.z);
     pts[k * 5] = w[0]; pts[k * 5 + 1] = w[1]; pts[k * 5 + 2] = w[2];
-    pts[k * 5 + 3] = EM_TYPES[e.type] != null ? EM_TYPES[e.type] : 0;
-    pts[k * 5 + 4] = e.rate == null ? 1 : e.rate;
+    pts[k * 5 + 3] = EM_TYPES[em.type] != null ? EM_TYPES[em.type] : 0;
+    pts[k * 5 + 4] = em.rate == null ? 1 : em.rate;
   }
   const acc = new Float32Array(list.length);
   for (let k = 0; k < acc.length; k++) acc[k] = rnd(); // random phase: puffs start right away, unsynchronized
-  c = { model: m, rot: b.rot, x: b.x, z: b.z, pts, acc };
-  emCache.set(b, c);
+  c = e.pEm = { model: m, rot: b.rot, x: b.x, z: b.z, pts, acc };
   return c;
 }
 
-function scan(S) {
-  const cam = VC.camera, F = VC.fxgl.frustum;
+/**
+ * Every 0.3 s a scan collects the model emitters and winter hearths among the buildings of the 8x8 cells
+ * around the camera (VC.fxgl.cells, maintained incrementally from bldAdd / bldRemove / bldChange; built,
+ * powered and abandoned are polled). It runs sliced over a few frames (SCAN_SLICE entries each) and then
+ * replaces the lists. Buildings whose model is not built yet are skipped until it is. Burning buildings
+ * come from burnSet (every fire is announced with bldChange), not from the scan.
+ */
+function scanStart(S) {
+  const cells = VC.fxgl.cells;
+  cells.sync();
+  const cam = VC.camera;
   const R = M.clamp(40 + cam.dist * 0.6, 50, 110);
-  const R2 = R * R;
-  emitList.length = 0;
-  burnList.length = 0;
-  hearthList.length = 0;
+  scanR2 = R * R;
+  scanH2 = scanR2 * 0.3;
   season = VC.fxgl.season(S);
-  const H2 = R2 * 0.3;
-  for (const b of S.buildings.values()) {
-    const bx = b.x + b.w * 0.5, bz = b.z + b.d * 0.5;
-    const dx = bx - cam.tx, dz = bz - cam.tz;
-    const d2 = dx * dx + dz * dz;
-    if (b.fire > 0) {
-      if (d2 < R2 * 2.2) burnList.push(b);
-      continue;
-    }
-    if (d2 > R2 || b.built < 1 || b.abandoned || b.powered === false || b.key === 'rubble') continue;
-    if (season === 3 && d2 < H2 && b.key === 'grow' && b.zt === 1 && (b.den === 1 || b.level === 1) && hearthList.length < 48) hearthList.push(b);
-    const m = modelOf(b);
-    if (!m || !m.emitters || !m.emitters.length) continue;
-    if (!F.sphere(bx, VC.world.topY(b.x, b.z) + m.height * 0.5, bz, m.height + Math.max(b.w, b.d) + 3)) continue;
-    emitList.push(b);
+  nextEmit.length = 0;
+  nextHearth.length = 0;
+  scanN = cells.near(cam.tx, cam.tz, R, nearBuf);
+  scanI = 0;
+  // burning buildings near the camera (small set)
+  burnList.length = 0;
+  const B2 = scanR2 * 2.2;
+  for (const b of burnSet) {
+    if (!(b.fire > 0) || !S.buildings.has(b.id)) { burnSet.delete(b); continue; }
+    const dx = b.x + b.w * 0.5 - cam.tx, dz = b.z + b.d * 0.5 - cam.tz;
+    if (dx * dx + dz * dz < B2) burnList.push(b);
   }
   for (let k = buildList.length - 1; k >= 0; k--) {
     const b = buildList[k];
     if (b.built >= 1 || !S.buildings.has(b.id)) buildList.splice(k, 1);
   }
-  Pt.stats.emitters = emitList.length;
   Pt.stats.burning = burnList.length;
+}
+/** Examines up to `budget` entries of the running scan; publishes the lists when it is complete. */
+function scanStep(budget) {
+  const cells = VC.fxgl.cells, cam = VC.camera, PL = VC.fxgl.frustum.planes;
+  const end = Math.min(scanN, scanI + budget);
+  for (let k = scanI; k < end; k++) {
+    const e = nearBuf[k], b = e.b;
+    const bx = b.x + b.w * 0.5, bz = b.z + b.d * 0.5;
+    const dx = bx - cam.tx, dz = bz - cam.tz;
+    const d2 = dx * dx + dz * dz;
+    if (d2 > scanR2 || b.fire > 0 || b.built < 1 || b.abandoned || b.powered === false || b.key === 'rubble') continue;
+    if (season === 3 && d2 < scanH2 && b.key === 'grow' && b.zt === 1 && (b.den === 1 || b.level === 1) && nextHearth.length < 48) nextHearth.push(b);
+    const m = cells.model(e);
+    if (!m || !m.emitters || !m.emitters.length) continue;
+    const by = VC.world.topY(b.x, b.z) + m.height * 0.5, r = m.height + Math.max(b.w, b.d) + 3;
+    let vis = true;
+    for (let p = 0; p < 24; p += 4) {
+      if (PL[p] * bx + PL[p + 1] * by + PL[p + 2] * bz + PL[p + 3] < -r) { vis = false; break; }
+    }
+    if (vis) nextEmit.push(e);
+  }
+  scanI = end;
+  if (scanI < scanN) return;
+  // complete: publish (swap the double-buffered lists)
+  let t = emitList; emitList = nextEmit; nextEmit = t;
+  t = hearthList; hearthList = nextHearth; nextHearth = t;
+  nearBuf.length = 0;
+  scanN = 0;
+  scanI = 0;
+  Pt.stats.emitters = emitList.length;
 }
 
 function autoEffects(S, dt) {
   scanT -= dt;
-  if (scanT <= 0) {
+  if (scanT <= 0 && scanN === 0) {
     scanT = 0.3;
-    scan(S);
+    scanStart(S);
   }
+  if (scanN) scanStep(SCAN_SLICE);
   const cam = VC.camera, cap = Pt.cap();
   const room = nActive < cap * 0.8;
   const qf = cap / 3000;
@@ -480,13 +581,14 @@ function autoEffects(S, dt) {
   const crowd = Math.min(1, Math.sqrt(14 / Math.max(1, emitList.length)));
   if (room) {
     for (let n = 0; n < emitList.length; n++) {
-      const b = emitList[n];
+      const en = emitList[n], b = en.b;
       if (!VC.state.buildings.has(b.id)) continue;
-      const m = modelOf(b);
+      const m = en.m;
       if (!m) continue;
-      const c = emittersOf(b, m);
+      const c = emittersOf(en, m);
       const pts = c.pts;
-      const dist = Math.hypot(b.x - cam.tx, b.z - cam.tz);
+      const ex = b.x - cam.tx, ez = b.z - cam.tz;
+      const dist = Math.sqrt(ex * ex + ez * ez);
       const lod = M.clamp(1.3 - dist / 90, 0.15, 1) * M.clamp(qf, 0.3, 1.5) * crowd;
       for (let e = 0; e < c.acc.length; e++) {
         const ty = pts[e * 5 + 3];
@@ -514,7 +616,8 @@ function autoEffects(S, dt) {
     const gy = VC.world.topY(b.x, b.z);
     const area = b.w * b.d;
     const f = M.clamp(0.35 + b.fire, 0.35, 1.3);
-    const dist = Math.hypot(b.x + b.w / 2 - cam.tx, b.z + b.d / 2 - cam.tz);
+    const ex = b.x + b.w / 2 - cam.tx, ez = b.z + b.d / 2 - cam.tz;
+    const dist = Math.sqrt(ex * ex + ez * ez);
     const lod = M.clamp(1.4 - dist / 120, 0.2, 1);
     const flick = 0.75 + 0.25 * Math.sin(TIME * 13 + b.id) * Math.sin(TIME * 7.3 + b.id * 3);
     const cxw = b.x + b.w / 2, czw = b.z + b.d / 2;
@@ -542,8 +645,8 @@ function autoEffects(S, dt) {
     for (let n = 0; n < buildList.length; n++) {
       const b = buildList[n];
       const cxw = b.x + b.w / 2, czw = b.z + b.d / 2;
-      const dist = Math.hypot(cxw - cam.tx, czw - cam.tz);
-      if (dist > 70) continue;
+      const ex = cxw - cam.tx, ez = czw - cam.tz;
+      if (ex * ex + ez * ez > 4900) continue;
       const gy = VC.world.topY(b.x, b.z);
       if (r() < 1.6 * dt * Math.sqrt(b.w * b.d)) {
         const side = r() * 4 | 0;
@@ -613,8 +716,8 @@ function nature(S, dt, night) {
 
 /* ---------------- world event handlers ---------------- */
 function nearCam(x, z, r) {
-  const cam = VC.camera;
-  return Math.hypot(x - cam.tx, z - cam.tz) < r + cam.dist * 0.8;
+  const cam = VC.camera, dx = x - cam.tx, dz = z - cam.tz, R = r + cam.dist * 0.8;
+  return dx * dx + dz * dz < R * R;
 }
 function onBldAdd(b) {
   if (b.built < 1) {
@@ -652,7 +755,7 @@ function onBldRemove(b) {
   if (!nearCam(cx, cz, 70)) return;
   const gy = VC.world.topY(b.x, b.z);
   let m = null;
-  try { m = b.key === 'rubble' ? null : VC.models.forBuilding(b); } catch (e) { m = null; }
+  try { m = b.key === 'rubble' ? null : modelOf(b); } catch (e) { m = null; } // (cached only: never builds)
   const hgt = (m && m.height) || b.hgt || 0.5;
   const area = b.w * b.d;
   const cols = modelColors(m) || [[0.45, 0.43, 0.4], [0.3, 0.28, 0.26]];
@@ -663,13 +766,14 @@ function onBldRemove(b) {
   if (why === 'fire') Pt.burst('smoke', cx, gy + 0.5, cz, 6 + area * 2, { jitter: jit, color: [0.12, 0.11, 0.1] });
 }
 function onBldChange(b) {
+  if (b.fire > 0) burnSet.add(b); // (sim.ignite announces every new fire with world.changed)
   const prev = levelSeen.get(b);
   levelSeen.set(b, b.level);
   if (prev == null || !(b.level > prev) || b.built < 1) return;
   const cx = b.x + b.w / 2, cz = b.z + b.d / 2;
   if (!nearCam(cx, cz, 60)) return;
   let hgt = b.hgt || 1;
-  try { const m = VC.models.forBuilding(b); if (m) hgt = m.height; } catch (e) { /* ignore */ }
+  try { const m = modelOf(b); if (m) hgt = m.height; } catch (e) { /* ignore */ } // (cached only; else b.hgt)
   const gy = VC.world.topY(b.x, b.z);
   Pt.burst('sparkle', cx, gy + hgt + 0.3, cz, 18 + b.w * b.d * 4, { jitter: Math.max(b.w, b.d) * 0.5 });
 }
@@ -726,13 +830,17 @@ void main(){
   vUv = q; vCol = aP1; vP = aP2; vWp = wp;
   gl_Position = uViewProj * vec4(wp, 1.0);
 }`;
-const SFS_SOFT = `
+// under the water surface of a water tile (the water writes no depth, so test it here)
+const UNDERWATER = `
+bool underWater(vec3 wp){ return wp.y < SEA_Y && (int(tileData(wp.xz).b * 255.0 + 0.5) & 16) != 0; }`;
+const SFS_SOFT = UNDERWATER + `
 in vec2 vUv; flat in vec4 vCol; flat in vec4 vP; in vec3 vWp;
 out vec4 fragColor;
 void main(){
   int kind = int(vP.y + 0.5);
   float r2 = dot(vUv, vUv);
   if (r2 > 1.0) discard;
+  if (kind == 0 && underWater(vWp)) discard; // smoke / steam / dust (drops, rings, wakes sit on the surface)
   vec3 col = vCol.rgb;
   float a;
   if (kind == 0) {
@@ -764,13 +872,14 @@ void main(){
   col = applyFog(col, vWp);
   fragColor = vec4(col, a * vCol.a);
 }`;
-const SFS_ADD = `
+const SFS_ADD = UNDERWATER + `
 in vec2 vUv; flat in vec4 vCol; flat in vec4 vP; in vec3 vWp;
 out vec4 fragColor;
 void main(){
   int kind = int(vP.y + 0.5);
   float r2 = dot(vUv, vUv);
   if (r2 > 1.0 && kind != 6) discard;
+  if (underWater(vWp)) discard;
   float a;
   if (kind == 4) {
     float cx = exp(-abs(vUv.x) * 16.0) * (1.0 - abs(vUv.y));
@@ -866,7 +975,7 @@ function drawCubes(ctx) {
   GLR.cube.use();
   gl.bindVertexArray(GLR.cubeVao);
   gl.bindBuffer(gl.ARRAY_BUFFER, GLR.cubeBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, cubeData.subarray(0, nCube * 12), gl.DYNAMIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, cubeData, gl.DYNAMIC_DRAW, 0, nCube * 12); // (offset/length: no subarray view per frame)
   gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, nCube);
   gl.bindVertexArray(null);
 }
@@ -874,7 +983,7 @@ function drawCubes(ctx) {
 function bindSprites(gl, buf, data, n) {
   gl.bindVertexArray(GLR.spriteVao);
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, n * 12), gl.DYNAMIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW, 0, n * 12);
   for (let k = 0; k < 3; k++) {
     gl.enableVertexAttribArray(k);
     gl.vertexAttribPointer(k, 4, gl.FLOAT, false, 48, k * 16);

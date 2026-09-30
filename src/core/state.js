@@ -113,10 +113,12 @@ const W = (VC.world = {
   /** Marks an inclusive tile rectangle as changed. Coalesced and emitted once per frame by flush(). */
   markDirty(x0, z0, x1 = x0, z1 = z0) {
     const S = W.S;
-    x0 = Math.max(0, Math.min(x0, x1) - 1);
-    z0 = Math.max(0, Math.min(z0, z1) - 1);
-    x1 = Math.min(S.W - 1, Math.max(x0, x1) + 1);
-    z1 = Math.min(S.H - 1, Math.max(z0, z1) + 1);
+    const ax = Math.min(x0, x1), bx = Math.max(x0, x1), az = Math.min(z0, z1), bz = Math.max(z0, z1);
+    if (!isFinite(ax + bx + az + bz)) return;
+    x0 = Math.max(0, ax - 1);
+    z0 = Math.max(0, az - 1);
+    x1 = Math.min(S.W - 1, bx + 1);
+    z1 = Math.min(S.H - 1, bz + 1);
     const d = W._dirty;
     if (!d) W._dirty = { x0, z0, x1, z1 };
     else {
@@ -255,6 +257,12 @@ const W = (VC.world = {
       w = rot & 1 ? sz[1] : sz[0];
       d = rot & 1 ? sz[0] : sz[1];
     }
+    for (const v of [props.x, props.z, w, d]) {
+      if (!Number.isInteger(v)) {
+        console.warn('[world] addBuilding: invalid footprint', props.key, props.x, props.z, w, d);
+        return null;
+      }
+    }
     const b = Object.assign(
       {
         id: S.nextId++,
@@ -290,7 +298,7 @@ const W = (VC.world = {
     VC.bus.emit('bldAdd', b);
     return b;
   },
-  /** Removes a building. reason: 'bulldoze' | 'fire' | 'abandon' | 'upgrade' | 'disaster' | 'replace'. */
+  /** Removes a building. reason: one of VC.REMOVE values ('bulldoze','fire','abandon','upgrade','disaster','abduct','replace','undo','cleared'). */
   removeBuilding(id, reason = 'bulldoze') {
     const S = W.S;
     const b = typeof id === 'object' ? id : S.buildings.get(id);
@@ -334,6 +342,12 @@ const W = (VC.world = {
   },
 });
 
+/** Building removal reasons (b.removed / removeBuilding second argument). */
+VC.REMOVE = {
+  BULLDOZE: 'bulldoze', FIRE: 'fire', ABANDON: 'abandon', UPGRADE: 'upgrade', DISASTER: 'disaster',
+  ABDUCT: 'abduct', REPLACE: 'replace', UNDO: 'undo', CLEARED: 'cleared',
+};
+
 /* ------------------------------------------------------------------ */
 /* Money API. Every expense/income goes through here.                   */
 /* cat: ledger category ('construction', 'roads', 'zoning', 'demolish', */
@@ -345,12 +359,17 @@ VC.money = {
     return (VC.DIFFICULTY[S.difficulty] || VC.DIFFICULTY.normal).costMul;
   },
   canAfford(amount) {
+    if (typeof amount !== 'number' || !isFinite(amount)) return false;
     const S = W.S;
     return S.sandbox || S.money >= amount;
   },
   /** Deducts amount. Returns false (and emits 'noMoney') if unaffordable, unless force. */
   spend(amount, cat = 'misc', force = false) {
     const S = W.S;
+    if (typeof amount !== 'number' || !isFinite(amount)) {
+      console.warn('[money] bad amount', amount, cat);
+      return false;
+    }
     if (amount <= 0) return true;
     if (S.sandbox) return true;
     if (!force && S.money < amount) {
@@ -365,6 +384,10 @@ VC.money = {
   },
   earn(amount, cat = 'misc') {
     const S = W.S;
+    if (typeof amount !== 'number' || !isFinite(amount)) {
+      console.warn('[money] bad amount', amount, cat);
+      return;
+    }
     if (amount <= 0) return;
     S.money += amount;
     const L = S.ledger.month;

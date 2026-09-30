@@ -31,6 +31,7 @@ VC.saveSettings = function () {
 };
 VC.params = new URLSearchParams(location.search);
 
+const failures = Object.create(null); // module name -> {msg, n}
 function each(fn) {
   for (const name of MODULE_ORDER) {
     const m = VC[name];
@@ -38,8 +39,17 @@ function each(fn) {
     try {
       fn(m, name);
     } catch (e) {
-      console.error(`[main] module "${name}" failed:`, e);
-      VC.errors.push(`${name}: ${e && e.message}`);
+      // log the first occurrence with its stack, then only count repeats (no console flood)
+      const msg = `${name}: ${e && e.message}`;
+      const f = failures[name];
+      if (!f || f.msg !== msg) {
+        console.error(`[main] module "${name}" failed:`, e);
+        failures[name] = { msg, n: 1 };
+        if (VC.errors.length < 200) VC.errors.push(msg);
+      } else if (++f.n === 2 || f.n % 600 === 0) {
+        const i = VC.errors.lastIndexOf(msg);
+        if (i >= 0) VC.errors[i] = msg; // keep one entry; repeat count is in VC.debug.failures()
+      }
     }
   }
 }
@@ -52,6 +62,7 @@ VC.newGame = function (opts = {}) {
   const seed = opts.seed != null ? opts.seed >>> 0 : (Math.random() * 4294967295) >>> 0;
   const S = VC.createState(Object.assign({}, opts, { seed }));
   if (opts.disasters === false) S.disastersEnabled = false;
+  if (opts.demo) S.demo = true; // title-screen demo: set BEFORE any module sees the state
   VC.world.setState(S);
   VC.worldgen.generate(S, opts);
   VC.startState(S);
@@ -78,8 +89,8 @@ VC.setSpeed = function (s) {
 VC.togglePause = function () {
   const S = VC.state;
   if (!S) return;
-  if (S.time.speed) { S.time._prev = S.time.speed; VC.setSpeed(0); }
-  else VC.setSpeed(S.time._prev || 1);
+  if (S.time.speed) { S.time.prevSpeed = S.time.speed; VC.setSpeed(0); }
+  else VC.setSpeed(S.time.prevSpeed || 1);
 };
 
 /* ---------------- main loop ---------------- */
@@ -157,9 +168,23 @@ VC.debug = {
   /** Fast-forward the simulation by n days (synchronously). */
   run(days) {
     if (!VC.sim || !VC.sim.tickDay) return 'no sim';
-    for (let i = 0; i < days; i++) VC.sim.tickDay();
+    const S = VC.state;
+    const dis = VC.disasters && VC.disasters.update;
+    const speed = S.time.speed;
+    for (let i = 0; i < days; i++) {
+      VC.sim.tickDay();
+      if (dis) {
+        // advance active disasters by one game day at speed 1 so they finish during fast-forward
+        S.time.speed = 1;
+        try { for (let k = 0; k < 10; k++) VC.disasters.update(0.1 * VC.C.DAY_SEC, 0.1 * VC.C.DAY_SEC); } catch (e) { /* keep running */ }
+        S.time.speed = speed;
+      }
+    }
     VC.world.flush();
     return VC.state.stats;
+  },
+  failures() {
+    return failures;
   },
   perf() {
     return { fps: Math.round(VC.gfx.fps), frameMs: +VC.gfx.frameMs.toFixed(2), res: [VC.gfx.rw, VC.gfx.rh], models: VC.models.stats, buildings: VC.state ? VC.state.buildings.size : 0 };

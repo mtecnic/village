@@ -110,6 +110,14 @@ a road: 0 +Z, 1 +X, 2 -Z, 3 -X; -1 none), `buildingAt(x,z)`, `get(id)`, `count(k
 | `disaster` | `{type, phase:'start'|'update'|'end', x, z, ...}` | disasters |
 | `policyChanged`, `budgetChanged`, `loanChanged` | key / – | econ |
 | `windowOpened`/`windowClosed` | id | ui |
+| `unlock` | `{keys:[…]}` items newly unlocked between milestones | advisors |
+| `saved` / `loaded` / `saveFailed` | `{slot, name, …}` | save |
+| `audioStarted`, `boot` | – | audio / main |
+| `econ` | `{type:'strike'|'emergencyLoan', …}` | econ |
+| `cityRenamed` | name | hud |
+
+Removal reasons (`removeBuilding(b, reason)`, stored in `b.removed`): see `VC.REMOVE` in core/state.js —
+bulldoze, fire, abandon, upgrade, disaster, abduct, replace, undo, cleared.
 
 ## 6. Module lifecycle — `main.js`
 

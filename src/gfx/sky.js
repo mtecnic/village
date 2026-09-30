@@ -592,7 +592,7 @@ const _hd = [0, 1, 0], _tl = [0, 1, 0];
 /** Fills and uploads the SkyFrame uniform block (allocation free). */
 function upload() {
   const G = VC.gfx, gl = G.gl, env = G.env, st = Sk.st, cam = VC.camera;
-  if (!gl || !env) return;
+  if (!gl || !env || G.lost || gl.isContextLost()) return;
   const sun = env.sun || env.sunDir, moon = env.moon || _hd;
   const h = sun[1];
   // sun disc: warm and dimmer near the horizon, hidden below it

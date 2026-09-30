@@ -175,7 +175,7 @@ const CATS = {
   misc: ['📦', 'Other'],
 };
 /** Display order of categories (unknown ones sort after, alphabetically). */
-const CAT_ORDER = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income', 'reward', 'loan'];
+const CAT_ORDER = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'grant', 'income', 'reward', 'goal', 'desk', 'loan', 'deskDeal', 'refund'];
 for (const d of VC.DEPARTMENTS) CAT_ORDER.push('upkeep:' + d.key);
 CAT_ORDER.push('roadUpkeep', 'policy', 'loanPayment', 'construction', 'roads', 'zoning', 'pline', 'demolish', 'terraform', 'trees', 'misc');
 U.catInfo = (cat) => {

@@ -375,16 +375,18 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
  * Both live in one left column under the top bar (where the tutorial card sits). The column stacks at
  * z 15: above the HUD chrome (0-5), BELOW the windows layer (20), so windows always cover it.
  * Colours come from the base.css tokens; no color-mix() (Safari 16.0/16.1). */
-/* height-capped (top bar above, news ticker below): the desk card's body scrolls on short viewports */
-.gl-col { position: absolute; left: 10px; top: 70px; width: 324px; max-height: calc((100vh - 110px) / var(--ui-scale)); display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 15; transition: transform 0.5s var(--ease-out), opacity 0.4s, top 0.35s var(--ease-out); }
+/* height-capped: ui/hud_desk.js (VC.deskHud.layout) sets top + max-height so the column stops above the
+ * minimap / toolbar / ticker (the CSS value is only the fallback); the desk card's body and the goals list
+ * scroll inside it. No transition on `top`: a card must never slide in underneath the tutorial card. */
+.gl-col { position: absolute; left: 10px; top: 70px; width: 324px; max-height: calc((100vh - 110px) / var(--ui-scale)); display: flex; flex-direction: column; gap: 8px; scale: var(--ui-scale); transform-origin: 0 0; pointer-events: none; z-index: 15; transition: transform 0.5s var(--ease-out), opacity 0.4s; }
 .hud.off .gl-col { transform: translateX(-120%); opacity: 0; }
 .hud.no-ticker .gl-col { max-height: calc((100vh - 84px) / var(--ui-scale)); }
 
 /* ================================================================== goals card */
-.gl-card { order: 1; flex: none; position: relative; border-radius: 17px; padding: 8px 9px 9px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); box-shadow: var(--shadow), var(--hi); animation: glCardIn 0.55s var(--ease); }
+.gl-card { order: 1; flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; position: relative; border-radius: 17px; padding: 8px 9px 9px; background: var(--glass); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line2); box-shadow: var(--shadow), var(--hi); animation: glCardIn 0.55s var(--ease); }
 .gl-card.hide { display: none; }
 @keyframes glCardIn { from { opacity: 0; transform: translateX(-40px) scale(0.96); } }
-.gl-head { width: 100%; min-height: 24px; display: flex; align-items: center; gap: 7px; padding: 2px 3px; border-radius: 9px; cursor: pointer; transition: background 0.15s; outline: none; }
+.gl-head { flex: none; width: 100%; min-height: 24px; display: flex; align-items: center; gap: 7px; padding: 2px 3px; border-radius: 9px; cursor: pointer; transition: background 0.15s; outline: none; }
 .gl-head:hover { background: rgba(255, 255, 255, 0.05); }
 .gl-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .gl-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gold); white-space: nowrap; }
@@ -395,10 +397,16 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 @keyframes glChip { 50% { box-shadow: 0 0 20px rgba(255, 209, 102, 0.8); } }
 .gl-chev { flex: none; width: 18px; height: 18px; display: grid; place-items: center; font-size: 12px; color: var(--text3); transition: transform 0.25s var(--ease-out); }
 .gl-card.compact .gl-chev { transform: rotate(-90deg); }
-.gl-list { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+.gl-list { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; margin-top: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.gl-list > .gl-item { flex: none; }
+.gl-list.more, .dk-body.more { -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(180deg, #000 calc(100% - 28px), transparent); }
+/* peeking at the goals while a decision is open: the list scrolls in ~40% of the column, the decision keeps the rest */
+.gl-card.peek .gl-list { max-height: calc(var(--gl-avail, 420px) * 0.4); }
+/* with a decision on the desk the goals card keeps its (folded / capped) size and the desk card gives way */
+.gl-col.desk-open .gl-card, .gl-card.compact { flex-shrink: 0; }
 .gl-card.compact .gl-list { display: none; }
 /* collapsed: one slim progress bar per goal */
-.gl-mini { display: none; gap: 4px; margin: 6px 3px 1px; }
+.gl-mini { flex: none; display: none; gap: 4px; margin: 6px 3px 1px; }
 .gl-card.compact .gl-mini { display: flex; }
 .gl-mini i { position: relative; flex: 1; height: 4px; border-radius: 4px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
 .gl-mini i b { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px; background: linear-gradient(90deg, #36a6e8, var(--accent)); transition: width 0.6s var(--ease-out); }
@@ -427,7 +435,7 @@ kbd, .kbd { display: inline-flex; align-items: center; justify-content: center; 
 .gl-act .btn.small { padding: 3px 8px; font-size: 11.5px; }
 .gl-show { color: var(--accent); }
 .gl-show:hover { color: #fff; }
-.gl-swap { position: absolute; top: 5px; right: 5px; width: 22px; height: 22px; display: grid; place-items: center; border: none; border-radius: 7px; background: transparent; color: var(--text3); font-size: 13px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s, transform 0.3s var(--ease); }
+.gl-swap { position: absolute; top: 5px; right: 5px; width: 22px; height: 22px; display: grid; place-items: center; border: none; border-radius: 7px; background: transparent; color: var(--text3); font-size: 13px; line-height: 1; cursor: pointer; opacity: 0.4; transition: opacity 0.15s, background 0.15s, color 0.15s, transform 0.3s var(--ease); }
 .gl-item:hover .gl-swap { opacity: 1; }
 .gl-swap:hover { background: rgba(255, 255, 255, 0.1); color: #fff; transform: rotate(90deg); }
 .gl-swap:focus-visible { opacity: 1; }
@@ -9530,8 +9538,11 @@ function utilityNote(S, def, res, link) {
     res.good = 'Connected to grid ✔';
   } else {
     // water: pipes run under roads and through buildings (not power lines), and pumps need electricity
-    if (!link.water && !link.power) { res.warn = 'Not connected — link it with roads or power lines'; return; }
-    if (!link.water) { res.warn = 'No pipes here — water flows along roads: place it beside one'; return; }
+    // (power lines carry no water: never suggest them for a pump or tower)
+    if (!link.water) {
+      res.warn = 'Not connected — build it beside a road (water pipes run under roads)';
+      return;
+    }
     const st = S.stats || {};
     if (!link.energized && !(st.powerSupply > 0) && !anyPlant(S)) { res.warn = 'Connected ✔ — but it needs power to pump: build a power plant'; return; }
     res.good = 'Connected to grid ✔';
@@ -11634,6 +11645,8 @@ const PING = { x: 0, z: 0, w: 1, d: 1, until: 0, c: [2.6, 1.9, 0.5, 1], f: [1.6,
 const LAYER = {
   name: 'tools',
   order: 990,
+  /** No GL objects of its own (previews go through the core gizmos): nothing to rebuild after a context loss. */
+  restore() {},
   transparent() {
     const S = VC.state;
     if (!S || S.demo || (VC.menu && VC.menu.active) || !VC.gfx.gizmo) return;
@@ -13168,7 +13181,12 @@ VC.worldgen = {
  *   signal(x, z)           traffic-light phase of an intersection tile: -1 none, 0 X-axis green,
  *                          1 X yellow, 2 Z-axis green, 3 Z yellow
  *   vehicles()             debug: array of {kind, x, z, speed, role}
+ *   restore()              WebGL context restored (layer hook; also covers 'agents_glow'): the shared model
+ *                          meshes are re-uploaded (VC.fxgl.restoreModels); the batches re-create their buffers
+ *                          on their next draw
  * Air, sea, birds and balloons live in gfx/fx_air.js (VC.fxAir), updated and drawn from here.
+ * While the WebGL context is lost update() is skipped (vehicles freeze, nothing spawns: spawning may build a
+ * model, whose mesh could not be uploaded).
  */
 const M = VC.M, C = VC.C;
 /** Vector length without Math.hypot (V8's hypot allocates its argument list; this is on per-frame paths). */
@@ -13281,6 +13299,7 @@ const A = (VC.agents = {
 
   update(dt, rdt) {
     if (!S || S !== VC.state) { if (VC.state) A.reset(VC.state); else return; }
+    if (VC.fxgl.lost()) return; // context lost: nothing is drawn; no spawns (model builds) until the restore
     const t0 = performance.now();
     if (dirty) rebuildRoads();
     const sp = GAME_SPEED[S.time.speed | 0] || 1;
@@ -13301,12 +13320,18 @@ const A = (VC.agents = {
   opaque(ctx) {
     A.batch.draw(ctx, false);
   },
+  /** WebGL context restored: shared model meshes back on the GPU; batch buffers / VAOs re-create themselves. */
+  restore() {
+    VC.fxgl.restoreModels();
+  },
   glowLayer: {
     name: 'agents_glow',
     order: 650,
     transparent(ctx) {
       A.glows.draw(ctx);
     },
+    /** (the glow batch re-creates its buffer and VAO on its next draw, see VC.fxgl) */
+    restore() {},
   },
 
   count() {
@@ -14348,10 +14373,18 @@ function buildRender() {
  *   depth pre-pass would hide the tool gizmos drawn after it, so the core may call drawGhostLate(ctx) after its
  *   gizmos; while it does, the transparent pass skips the ghost.
  *
+ * WEBGL CONTEXT LOSS: while the context is lost update() does nothing (no GL calls, no model builds: bus events
+ *   keep the CPU slot store current). restore() (layer hook of the render core; also covers 'bld_glow' and the
+ *   props' engine set) re-uploads the shared model meshes in place (VC.fxgl.restoreModels), refreshes the model
+ *   wrappers' mesh handles (1/4-res meshes are rebuilt lazily), re-creates the data texture (full upload of the
+ *   slot store), stream / sprite buffers and VAOs; programs relink by themselves and get their sampler units again
+ *   on first use. Buildings / trees / parts whose model was built while the context was lost (no GPU mesh then)
+ *   are re-resolved.
+ *
  * API (VC.bldgfx): setGhost({key, x, z, rot, valid} | null), drawGhostLate(ctx), handlesLift (true: draws
  *   b.disLift UFO lifts), warm(ms?) (build queued models + requested 1/4-res meshes now), inspect(id) (debug:
- *   render state of a building, incl. partState), stats, eng (instancing engine used by gfx/props.js, see E at
- *   the end of this file), SPECIES, FL.
+ *   render state of a building, incl. partState), restore(), stats, eng (instancing engine used by gfx/props.js,
+ *   see E at the end of this file), SPECIES, FL.
  * Also reads: VC.tools.selectedId / hoverId / hover / current, VC.disasters.active (earthquake shake,
  *   UFO lifts), VC.particles.burst('dust') when a construction site turns into its building, VC.gfx.env,
  *   VC.fx.isLaunching.
@@ -14399,6 +14432,34 @@ const B = (VC.bldgfx = {
     if (VC.props && VC.props.init) callSafe(VC.props.init, VC.props);
   },
 
+  /**
+   * WebGL context restored (render core layer hook): every GL object of this renderer is gone. Re-uploads the
+   * shared model meshes, refreshes the wrappers, re-creates buffers / VAOs / the data texture (full slot upload).
+   */
+  restore() {
+    gl = VC.gfx.gl;
+    if (VC.fxgl && VC.fxgl.restoreModels) VC.fxgl.restoreModels();
+    // wrapper mesh handles; a wrapper without a mesh before (its model was built while the context was lost)
+    // that has one now means buildings / parts / trees skipped that model: they are re-resolved below
+    let revived = 0;
+    for (let i = 0; i < MWS.length; i++) {
+      const had = !!MWS[i].lv[0];
+      meshLevels(MWS[i]);
+      if (!had && MWS[i].lv[0]) revived++;
+    }
+    l2Queue.length = 0;
+    B.stats.l2 = 0;
+    dataTex = null; // (dead handle: never deleted) re-created with the whole slot store by the next flushTex
+    texRealloc = true;
+    streamCap = 0;
+    initBuffers();
+    nSpr = 0; // (the new sprite buffer is empty until rebuildSprites, next update)
+    spritesDirty = true;
+    spriteT = 0;
+    if (revived && curS && curS === VC.state) relinkAfterLoss(curS);
+    B.stats.revived = revived;
+  },
+
   reset(S) {
     resetAll(S);
     if (VC.props && VC.props.reset) callSafe(VC.props.reset, VC.props, S);
@@ -14407,6 +14468,9 @@ const B = (VC.bldgfx = {
   update(dt, rdt) {
     const S = VC.state;
     if (!S || !gl || curS !== S) return;
+    // context lost: no GL calls and no model builds (their meshes could not be uploaded); the slot store stays
+    // current through the bus events and is uploaded as a whole after the restore
+    if (glLost()) return;
     nDyn = 0;
     try {
       frameUpdate(S, rdt || 0);
@@ -14460,7 +14524,8 @@ const B = (VC.bldgfx = {
     }
     let m = null;
     try {
-      m = VC.models.get(g.key, 0);
+      // (context lost: no model builds — their meshes could not be uploaded)
+      if (!glLost() || VC.models.cached().has(VC.models.cacheKey(g.key, 0, null))) m = VC.models.get(g.key, 0);
     } catch (e) {
       m = null;
     }
@@ -14495,6 +14560,7 @@ const B = (VC.bldgfx = {
   /** Builds queued models synchronously (up to ms milliseconds, default: all). Returns the remaining queue length. */
   warm(ms) {
     if (curS !== VC.state) return 0;
+    if (glLost()) return pendQ.length; // (no model builds / uploads while the context is lost)
     const t0 = performance.now(), lim = ms == null ? 1e9 : ms;
     processPending(lim, true);
     while (l2Queue.length && performance.now() - t0 < lim) buildL2(l2Queue.shift()); // requested 1/4-res meshes too
@@ -14513,6 +14579,8 @@ const GLOW = {
   transparent(ctx) {
     if (curS && curS === ctx.S) drawSprites(ctx);
   },
+  /** Context restore: the sprite buffers / VAOs are re-created by VC.bldgfx.restore() (layer 'buildings'). */
+  restore() {},
 };
 let ghostLateFrame = -100;
 
@@ -14524,6 +14592,8 @@ function callSafe(fn, self, a, b) {
   }
 }
 const live = () => !!gl && curS && curS === VC.state;
+/** True while the WebGL context is lost (isContextLost also covers the gap before the 'webglcontextlost' event). */
+const glLost = () => !gl || !!VC.gfx.lost || gl.isContextLost();
 
 /* ================================================================== */
 /* Engine state                                                        */
@@ -14800,14 +14870,11 @@ function getMW(m, kind) {
   if (arr[kind]) return arr[kind];
   const idx = MWS.length;
   ensureMwArrays(idx + 1);
-  const l0 = m.vao && m.quads ? { vao: m.vao, quads: m.quads } : null;
-  const l1 = m.lod && m.lod.vao && m.lod.quads ? { vao: m.lod.vao, quads: m.lod.quads } : l0;
-  const w = m.winter;
   const mw = {
     idx, m, kind,
-    lv: [l0, l1, null],
+    lv: [null, null, null], // mesh per LOD tier {vao, quads} (see meshLevels)
     // bare-crown meshes (trees with a hidden winter skeleton), used while bareSeason()
-    lvWinter: w && w.vao ? [{ vao: w.vao, quads: w.quads }, w.lod && w.lod.vao ? { vao: w.lod.vao, quads: w.lod.quads } : null, null] : null,
+    lvWinter: null,
     vox: m.vox || C.VOX,
     cx: m.sx / 2, cz: m.sz / 2, h: m.sy,
     height: m.height || m.sy * (m.vox || C.VOX),
@@ -14819,9 +14886,7 @@ function getMW(m, kind) {
   MWS.push(mw);
   arr[kind] = mw;
   mwKind[idx] = kind;
-  mwHasL2[idx] = 0;
-  mwL2State[idx] = l0 ? 0 : 3;
-  mwSameL1[idx] = l1 === l0 ? 1 : 0;
+  meshLevels(mw);
   // tiny models (bushes, hydrants) are skipped earlier
   const small = mw.height < 0.35 && mw.radius < 0.45;
   for (let k = 0; k < 3; k++) {
@@ -14835,6 +14900,24 @@ function getMW(m, kind) {
   for (let k = 0; k < 3; k++) if (mwSkip[k][idx] > kindSkip[k][kind]) kindSkip[k][kind] = mwSkip[k][idx];
   B.stats.models = MWS.length;
   return mw;
+}
+/**
+ * (Re)reads the mesh handles of wrapper mw from its model (at creation and after a context restore re-uploaded
+ * the model): tier 0 full mesh, tier 1 model.lod (or the full mesh), tier 2 the 1/4-res mesh built here lazily
+ * (dropped: requested again by gather), winter meshes of open-foliage trees.
+ */
+function meshLevels(mw) {
+  const m = mw.m, idx = mw.idx;
+  const l0 = m.vao && m.quads ? { vao: m.vao, quads: m.quads } : null;
+  const l1 = m.lod && m.lod.vao && m.lod.quads ? { vao: m.lod.vao, quads: m.lod.quads } : l0;
+  mw.lv[0] = l0;
+  mw.lv[1] = l1;
+  mw.lv[2] = null;
+  const w = m.winter;
+  mw.lvWinter = w && w.vao ? [{ vao: w.vao, quads: w.quads }, w.lod && w.lod.vao ? { vao: w.lod.vao, quads: w.lod.quads } : null, null] : null;
+  mwHasL2[idx] = 0;
+  mwL2State[idx] = l0 ? 0 : 3;
+  mwSameL1[idx] = l1 === l0 ? 1 : 0;
 }
 /** Overrides skip distances (in units of quality lodDist; Infinity = never skip, 0 = never draw) for a wrapper. */
 function setSkip(mw, cam, shNear, shFar) {
@@ -14880,6 +14963,7 @@ function downsample4(g) {
   return o;
 }
 function buildL2(mi) {
+  if (mwL2State[mi] !== 1) return; // (dropped by a context restore meanwhile, or already built)
   const mw = MWS[mi];
   const g = mw.m.grid;
   if (!g || !VC.voxel.mesh) { mwL2State[mi] = 3; return; }
@@ -15261,7 +15345,7 @@ function pendingIdle() {
   pendIdle = true;
   requestIdleCallback((dl) => {
     pendIdle = false;
-    if (curS !== VC.state) return;
+    if (curS !== VC.state || glLost()) return;
     const left = dl.timeRemaining();
     if (left > 3) processPending(Math.min(12, left - 2), false);
   }, { timeout: 250 });
@@ -15282,6 +15366,7 @@ function prewarm() {
   warmIdle = true;
   requestIdleCallback((dl) => {
     warmIdle = false;
+    if (glLost()) return; // (prewarm resumes after the restore)
     while (warmList.length && dl.timeRemaining() > 4) {
       const [key, v] = warmList.shift();
       try {
@@ -15644,6 +15729,27 @@ function resetAll(S) {
   }
   B.stats.buildings = recs.size;
 }
+/**
+ * After a context restore that gave meshes to models built while the context was lost: buildings dropped for a
+ * mesh-less model get their slot again, parts are re-made (makeParts skipped mesh-less part models) and tiles
+ * whose trees were skipped are rebuilt (without the grow-in pop).
+ */
+function relinkAfterLoss(S) {
+  for (const rec of recs.values()) {
+    if (rec.removed || rec.pending) continue;
+    const pm = rec.mw && !rec.site && rec.mw.m.parts;
+    if (rec.slot > 0 && !(pm && pm.length && (!rec.parts || rec.parts.length < pm.length))) continue;
+    rec.mw = null; // resolveRec: setModel + parts again (no pop: rec.mw null)
+    resolveRec(rec, false);
+  }
+  if (!treeSlot || !treeSig) return;
+  for (let i = 0; i < S.N; i++) {
+    if (!treeSig[i]) continue;
+    const n = Math.min(3, S.trees[i]);
+    for (let k = 0; k < n; k++) if (treeSlot[i * 3 + k] < 0) { treeSig[i] = 0; break; } // (never matches: rebuilt)
+  }
+  rebuildTreesRect(S, 0, 0, S.W - 1, S.H - 1, NO_POP);
+}
 
 /* ================================================================== */
 /* Per-frame                                                           */
@@ -15913,7 +16019,22 @@ function uploadStream(data, n) {
   } else gl.bufferData(gl.ARRAY_BUFFER, streamCap, gl.STREAM_DRAW); // orphan: no stall on in-flight draws
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n);
 }
+/**
+ * Per-program constant uniforms (sampler units, window palette) of program p (in use), set once per linked
+ * WebGLProgram: a context restore relinks the programs, which resets their uniforms.
+ */
+const progSetup = new WeakMap(); // program wrapper -> WebGLProgram its constants were set on
+function setupProg(p) {
+  const pr = p.prog;
+  if (progSetup.get(p) === pr) return;
+  progSetup.set(p, pr);
+  const u = p.u;
+  if (u.uPal) gl.uniform1i(u.uPal, 0);
+  if (u.uInst) gl.uniform1i(u.uInst, 1);
+  if (u.uWinPal) gl.uniform4i(u.uWinPal, VC.P.WIN_OFFICE | 0, VC.P.WIN_SHOP | 0, VC.P.WIN_COOL | 0, 0);
+}
 function bindCommon(p) {
+  setupProg(p);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, VC.voxel.paletteTexture());
   gl.activeTexture(gl.TEXTURE1);
@@ -16168,14 +16289,19 @@ function initGL() {
   for (const p of [...PROGS[0], ...PROGS[1], ...PROGS[2], ...PROGS[3], ghostProg]) {
     if (!p) continue;
     p.use();
-    if (p.u.uPal) gl.uniform1i(p.u.uPal, 0);
-    if (p.u.uInst) gl.uniform1i(p.u.uInst, 1);
-    if (p.u.uWinPal) gl.uniform4i(p.u.uWinPal, VC.P.WIN_OFFICE | 0, VC.P.WIN_SHOP | 0, VC.P.WIN_COOL | 0, 0);
+    setupProg(p);
   }
-  streamBuf = gl.createBuffer();
-  // sprites
   sprProg = G.program('bld_sprites', VS_SPR, FS_SPR);
-  // per-vertex quad corners (divisor 0) + per-instance sprite data (divisor 1)
+  initBuffers();
+}
+/**
+ * Buffers / VAOs of the renderer (init, and after a context restore; the program wrappers stay valid: the core
+ * relinks them on first use). The data texture is (re)created by flushTex.
+ */
+function initBuffers() {
+  const G = VC.gfx;
+  streamBuf = gl.createBuffer();
+  // sprites: per-vertex quad corners (divisor 0) + per-instance sprite data (divisor 1)
   const cornerBuf = G.buffer(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]));
   const mk = (buf) => {
     const vao = gl.createVertexArray();
@@ -17146,9 +17272,15 @@ VC.camera.raycastWorld = raycastWorld;
  * DISASTERS: gfx/fx_disasters.js (VC.fxDis) renders VC.disasters.active every frame.
  * CELEBRATIONS: gfx/fx_celebrate.js (VC.fxCel): fireworks, confetti, space-center rocket launches.
  *
+ * WEBGL CONTEXT LOSS: while the context is lost update() keeps the weather state machine (CPU only) but skips the
+ *   effect models (disasters / celebrations: no model builds). restore() (layer hook) re-uploads the shared model
+ *   meshes (VC.fxgl.restoreModels), re-creates the precipitation / bolt VAOs + buffer, the tornado mesh
+ *   (VC.fxDis.restore) and the precipitation floor texture (full upload on the next draw); programs relink by
+ *   themselves, batches re-create their buffers on their next draw.
+ *
  * API: setWeather(type | 'auto', instant), fireworks(x, z, n), confetti(x, z, n), launchRocket(b?),
  *      isLaunching(b), lightning(x, z), weatherInfo() -> {target, forced, nextInDays, precipKind, sim},
- *      lastBolt, stats
+ *      lastBolt, stats, restore()
  */
 const M = VC.M, C = VC.C;
 /** Vector lengths without Math.hypot (V8's hypot allocates its argument list; these are on per-frame paths). */
@@ -17241,6 +17373,8 @@ const FXL = (VC.fx = {
       rainSplashes(S, rdt);
       fogPuffs(S, rdt);
     }
+    // context lost: effect models are not rebuilt (they may build models, whose meshes could not be uploaded)
+    if (VC.fxgl.lost()) { FXL.stats.ms = Math.round((performance.now() - t0) * 100) / 100; return; }
     FXL.batch.begin();
     FXL.glows.begin();
     if (VC.fxDis) VC.fxDis.update(dt, rdt, S, FXL.batch, FXL.glows);
@@ -17255,6 +17389,13 @@ const FXL = (VC.fx = {
   },
   opaque(ctx) {
     FXL.batch.draw(ctx, false);
+  },
+  /** WebGL context restored: every GL object of this layer is gone (see the header). */
+  restore() {
+    VC.fxgl.restoreModels();
+    initBuffers();
+    RF.tex = null; // (dead handle: never deleted) re-created with the whole floor by roofUpload
+    if (VC.fxDis && VC.fxDis.restore) VC.fxDis.restore();
   },
   transparent(ctx) {
     if (VC.fxDis && VC.fxDis.drawTransparent) VC.fxDis.drawTransparent(ctx);
@@ -17940,13 +18081,18 @@ void main(){
 }`;
 const GLR = {};
 function initGL() {
-  const G = VC.gfx, gl = G.gl;
+  const G = VC.gfx;
   GLR.precip = G.program('fx_precip', PVS, PFS);
   GLR.bolt = G.program('fx_bolt', BVS, BFS);
+  GLR.boltData = new Float32Array(6 * 5 * 90 * 4);
+  initBuffers();
+}
+/** VAOs + bolt vertex buffer (init, and after a context restore: the program wrappers stay valid). */
+function initBuffers() {
+  const gl = VC.gfx.gl;
   GLR.emptyVao = gl.createVertexArray();
   GLR.boltVao = gl.createVertexArray();
   GLR.boltBuf = gl.createBuffer();
-  GLR.boltData = new Float32Array(6 * 5 * 90 * 4);
   gl.bindVertexArray(GLR.boltVao);
   gl.bindBuffer(gl.ARRAY_BUFFER, GLR.boltBuf);
   gl.enableVertexAttribArray(0);
@@ -19252,6 +19398,8 @@ function onMonth() {
  *   monster     'monster' model with its 4 walk-cycle variants, glowing eyes, stomp dust rings,
  *               wading splashes and the blue atomic breath beam
  * Per-entry visual state lives in a Map keyed by entry id and is dropped when the entry ends.
+ * restore(): re-creates the tornado mesh after a WebGL context restore (called by VC.fx.restore; the program
+ * relinks by itself; models are restored by VC.fxgl.restoreModels).
  */
 const M = VC.M, C = VC.C;
 /** Vector lengths without Math.hypot (V8's hypot allocates its argument list; these are on per-frame paths). */
@@ -19297,6 +19445,10 @@ const D = (VC.fxDis = {
   },
   drawTransparent(ctx) {
     drawFunnels(ctx);
+  },
+  /** WebGL context restored: new funnel mesh (VAO + buffers). */
+  restore() {
+    initMesh();
   },
 });
 
@@ -19690,8 +19842,12 @@ void main(){
 }`;
 const GLR = {};
 function initGL() {
-  const G = VC.gfx, gl = G.gl;
-  GLR.prog = G.program('fx_tornado', TVS, TFS);
+  GLR.prog = VC.gfx.program('fx_tornado', TVS, TFS);
+  initMesh();
+}
+/** Funnel grid mesh (init, and after a context restore). */
+function initMesh() {
+  const gl = VC.gfx.gl;
   const v = new Float32Array((NS + 1) * (NR + 1) * 2);
   let o = 0;
   for (let r = 0; r <= NR; r++) for (let s = 0; s <= NS; s++) { v[o++] = s / NS; v[o++] = r / NR; }
@@ -19759,6 +19915,17 @@ function drawFunnels(ctx) {
  *   VC.fxgl.cells            building registry bucketed per 8x8-tile cell (see BUILDING CELLS below)
  *   VC.fxgl.cachedModel(b)   building b's model ONLY if VC.models already built it (never builds), else null
  *   VC.fxgl.warmup()         compiles the lazily created programs (fx_voxel, fx_voxel_sh, fx_glow) now
+ *   VC.fxgl.lost()           true while the WebGL context is lost (update() code must then make no GL calls)
+ *   VC.fxgl.glGen()          GL context generation (from VC.gfx.lostCount / lost): changes at every loss and restore
+ *   VC.fxgl.restoreModels()  after a context restore: re-uploads every cached VC.models mesh IN PLACE (see below)
+ *
+ * WEBGL CONTEXT LOSS / RESTORE: after a restore every GL object of the old context is dead (never deleted:
+ * deleting a dead handle is an INVALID_OPERATION). Batches, the glow VAO and the private model VAOs remember the
+ * glGen() they were created in and are re-created lazily on their next draw; the programs relink by themselves
+ * (render core). restoreModels() (called by every restore() that draws models; once per generation) uses
+ * VC.models.restore() when voxel.js offers it, else re-meshes each cached model from model.grid and uploads it
+ * into the SAME model object (vao / vbo, lod, winter), so every reference held by renderers stays valid; it also
+ * drops the palette texture (re-created on the next VC.voxel.paletteTexture()).
  *
  * INSTANCE TRANSFORM T: world = R * voxelPos + t, with R = T[0..8] (3 columns, includes the voxel
  * size and scale) and t = T[9..11]. Parts (def.parts of VC.models) are composed with partPose().
@@ -19772,6 +19939,77 @@ const M = VC.M;
 /** Vector length without Math.hypot (V8's hypot allocates its argument list; this is on per-frame paths). */
 const hyp = (x, z) => Math.sqrt(x * x + z * z);
 const FX = (VC.fxgl = {});
+
+/* ------------------------------------------------------------------ */
+/* Context loss                                                          */
+/* ------------------------------------------------------------------ */
+/**
+ * GL context generation: 2 * VC.gfx.lostCount, + 1 while lost (0 until the first loss). GL objects of another
+ * generation are dead — including ones created while the context was lost (browsers return invalid objects then).
+ */
+const glGen = (FX.glGen = () => { const G = VC.gfx; return G ? ((G.lostCount | 0) << 1) + (G.lost ? 1 : 0) : 0; });
+/**
+ * True while the WebGL context is lost. isContextLost() also covers the gap before the (asynchronous)
+ * 'webglcontextlost' event sets VC.gfx.lost.
+ */
+FX.lost = function () {
+  const G = VC.gfx;
+  return !G || !G.gl || !!G.lost || G.gl.isContextLost();
+};
+let modelsGen = 0;
+/**
+ * Re-uploads every cached VC.models mesh after a context restore, keeping each model object (and its lod / winter
+ * objects) so renderers' references stay valid. Idempotent per context generation (every layer that draws models
+ * may call it from its restore()). Returns the number of models re-uploaded (-1: done by VC.models.restore()).
+ */
+FX.restoreModels = function () {
+  const gen = glGen();
+  if (modelsGen === gen || FX.lost()) return 0;
+  modelsGen = gen;
+  const Ms = VC.models;
+  if (typeof Ms.restore === 'function') {
+    Ms.restore();
+    return -1;
+  }
+  const V = VC.voxel;
+  if (V) { V._palTex = null; V._palDirty = false; } // palette texture: re-created on the next paletteTexture()
+  let n = 0;
+  const t0 = performance.now();
+  for (const m of Ms.cached().values()) {
+    try {
+      reuploadModel(m);
+      n++;
+    } catch (e) {
+      console.error('[fxgl] model re-upload failed', m && m.key, e);
+    }
+  }
+  FX.restoreStats = { models: n, ms: Math.round(performance.now() - t0) };
+  return n;
+};
+/** Meshes model m again from its grid (exactly as VC.models.get does) and uploads it into the same objects. */
+function reuploadModel(m) {
+  const g = m.grid, V = VC.voxel;
+  if (!g) {
+    // (no voxels kept: cannot be rebuilt; renderers skip meshes without a VAO)
+    m.vao = m.vbo = null;
+    if (m.lod) m.lod.vao = m.lod.vbo = null;
+    return;
+  }
+  const def = VC.models.defs[m.key] || {};
+  Object.assign(m, V.upload(V.mesh(g, 1)));
+  const lodGrid = V.downsample(g, 2, def.lodMinFill || 3);
+  const lod = V.upload(V.mesh(lodGrid, 2));
+  if (m.lod) Object.assign(m.lod, lod);
+  else m.lod = lod;
+  const w = m.winter;
+  if (w) {
+    const open = V.foliageLUT();
+    Object.assign(w, V.upload(V.mesh(g, 1, open)));
+    const wl = V.upload(V.mesh(lodGrid, 2, open));
+    if (w.lod) Object.assign(w.lod, wl);
+    else w.lod = wl;
+  }
+}
 
 /** ModelBatch per-instance flags. */
 FX.F = {
@@ -20000,13 +20238,17 @@ function shadowProgram() {
 /*
  * Private VAOs per model mesh (full / LOD): the mesh VBO on locations 0-1 + the shared quad index buffer.
  * The model's own VAO belongs to the building renderer; never touching it keeps both renderers independent.
+ * Memo entry {vao, vbo, gen}: re-created when the mesh was re-uploaded (context restore) or the context changed.
  */
 const vaoMemo = new WeakMap();
 function privateVao(gl, g) {
-  let v = vaoMemo.get(g);
-  if (v) return v;
+  const gen = glGen();
+  let e = vaoMemo.get(g);
+  if (e && e.vbo === g.vbo && e.gen === gen) return e.vao;
+  // same context but a new mesh buffer: the old VAO is still a live object
+  if (e && e.gen === gen && e.vao) gl.deleteVertexArray(e.vao);
   const ib = VC.gfx.quadIndexBuffer(g.quads); // (unbinds any VAO: call before binding ours)
-  v = gl.createVertexArray();
+  const v = gl.createVertexArray();
   gl.bindVertexArray(v);
   gl.bindBuffer(gl.ARRAY_BUFFER, g.vbo);
   gl.enableVertexAttribArray(0);
@@ -20019,7 +20261,8 @@ function privateVao(gl, g) {
     gl.vertexAttribDivisor(k, 1);
   }
   gl.bindVertexArray(null);
-  vaoMemo.set(g, v);
+  if (e) { e.vao = v; e.vbo = g.vbo; e.gen = gen; }
+  else vaoMemo.set(g, { vao: v, vbo: g.vbo, gen });
   return v;
 }
 
@@ -20046,6 +20289,7 @@ class ModelBatch {
     this.slots = [];
     this.slotMap = new Map();
     this.buf = null;
+    this.bufGen = -1; // glGen() of buf
     this.T = new Float32Array(12); // scratch for parts
     this.stats = { n: 0, cam: 0, sh0: 0, sh1: 0 };
   }
@@ -20181,7 +20425,8 @@ class ModelBatch {
     if (shadow) this.stats[cascade >= 1 ? 'sh1' : 'sh0'] = cnt;
     else this.stats.cam = cnt;
     if (!cnt) return;
-    if (!this.buf) this.buf = gl.createBuffer();
+    const gen = glGen();
+    if (!this.buf || this.bufGen !== gen) { this.buf = gl.createBuffer(); this.bufGen = gen; } // (old one died with its context)
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
     gl.bufferData(gl.ARRAY_BUFFER, this.data, gl.DYNAMIC_DRAW, 0, cnt * 16); // (WebGL2 offset/length: no subarray per draw)
     let P;
@@ -20289,13 +20534,19 @@ void main(){
   float fogK = exp(-length(vWp - uCamPos.xyz) * uFog.w * 0.8);
   fragColor = vec4(vCol.rgb * (vCol.a * a * fogK), 0.0);
 }`;
-let glowProg = null, glowVao = null;
+let glowProg = null, glowVao = null, glowVaoGen = -1;
 function glowProgram() {
-  if (!glowProg) {
-    glowProg = VC.gfx.program('fx_glow', GVS, GFS);
-    glowVao = VC.gfx.gl.createVertexArray();
-  }
+  if (!glowProg) glowProg = VC.gfx.program('fx_glow', GVS, GFS);
   return glowProg;
+}
+/** The shared (attribute-less until bound) glow VAO of the current context. */
+function glowVertexArray(gl) {
+  const gen = glGen();
+  if (!glowVao || glowVaoGen !== gen) {
+    glowVao = gl.createVertexArray();
+    glowVaoGen = gen;
+  }
+  return glowVao;
 }
 
 class GlowBatch {
@@ -20304,6 +20555,7 @@ class GlowBatch {
     this.data = new Float32Array(cap * 12);
     this.n = 0;
     this.buf = null;
+    this.bufGen = -1; // glGen() of buf
   }
   begin() {
     this.n = 0;
@@ -20345,8 +20597,9 @@ class GlowBatch {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);
     gl.depthMask(false);
-    gl.bindVertexArray(glowVao);
-    if (!this.buf) this.buf = gl.createBuffer();
+    gl.bindVertexArray(glowVertexArray(gl));
+    const gen = glGen();
+    if (!this.buf || this.bufGen !== gen) { this.buf = gl.createBuffer(); this.bufGen = gen; } // (old one died with its context)
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
     gl.bufferData(gl.ARRAY_BUFFER, this.data, gl.DYNAMIC_DRAW, 0, this.n * 12);
     for (let k = 0; k < 3; k++) {
@@ -20365,10 +20618,11 @@ FX.glowBatch = (cap = 256) => new GlowBatch(cap);
 /* ------------------------------------------------------------------ */
 /** Compiles the lazily created programs now (the first vehicle / glow / shadow never compiles mid-game). */
 FX.warmup = function () {
-  if (!VC.gfx || !VC.gfx.gl) return false;
+  if (!VC.gfx || !VC.gfx.gl || FX.lost()) return false;
   modelProgram();
   shadowProgram();
   glowProgram();
+  glowVertexArray(VC.gfx.gl);
   return true;
 };
 /**
@@ -23158,9 +23412,12 @@ void main(){
  * Props end at their LOD-1 mesh (no 1/4-res tier) and are culled well before they shrink below a pixel
  * (VC.bldgfx skip table); lamp and signal glows are sprites and stay visible farther out.
  *
+ * WEBGL CONTEXT LOSS: tick() does nothing while the context is lost (queued rects / wires wait); restore() re-creates
+ *   the wire buffers + VAO and re-uploads the wires. Prop instances live in VC.bldgfx.eng, restored by VC.bldgfx.
+ *
  * API (VC.props): init(), reset(S), update(dt, rdt) / tick(dt, rdt) (VC.bldgfx sets props.driven and calls
- *   tick), rebuild(x0, z0, x1, z1) (queue a rect), stats, lampReach (world units the lamp head overhangs the
- *   road from the pole at a lamp spot, ~0.2: the terrain's light pools belong that far toward the road).
+ *   tick), rebuild(x0, z0, x1, z1) (queue a rect), restore(), stats, lampReach (world units the lamp head
+ *   overhangs the road from the pole at a lamp spot, ~0.2: the terrain's light pools belong that far toward the road).
  */
 const M = VC.M, C = VC.C;
 const DX = [1, -1, 0, 0], DZ = [0, 0, 1, -1];
@@ -23214,6 +23471,7 @@ const PR = (VC.props = {
   },
   tick(dt, rdt) {
     if (!inited || !S || S !== VC.state) return;
+    if (VC.gfx.lost || gl.isContextLost()) return; // (no GL calls / model builds: resumes after the restore)
     if (!mw.lamp) resolveModels();
     fresh = false;
     processQueue(3);
@@ -23225,6 +23483,18 @@ const PR = (VC.props = {
   /** Rebuilds the props of an inclusive tile rect (queued; done within the frame budget). */
   rebuild(x0, z0, x1, z1) {
     queue.push([x0, z0, x1, z1]);
+  },
+
+  /**
+   * WebGL context restored (render core layer hook): new wire buffers + VAO, wires re-uploaded on the next tick.
+   * The prop instances themselves are restored with VC.bldgfx (engine set 1); the wire program relinks by itself.
+   */
+  restore() {
+    if (!inited) return;
+    gl = VC.gfx.gl;
+    initWireBuffers();
+    wiresDirty = true;
+    nWires = 0; // (nothing to draw until the re-upload)
   },
 
   shadow(ctx) {
@@ -23641,8 +23911,12 @@ function pylonRecord(x, y, z, yaw, scale) {
 }
 let wireProg = null, wireVao = null, wireBuf = null, wireData = new Float32Array(8 * 256), nWires = 0;
 function initWires() {
+  wireProg = VC.gfx.program('props_wires', WIRE_VS, WIRE_FS);
+  initWireBuffers();
+}
+/** Wire segment buffer, instance buffer and VAO (init, and after a context restore). */
+function initWireBuffers() {
   const G = VC.gfx;
-  wireProg = G.program('props_wires', WIRE_VS, WIRE_FS);
   const seg = new Float32Array((SEG + 1) * 4);
   for (let i = 0; i <= SEG; i++) {
     seg[i * 4] = i / SEG; seg[i * 4 + 1] = -1;
@@ -24967,7 +25241,7 @@ const _hd = [0, 1, 0], _tl = [0, 1, 0];
 /** Fills and uploads the SkyFrame uniform block (allocation free). */
 function upload() {
   const G = VC.gfx, gl = G.gl, env = G.env, st = Sk.st, cam = VC.camera;
-  if (!gl || !env) return;
+  if (!gl || !env || G.lost || gl.isContextLost()) return;
   const sun = env.sun || env.sunDir, moon = env.moon || _hd;
   const h = sun[1];
   // sun disc: warm and dimmer near the horizon, hidden below it
@@ -41126,8 +41400,15 @@ const A = (VC.advisors = {
  * modifiers (VC.econ.addTempMod, source 'desk'), a recurring monthly payment, a demand nudge, a headline
  * (VC.advisors.pushNews) and special effects (fireworks, fixing up abandoned buildings, clearing rubble,
  * cheering residents up, putting out fires). Some choices are gambles (`roll`: with probability p an
- * extra outcome applies). The card waits — the game is not paused; after DECIDE_DAYS unanswered the
- * event resolves with its "ignore" outcome (the choice flagged ignore, else event.ignore, else nothing).
+ * extra outcome applies). The card waits — the game is not paused; once it has been on the desk for
+ * DECIDE_DAYS game days AND DECIDE_SEC seconds of real time while the HUD was showing it (paused /
+ * hidden time does not count, so fast-forwarding at 8 days a second still leaves a minute to read
+ * it), the event resolves with its "ignore" outcome (the choice flagged ignore, else event.ignore,
+ * else nothing).
+ *
+ * MONEY  one-off amounts are booked under ledger category 'desk' ("Mayor's Desk"); recurring ones
+ *   (S.desk.recurring) are billed by VC.econ with the monthly budget as 'deskDeal' ("Mayor's Desk
+ *   commitments") when VC.econ.billsDesk, else booked here on 'month' (category 'desk').
  *
  * CADENCE  never in the first 2 months of a city, during an active disaster, while the tutorial runs or
  *   in the title-screen demo (S.demo). The next event is due 90-150 days after the previous one was
@@ -41136,9 +41417,10 @@ const A = (VC.advisors = {
  *
  * STATE (plain JSON, saved with the game): S.desk = {
  *   next (day), start (day the desk opened), seq,
- *   pending: {seq, id, day, expires, k ($ scale of this event), adv} | null,
+ *   pending: {seq, id, day, expires, k ($ scale of this event), adv, seen (real seconds shown)} | null,
  *   history: [{seq, id, title, icon, choice (-1 = ignored), label, out, day, auto}] (last 20),
- *   seen: {eventId: day}, recurring: [{id, label, amount (+ income / − cost), left (months)}] }
+ *   seen: {eventId: day}, recurring: [{id, label (the choice), title (the event), amount (+ income /
+ *   − cost), left (months)}] }
  * Money amounts in the pool are multiples of k = $1,000 + $0.35 per citizen (2 significant digits), so
  * a decision matters in a village and in a metropolis alike.
  *
@@ -41146,17 +41428,20 @@ const A = (VC.advisors = {
  *   puts an event on the desk now, ignoring the cadence; an explicit id also ignores its conditions),
  *   history(), view(pending) -> {seq, id, icon, title, text, advisor:{key,name,role,icon,color},
  *   choices:[{i, label, chips:[{t, c:'good'|'bad'|'gold'|'risk'|'neu'}], dur ('6 mo'), cost, affordable, ignore}], day,
- *   expires, daysLeft, decideDays}, addTempMod(entry) / removeTempMod(id) (VC.econ's when it has them,
+ *   expires, daysLeft, decideDays, seen, secLeft, decideSec}, timeLeft() -> {days, sec, frac, bySec} | null (what
+ *   still has to pass before the pending decision may expire), addTempMod(entry) / removeTempMod(id) (VC.econ's when it has them,
  *   else a small fallback that keeps S.tempMods in the contract format and folds them into S.mods).
  * BUS  'deskEvent' {event: view} when a decision arrives; 'deskResolved' {event, choice, label, outcome,
  *   auto} when it is answered or expires. The HUD (ui/hud_desk.js) shows the card, plays 'advisor' on
  *   arrival and toasts expiries; this module emits no toast / sfx itself.
  *
- * LIFECYCLE  init() (bus listeners, once), reset(S) (creates / migrates S.desk), update() (no per-frame
- *   work: everything runs on bus 'day' / 'month'). Joins VC.MODULE_ORDER at boot if main.js lacks it.
+ * LIFECYCLE  init() (bus listeners, once), reset(S) (creates / migrates S.desk), update(dt, rdt) (counts
+ *   the real time a pending decision is on screen; the rest runs on bus 'day' / 'month'). Joins
+ *   VC.MODULE_ORDER at boot if main.js lacks it.
  */
 const M = VC.M;
-const DECIDE_DAYS = 60; // unanswered decisions resolve with their ignore outcome after this
+const DECIDE_DAYS = 60; // unanswered decisions resolve with their ignore outcome after this …
+const DECIDE_SEC = 60; // … and after at least this much real time on screen (game running, HUD visible)
 const FIRST_DAYS = 60; // no decisions during a city's first two months
 const GAP_MIN = 90, GAP_MAX = 150; // days between decisions
 const RETRY_DAYS = 12; // nothing eligible / blocked: look again after this
@@ -41536,7 +41821,7 @@ const EVENTS = [
     when: (c) => c.pop >= 300,
     choices: [
       { label: '🎆 Party for everyone!', fx: { money: -0.5, special: 'fireworks', n: 20, mods: { happiness: 0.03 }, days: 30 }, out: 'The whole city sings. You eat the highway interchange. Best birthday ever.' },
-      { label: '🍰 Just cake in the office', fx: { special: 'cheer' }, out: 'A quiet celebration. The cake is delicious. Somebody ate the park, which feels symbolic.' },
+      { label: '🍰 Just cake in the office', fx: { special: 'cheer', mods: { happiness: 0.01 }, days: 30 }, out: 'A quiet celebration. The cake is delicious. Somebody ate the park, which feels symbolic.' },
     ],
     ignore: { fx: {}, out: 'You were too busy to notice. The staff ate the cake. All of it. Even the river.' },
   },
@@ -41686,7 +41971,7 @@ function chipsFor(fx, k, roll) {
   }
   if (fx.demand) for (const z in fx.demand) out.push({ t: `${{ R: '🏠', C: '🏬', I: '🏭' }[z] || ''} ${{ R: 'Housing', C: 'Shop', I: 'Industry' }[z] || z} ${fx.demand[z] > 0 ? 'boom now' : 'slump now'}`, c: fx.demand[z] > 0 ? 'good' : 'bad' });
   if (fx.special === 'fireworks') out.push({ t: '🎆 Fireworks', c: 'good' });
-  if (fx.special === 'cheer') out.push({ t: '🥳 Happy residents', c: 'good' });
+  if (fx.special === 'cheer' && !(fx.mods && fx.mods.happiness)) out.push({ t: '🥳 Happy residents', c: 'good' });
   if (fx.special === 'extinguish') out.push({ t: '🧯 Puts out fires', c: 'good' });
   if (fx.note) out.push({ t: fx.note, c: 'neu' });
   if (roll && roll.note) out.push({ t: roll.note, c: 'risk' });
@@ -41770,9 +42055,12 @@ const SPECIAL = {
     for (const b of S.buildings.values()) if (b.key === 'rubble') list.push(b);
     for (const b of list) VC.world.removeBuilding(b, VC.REMOVE ? VC.REMOVE.CLEARED : 'cleared');
   },
-  /** A short happiness boost for every home (the sim eases it back over the following weeks). */
+  /**
+   * An instant lift for every home. On its own the sim eases it away within days, so the event pairs
+   * it with a happiness modifier (fx.mods, a temp mod) that keeps residents cheerful for weeks.
+   */
   cheer(S) {
-    for (const b of S.buildings.values()) if (b.key === 'grow' && !b.abandoned) b.happy = Math.min(1, (b.happy || 0.5) + 0.12);
+    for (const b of S.buildings.values()) if (b.key === 'grow' && !b.abandoned) b.happy = Math.min(1, (b.happy || 0.5) + 0.06);
   },
   extinguish(S) {
     if (!VC.sim || !VC.sim.extinguish) return;
@@ -41800,10 +42088,19 @@ function ensure(S) {
     const p = D.pending;
     if (!isFinite(p.expires)) p.expires = S.time.day + DECIDE_DAYS;
     if (!(p.k > 0)) p.k = scaleK(S);
+    if (!(p.seen >= 0)) p.seen = 0;
   }
+  for (const r of D.recurring) if (r && !r.title) r.title = r.label;
   return D;
 }
 const fill = (t, S) => String(t || '').replace(/\{city\}/g, (S && S.name) || 'the city');
+/** True while the pending decision counts as on screen (HUD showing, not in photo mode / menus). */
+function onScreen() {
+  const H = VC.hud;
+  if (!H) return true; // no HUD at all (tests / embeds): real time always counts
+  if (VC.menu && VC.menu.active) return false;
+  return typeof H.isVisible === 'function' ? !!H.isVisible() : !!H.visible;
+}
 /** Display object for a pending event (what the HUD renders). */
 function view(p) {
   const S = S_();
@@ -41824,6 +42121,7 @@ function view(p) {
     seq: p.seq, id: e.id, icon: e.icon, title: e.title, text: fill(e.text, S),
     advisor: { key: p.adv || e.adv, name: A.name, role: A.role, icon: A.icon, color: A.color },
     choices, day: p.day, expires: p.expires, daysLeft: Math.max(0, p.expires - S.time.day), decideDays: DECIDE_DAYS,
+    seen: p.seen || 0, secLeft: Math.max(0, DECIDE_SEC - (p.seen || 0)), decideSec: DECIDE_SEC,
   };
 }
 function pickEvent(S, c, forceId) {
@@ -41846,13 +42144,13 @@ function pickEvent(S, c, forceId) {
 /** Puts an event on the desk. Returns its view. */
 function open(S, e) {
   const D = S.desk, day = S.time.day;
-  D.pending = { seq: ++D.seq, id: e.id, day, expires: day + DECIDE_DAYS, k: scaleK(S), adv: e.adv };
+  D.pending = { seq: ++D.seq, id: e.id, day, expires: day + DECIDE_DAYS, k: scaleK(S), adv: e.adv, seen: 0 };
   D.seen[e.id] = day;
   const v = view(D.pending);
   VC.bus.emit('deskEvent', { event: v });
   return v;
 }
-function applyFx(S, fx, p, e, tag, force) {
+function applyFx(S, fx, p, e, tag, force, label) {
   if (!fx) return;
   const k = p.k, day = S.time.day;
   if (fx.money) {
@@ -41861,7 +42159,7 @@ function applyFx(S, fx, p, e, tag, force) {
     else VC.money.spend(-v, 'desk', force);
   }
   if (fx.monthly && fx.monthly.months > 0) {
-    S.desk.recurring.push({ id: 'desk:' + p.seq + tag, label: e.title, amount: nice(fx.monthly.k * k), left: fx.monthly.months | 0 });
+    S.desk.recurring.push({ id: 'desk:' + p.seq + tag, label: label || e.title, title: e.title, amount: nice(fx.monthly.k * k), left: fx.monthly.months | 0 });
   }
   if (fx.mods) addTempMod({ id: 'desk:' + p.seq + tag, source: 'desk', label: e.title, mods: Object.assign({}, fx.mods), until: day + (fx.days || 90) });
   if (fx.demand && S.demand) for (const z in fx.demand) if (z in S.demand) S.demand[z] = M.clamp(S.demand[z] + fx.demand[z], -1, 1);
@@ -41896,9 +42194,9 @@ function resolve(S, i, auto) {
     out = ig.out || 'The moment passed. Nothing changed.';
     label = 'No decision';
   }
-  applyFx(S, fx, p, e, ':' + i, !!auto);
+  applyFx(S, fx, p, e, ':' + i, !!auto, label);
   if (ch && ch.roll && Math.random() < ch.roll.p) {
-    applyFx(S, ch.roll.fx, p, e, ':' + i + 'r', true);
+    applyFx(S, ch.roll.fx, p, e, ':' + i + 'r', true, label);
     out = ch.roll.out || out;
   }
   out = fill(out, S);
@@ -41917,7 +42215,8 @@ function onDay() {
   const D = S.desk, day = S.time.day;
   if (!econTM() && Array.isArray(S.tempMods) && S.tempMods.length) refold(S);
   if (D.pending) {
-    if (day >= D.pending.expires) resolve(S, -1, true);
+    // both clocks must run out: game days AND real seconds on screen (see header)
+    if (day >= D.pending.expires && (D.pending.seen || 0) >= DECIDE_SEC) resolve(S, -1, true);
     return;
   }
   if (day < D.next) return;
@@ -41930,6 +42229,7 @@ function onDay() {
 function onMonth() {
   const S = S_();
   if (!live(S)) return;
+  if (VC.econ && VC.econ.billsDesk) return; // the monthly budget books + counts them down
   const R = S.desk.recurring;
   if (!R.length) return;
   for (const r of R) {
@@ -41943,6 +42243,7 @@ function onMonth() {
 const Desk = (VC.desk = {
   EVENTS,
   DECIDE_DAYS,
+  DECIDE_SEC,
   init() {
     if (inited) return;
     inited = true;
@@ -41956,7 +42257,29 @@ const Desk = (VC.desk = {
     ensure(S);
     if (!econTM() && Array.isArray(S.tempMods) && S.tempMods.length) refold(S);
   },
-  update() {},
+  update(dt, rdt) {
+    // real time the pending decision has been on screen while the game runs (dt is 0 when paused)
+    const S = S_();
+    if (!(dt > 0) || !live(S) || !S.desk.pending) return;
+    const p = S.desk.pending;
+    if ((p.seen || 0) < DECIDE_SEC && onScreen()) p.seen = Math.min(DECIDE_SEC, (p.seen || 0) + Math.min(0.25, rdt || dt));
+  },
+  /**
+   * What still has to pass before the pending decision may settle itself: {days (game days), sec (real
+   * seconds on screen), frac 0..1 (the larger of the two remaining shares; drives the countdown bar),
+   * bySec (true when the real-time clock is the one holding it open)} or null.
+   */
+  timeLeft() {
+    const S = S_();
+    if (!live(S) || !S.desk.pending) return null;
+    const p = S.desk.pending;
+    const days = Math.max(0, p.expires - S.time.day), sec = Math.max(0, DECIDE_SEC - (p.seen || 0));
+    const fd = days / DECIDE_DAYS, fs = sec / DECIDE_SEC;
+    // which clock ends later at the current speed (days per real second)?
+    const sp = (VC.C.SPEEDS && VC.C.SPEEDS[S.time.speed]) || 1;
+    const bySec = sec > 0 && (days <= 0 || sec > days / sp);
+    return { days, sec, frac: Math.min(1, bySec ? fs : fd), bySec };
+  },
   /** The decision waiting on the desk (display object) or null. */
   pending() {
     const S = S_();
@@ -43083,11 +43406,21 @@ function finish(e) {
  *   3. roll S.ledger.month -> S.ledger.last, set S.stats.income/expenses/net (operating cash flow),
  *      push S.history samples (capped), bankruptcy + low-funding (strike) bookkeeping.
  *
- * DAY-WEIGHTED BILLING (anti-exploit): every sim 'day' the current tax rates, department funding
- * levels and active policies are accumulated in S.econ.acc {days, tax, fund, pol}. The month bills
- * the AVERAGE tax rate and funding, and each policy (and a policy-gated venue's income) pro rata to
- * the days it was active — so raising taxes only on the last day, or cutting funding just before
- * the tick, gains nothing. forecast() shows the current settings (a full month at these rates).
+ * DAY-WEIGHTED BILLING (anti-exploit): every sim 'day' the current tax rates, tax modifiers
+ * (S.mods.taxR/C/I from policies and temporary modifiers, as the multiplier 1 + mod), department
+ * funding levels and active policies are accumulated in S.econ.acc {days, tax, taxMul, fund, pol}.
+ * The month bills the AVERAGE tax rate, tax multiplier and funding, and each policy (and a
+ * policy-gated venue's income) pro rata to the days it was active — so raising taxes (or dropping a
+ * tax break) only on the last day, or cutting funding just before the tick, gains nothing, and a
+ * 30-day tax holiday discounts exactly 30 days of taxes whenever it starts. forecast() shows the
+ * current settings (a full month at these rates).
+ *
+ * MAYOR'S DESK COMMITMENTS: recurring payments agreed on the Mayor's Desk (S.desk.recurring
+ * [{id, label, amount (+ income / − cost), left (months)}], sim/desk.js) are part of the operating
+ * budget: compute() lists them as income.deskDeal / expenses.deskDeal (forecast, budget window,
+ * top-bar /mo), monthly() books them (ledger category 'deskDeal') and counts down `left`
+ * (VC.econ.billsDesk tells the desk module not to book them itself). deskCommitments() -> the
+ * active list for the UI.
  *
  * WAGES: service departments (police, fire, health, education, transit, parks, waste) pay city
  * wages that rise with population (wageMul: 1 at 4k residents, ~1.8 at 25k, ~2.3 at 100k), while
@@ -43119,7 +43452,8 @@ function finish(e) {
  *
  * Persistent bookkeeping is kept in S.econ (plain JSON, saved with the state).
  * Extra API: upkeepOf(key|building) (actual $/month of one building), wageMul(), taxBilled(),
- * policyEffects(key, level?) -> {modKey: value at that level}, policyCost(key, level?).
+ * policyEffects(key, level?) -> {modKey: value at that level}, policyCost(key, level?),
+ * deskCommitments(). forecast() also carries deskDeals [{id, label, amount, left}].
  */
 const M = VC.M, C = VC.C;
 
@@ -43161,9 +43495,9 @@ const STRIKE_MUL = 0.7; // effectiveness multiplier while on strike
 const TEMP_MAX = 32; // cap on simultaneous temporary modifiers (oldest dropped)
 
 /** Ledger categories that make up the operating budget (shown as monthly income / expenses). */
-const OPER_IN = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income', 'grant'];
+const OPER_IN = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income', 'grant', 'deskDeal'];
 const OPER_OUT_PREFIX = 'upkeep:';
-const OPER_OUT = ['roadUpkeep', 'policy', 'loanPayment'];
+const OPER_OUT = ['roadUpkeep', 'policy', 'loanPayment', 'deskDeal'];
 /** Display names for ledger categories (budget window, charts). */
 const CATEGORIES = {
   'tax:R': { name: 'Residential taxes', icon: '🏠' },
@@ -43174,6 +43508,9 @@ const CATEGORIES = {
   refund: { name: 'Undo refunds', icon: '↩️' },
   income: { name: 'Venues (casino, stadium)', icon: '🎟️' },
   reward: { name: 'Milestone rewards', icon: '🏆' },
+  goal: { name: 'Goal rewards', icon: '🎯' },
+  desk: { name: 'Mayor’s Desk', icon: '📨' },
+  deskDeal: { name: 'Mayor’s Desk commitments', icon: '📨' },
   loan: { name: 'Loans received', icon: '🏦' },
   roadUpkeep: { name: 'Road maintenance', icon: '🛣️' },
   policy: { name: 'Policies', icon: '📜' },
@@ -43349,7 +43686,17 @@ function tourismPoints(S, a) {
 function newAcc() {
   const fund = {};
   for (const d of VC.DEPARTMENTS) fund[d.key] = 0;
-  return { days: 0, tax: { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] }, fund, pol: {} };
+  return { days: 0, tax: { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] }, taxMul: { R: 0, C: 0, I: 0 }, fund, pol: {} };
+}
+/** Tax multiplier of a zone from the tax modifiers (policies, desk / goal temp modifiers): 1 + mod, ≥ 0. */
+function taxMulNow(S, z) {
+  return Math.max(0, 1 + ((S.mods && S.mods['tax' + z]) || 0));
+}
+/** Active Mayor's Desk commitments (recurring payments with months left). */
+function deskDeals(S) {
+  const R = S.desk && Array.isArray(S.desk.recurring) ? S.desk.recurring : null;
+  if (!R) return [];
+  return R.filter((r) => r && r.left > 0 && isFinite(+r.amount) && +r.amount !== 0);
 }
 /** Adds today's tax rates, funding levels and active policies (bus 'day'). */
 function accumulate() {
@@ -43357,10 +43704,16 @@ function accumulate() {
   if (!S || !S.tax || !S.budget) return;
   const e = ensureEcon(S);
   const a = e.acc && e.acc.tax && e.acc.fund && e.acc.pol ? e.acc : (e.acc = newAcc());
+  if (!a.taxMul) {
+    // month in progress from an older save: assume today's modifiers for the days already counted
+    a.taxMul = {};
+    for (const z of ZONES) a.taxMul[z] = taxMulNow(S, z) * a.days;
+  }
   a.days++;
   for (const z of ZONES) {
     const t = S.tax[z], at = a.tax[z] || (a.tax[z] = [0, 0, 0]);
     if (t) for (let w = 0; w < 3; w++) at[w] += +t[w] || 0;
+    a.taxMul[z] = (a.taxMul[z] || 0) + taxMulNow(S, z);
   }
   for (const d of VC.DEPARTMENTS) a.fund[d.key] = (a.fund[d.key] || 0) + funding(d.key);
   // level-days: a month at 60 % bills 60 % of the policy's cost
@@ -43398,7 +43751,9 @@ function compute(S, force, billing) {
   const taxRates = { R: [0, 0, 0], C: [0, 0, 0], I: [0, 0, 0] };
   for (const z of ZONES) {
     const base = a.base[z];
-    const k = TAX_K[z] * Math.max(0, 1 + (mods['tax' + z] || 0));
+    // tax modifiers: day-weighted average when billing (older saves without taxMul: today's value)
+    const mul = acc && acc.taxMul && acc.taxMul[z] != null ? acc.taxMul[z] / acc.days : Math.max(0, 1 + (mods['tax' + z] || 0));
+    const k = TAX_K[z] * mul;
     let sum = 0;
     for (let w = 0; w < 3; w++) {
       const rate = acc && acc.tax[z] ? acc.tax[z][w] / acc.days : S.tax[z][w];
@@ -43423,6 +43778,16 @@ function compute(S, force, billing) {
     special += v;
   }
   income.income = Math.round(special);
+  // Mayor's Desk commitments (a lottery pays, a union raise costs) — booked monthly like the rest
+  let dIn = 0, dOut = 0;
+  const deals = [];
+  for (const r of deskDeals(S)) {
+    const v = Math.round(+r.amount);
+    if (v > 0) dIn += v;
+    else dOut -= v;
+    deals.push({ id: r.id, label: r.label || 'Mayor’s Desk deal', amount: v, left: r.left | 0 });
+  }
+  if (dIn) income.deskDeal = dIn;
 
   const dept = {};
   for (const d of VC.DEPARTMENTS) {
@@ -43451,13 +43816,14 @@ function compute(S, force, billing) {
   let lp = 0;
   for (const l of S.loans) lp += loanDue(l).pay;
   expenses.loanPayment = Math.round(lp);
+  if (dOut) expenses.deskDeal = dOut;
 
   let ti = 0, te = 0;
   for (const k in income) ti += income[k];
   for (const k in expenses) te += expenses[k];
   return {
     income, expenses, totalIncome: ti, totalExpenses: te, net: ti - te,
-    taxDetail, taxRates, dept, policies, venues,
+    taxDetail, taxRates, dept, policies, venues, deskDeals: deals,
     taxBase: { R: a.base.R.slice(), C: a.base.C.slice(), I: a.base.I.slice() },
     roadTiles: a.roads.slice(),
     tourismPoints: Math.round(tourismPoints(S, a)),
@@ -43566,6 +43932,11 @@ function monthly() {
     if (l.months <= 0 || l.remaining < 0.5) done.push(l);
   }
   book(S, 'loanPayment', -paid);
+  // Mayor's Desk commitments were booked with the income / expenses above: count them down
+  if (S.desk && Array.isArray(S.desk.recurring) && S.desk.recurring.length) {
+    for (const r of S.desk.recurring) if (r && r.left > 0) r.left--;
+    S.desk.recurring = S.desk.recurring.filter((r) => r && r.left > 0);
+  }
   if (done.length) {
     S.loans = S.loans.filter((l) => done.indexOf(l) < 0);
     if (!S.demo) {
@@ -43582,8 +43953,11 @@ function monthly() {
   S.ledger.last = L;
   S.ledger.month = {};
   let inc = 0, exp = 0;
-  for (const k of OPER_IN) inc += L[k] > 0 ? L[k] : 0;
-  for (const k in L) if ((k.startsWith(OPER_OUT_PREFIX) || OPER_OUT.indexOf(k) >= 0) && L[k] < 0) exp -= L[k];
+  for (const k of OPER_IN) if (k !== 'deskDeal') inc += L[k] > 0 ? L[k] : 0;
+  for (const k in L) if (k !== 'deskDeal' && (k.startsWith(OPER_OUT_PREFIX) || OPER_OUT.indexOf(k) >= 0) && L[k] < 0) exp -= L[k];
+  // desk commitments: the ledger nets a lottery against a raise, the stats keep both sides
+  inc += f.income.deskDeal || 0;
+  exp += f.expenses.deskDeal || 0;
   S.stats.income = inc;
   S.stats.expenses = exp;
   S.stats.net = inc - exp;
@@ -43706,6 +44080,7 @@ VC.econ = {
   WEALTH_NAMES: ['Low', 'Mid', 'High'],
   STRIKE_FUNDING, STRIKE_MONTHS, STRIKE_MUL,
   WAGE_DEPTS, // departments that pay city wages (wageMul)
+  billsDesk: true, // monthly() books S.desk.recurring (ledger 'deskDeal'); sim/desk.js leaves them alone
 
   init() {
     VC.bus.on('month', () => {
@@ -44059,6 +44434,11 @@ VC.econ = {
     if (n >= 0) return Infinity;
     return Math.max(0, S.money / -n);
   },
+  /** Active Mayor's Desk commitments: [{id, label, amount ($/month, + income / − cost), left (months)}]. */
+  deskCommitments() {
+    const S = S_();
+    return S ? deskDeals(S).map((r) => ({ id: r.id, label: r.label || 'Mayor’s Desk deal', amount: Math.round(+r.amount), left: r.left | 0 })) : [];
+  },
   /** Display name/icon for a ledger category. */
   category(cat) {
     return CATEGORIES[cat] || { name: cat, icon: '•' };
@@ -44104,15 +44484,26 @@ VC.econ = {
  * FLOW  generate (one goal at a time, a few game days apart) -> live progress (evaluated at most twice a
  *   second of real time, and only when a day passed or the city changed) -> complete (g.done, bus
  *   'goalDone' {goal}; the HUD celebrates: toast + confetti + sfx) -> claim (reward granted, bus
- *   'goalClaimed' {goal}; auto-claimed silently after AUTO_CLAIM_DAYS) -> a new goal after NEXT_DAYS.
- *   Nothing happens in the title-screen demo (S.demo) or while the tutorial runs (VC.hud.tutorialStep()).
+ *   'goalClaimed' {goal}; auto-claimed silently once it has waited AUTO_CLAIM_DAYS game days AND the
+ *   goals card has shown it for AUTO_CLAIM_SEC real seconds — g.shown, counted by ui/hud_goals.js — so a
+ *   fast-forwarded city still gets to see the gold Claim button) -> a new goal after NEXT_DAYS.
+ *   An open goal that has not made progress for STALE_DAYS rotates out (swapped for a fresh one, bus
+ *   'goalRotated' {goal, next}). Nothing happens in the title-screen demo (S.demo) or while the tutorial
+ *   runs (VC.hud.tutorialStep()).
+ *
+ * POPULATION goals aim at round numbers BETWEEN the milestones (POP_STEPS), never at a milestone itself:
+ *   reaching a milestone is already celebrated by the advisors' banner. Problem goals (power, water,
+ *   abandoned buildings) keep their title's count live. Cash rewards scale with the city (cash()) with a
+ *   floor, so the first goals are worth a wind turbine or a few blocks of road. Ledger category 'goal'.
  *
  * STATE (plain JSON, saved with the game): S.goals = {
  *   active: [{id, kind, cat, title, desc, icon, target, base, cur, progress 0..1, text, unit,
  *             reward: {money?, mods?, days?, label?, text (short), long}, focus: {panel?|group?|tool?|overlay?|locate?|x,z},
- *             day, done?, doneDay?, meta?}],
+ *             day, done?, doneDay?, shown? (real s the completed goal was on screen), best?, lastProg?
+ *             (best progress so far and the day it was reached), meta?}],
  *   done: [ids] (capped), log: [{id, kind, title, icon, day}] (last 30), seq, next (day the next goal may
- *   appear), cool: {kind: day} (per-kind cooldowns), count (goals completed), v }
+ *   appear), cool: {kind: day} (per-kind cooldowns), count (goals completed), rotDay (last stale-goal
+ *   rotation), v }
  *
  * API  list() -> active goals (live objects, read-only for callers), claim(id) -> bool, refresh() (debug:
  *   evaluate + fill every free slot now), swap(id) (replace a goal; its kind cools down), focusOf(id) ->
@@ -44130,7 +44521,13 @@ const EVAL_SEC = 0.5; // real seconds between progress evaluations
 const NEXT_DAYS = 4; // game days between a claim / swap and the next goal
 const FILL_DAYS = 1; // game days between goals while the card is filling up
 const FIRST_DAYS = 3; // a new city gets its first goal after this many days
-const AUTO_CLAIM_DAYS = 30; // unclaimed completed goals are claimed automatically after this
+const AUTO_CLAIM_DAYS = 30; // unclaimed completed goals are claimed automatically after this ...
+const AUTO_CLAIM_SEC = 15; // ... once the card has also shown them this long (real seconds, see hud_goals.js)
+const STALE_DAYS = 300; // an open goal without any progress for this long rotates out …
+const ROTATE_GAP = 30; // … one at a time, at least this many days apart
+const CASH_FLOOR = 2500; // cash rewards never go below this x the goal's multiplier (starter goals: $2,000)
+/** Population goal targets: round numbers between the milestones (never a milestone's own number). */
+const POP_STEPS = [100, 150, 400, 600, 800, 1500, 2000, 2500, 4000, 5000, 7500, 12500, 15000, 20000, 30000, 35000, 40000, 60000, 75000, 125000, 150000, 250000, 300000, 500000, 750000, 1000000];
 const DONE_CAP = 100, LOG_CAP = 30;
 const ONCE = 1e9; // cooldown for one-time goals
 
@@ -44259,14 +44656,24 @@ function cleanShare() {
   cx._clean = tot > 0 ? clean / tot : 0;
   return cx._clean;
 }
-/** Cash reward scaled to the city size (x mul), two significant digits. */
+/** Cash reward scaled to the city size (x mul), with a floor for young towns; two significant digits. */
 function cash(mul) {
-  return nice(M.clamp(600 + Math.max(cx.pop, cx.peak * 0.8) * 0.3, 750, 40000) * (mul || 1));
+  mul = mul || 1;
+  return nice(Math.max(M.clamp(600 + Math.max(cx.pop, cx.peak * 0.8) * 0.3, 750, 40000), CASH_FLOOR) * mul);
 }
 function nextMilestone() {
   const L = VC.MILESTONES || [];
   for (let i = 0; i < L.length; i++) if (L[i].pop > cx.peak) return L[i];
   return null;
+}
+/** Next population target: the first POP_STEPS entry comfortably above today's peak (never a milestone). */
+function popTarget(c) {
+  const base = Math.max(c.pop, c.peak);
+  const isMs = (v) => (VC.MILESTONES || []).some((m) => m.pop === v);
+  for (const v of POP_STEPS) if (v >= base * 1.15 && v - base >= 50 && !isMs(v)) return v;
+  let t = niceUp(Math.max(1000, base * 1.4));
+  while (isMs(t)) t = niceUp(t * 1.1);
+  return t;
 }
 
 /* ------------------------------------------------------------------ */
@@ -44283,14 +44690,14 @@ const KINDS = {};
 KINDS.first_roads = {
   cat: 'fix', cool: ONCE,
   score: (c) => (roads() < 10 ? 9 : 0),
-  make: (c) => ({ title: 'Lay down your first roads', desc: 'Every lot needs a street within 3 tiles. Open Roads and drag across the land.', icon: '🛣️', target: 30, base: 0, unit: 'num', focus: { group: 'roads', tool: 'road_street' }, reward: { money: cash(0.6) } }),
+  make: (c) => ({ title: 'Lay down your first roads', desc: 'Every lot needs a street within 3 tiles. Open Roads and drag across the land.', icon: '🛣️', target: 30, base: 0, unit: 'num', focus: { group: 'roads', tool: 'road_street' }, reward: { money: cash(0.8) } }),
   cur: () => roads(),
   prog: (c, g, v) => v / g.target,
 };
 KINDS.first_zones = {
   cat: 'fix', cool: ONCE,
   score: (c) => (roads() >= 10 && zones() < 30 ? 8.5 : 0),
-  make: (c) => ({ title: 'Zone land for homes and jobs', desc: 'Paint residential, commercial and industrial zones along your roads — buildings grow there by themselves.', icon: '🏘️', target: 60, base: 0, unit: 'num', focus: { group: 'zones' }, reward: { money: cash(0.6) } }),
+  make: (c) => ({ title: 'Zone land for homes and jobs', desc: 'Paint residential, commercial and industrial zones along your roads — buildings grow there by themselves.', icon: '🏘️', target: 60, base: 0, unit: 'num', focus: { group: 'zones' }, reward: { money: cash(0.8) } }),
   cur: () => zones(),
   prog: (c, g, v) => v / g.target,
 };
@@ -44312,9 +44719,12 @@ KINDS.pop = {
   cat: 'grow', cool: 0,
   score: (c) => (roads() >= 10 ? 3 : 0),
   make(c) {
+    // a round number between the milestones: the milestone itself has its own banner (no double party)
+    const target = popTarget(c);
     const m = nextMilestone();
-    const target = m ? m.pop : niceUp(Math.max(1000, c.peak * 1.4));
-    const why = m ? `Become a ${m.name}${m.reward ? ' and collect a ' + money(m.reward) + ' state grant' : ''}.` : 'The sky is the limit!';
+    let why = 'The sky is the limit!';
+    if (m && m.pop < target) why = `On the way you become ${/^[AEIOU]/.test(m.name) ? 'an' : 'a'} ${m.name}${m.reward ? ' (+' + money(m.reward) + ' state grant)' : ''}.`;
+    else if (m) why = `Next up: ${m.name} at ${num(m.pop)} citizens${m.reward ? ' (+' + money(m.reward) + ' state grant)' : ''}.`;
     return { title: `Grow to ${num(target)} citizens`, desc: why + ' Zone homes with jobs and shops nearby.', icon: '👥', target, base: 0, unit: 'num', focus: { panel: 'population' }, reward: { money: cash(1) } };
   },
   cur: (c) => c.pop,
@@ -44381,20 +44791,29 @@ KINDS.fix_power = {
   make(c) {
     const n = iss().unpowered || 0;
     const short = iss().powerShortage;
-    return { title: `Restore power to ${num(n)} buildings`, desc: short ? 'Demand exceeds supply — build another power plant.' : 'Some buildings are not connected — link them to the grid with roads or power lines.', icon: '🔌', target: 0, base: n, unit: 'left', focus: { overlay: 'power', locate: 'unpowered', group: 'power' }, reward: { money: cash(0.8) } };
+    return { title: powerTitle(n), desc: short ? 'Demand exceeds supply — build another power plant.' : 'Some buildings are not connected — link them to the grid with roads or power lines.', icon: '🔌', target: 0, base: n, unit: 'left', focus: { overlay: 'power', locate: 'unpowered', group: 'power' }, reward: { money: cash(0.8) } };
   },
   cur: () => iss().unpowered || 0,
   prog: (c, g, v) => 1 - v / Math.max(1, g.base),
+  title: (g, v) => powerTitle(v), // live count
+  doneTitle: () => 'Restore power to every building',
+  text: (g, v) => `${num(Math.max(0, g.base - v))} / ${num(g.base)} fixed`,
 };
+function powerTitle(n) { return `Restore power to ${num(n)} building${n === 1 ? '' : 's'}`; }
+function waterTitle(n) { return `Bring water to ${num(n)} building${n === 1 ? '' : 's'}`; }
+function abandTitle(n) { return `Revive ${num(n)} abandoned building${n === 1 ? '' : 's'}`; }
 KINDS.fix_water = {
   cat: 'fix', cool: 60,
   score: (c) => (counts().water > 0 && (iss().unwatered || 0) >= 5 ? 7 : 0),
   make(c) {
     const n = iss().unwatered || 0;
-    return { title: `Bring water to ${num(n)} buildings`, desc: iss().waterShortage ? 'The pumps can not keep up — add pumps or towers (and make sure they have power).' : 'Some buildings are cut off — connect them with roads to a pump or tower.', icon: '🚰', target: 0, base: n, unit: 'left', focus: { overlay: 'water', locate: 'unwatered', group: 'water' }, reward: { money: cash(0.8) } };
+    return { title: waterTitle(n), desc: iss().waterShortage ? 'The pumps can not keep up — add pumps or towers (and make sure they have power).' : 'Some buildings are cut off — connect them with roads to a pump or tower.', icon: '🚰', target: 0, base: n, unit: 'left', focus: { overlay: 'water', locate: 'unwatered', group: 'water' }, reward: { money: cash(0.8) } };
   },
   cur: () => iss().unwatered || 0,
   prog: (c, g, v) => 1 - v / Math.max(1, g.base),
+  title: (g, v) => waterTitle(v), // live count
+  doneTitle: () => 'Bring water to every building',
+  text: (g, v) => `${num(Math.max(0, g.base - v))} / ${num(g.base)} fixed`,
 };
 KINDS.fix_access = {
   cat: 'fix', cool: 90,
@@ -44412,11 +44831,13 @@ KINDS.fix_abandoned = {
   score: (c) => ((c.st.abandoned || 0) >= 4 ? 6 : 0),
   make(c) {
     const n = c.st.abandoned || 0;
-    return { title: `Revive ${num(n - Math.floor(n / 3))} abandoned buildings`, desc: 'Empty buildings drag the whole street down. Check power, water, jobs, services, pollution and taxes around them.', icon: '🏚️', target: Math.floor(n / 3), base: n, unit: 'left', focus: { locate: 'abandoned', overlay: 'happiness' }, reward: { money: cash(1) } };
+    return { title: abandTitle(n - Math.floor(n / 3)), desc: 'Empty buildings drag the whole street down. Check power, water, jobs, services, pollution and taxes around them.', icon: '🏚️', target: Math.floor(n / 3), base: n, unit: 'left', focus: { locate: 'abandoned', overlay: 'happiness' }, reward: { money: cash(1) } };
   },
   cur: (c) => c.st.abandoned || 0,
   prog: (c, g, v) => (g.base - v) / Math.max(1, g.base - g.target),
-  text: (g, v) => `${num(Math.max(0, v - g.target))} to go`,
+  title: (g, v) => abandTitle(Math.max(0, v - g.target)), // live count
+  doneTitle: () => 'Revive the abandoned buildings',
+  text: (g, v) => `${num(M.clamp(g.base - v, 0, g.base - g.target))} / ${num(g.base - g.target)} done`,
 };
 KINDS.fix_traffic = {
   cat: 'fix', cool: 180,
@@ -44487,7 +44908,9 @@ for (const s of SVC) {
       if (!r) return 0;
       const cov = r.coverage || 0;
       if (cov >= s.max * 0.6) return 0;
-      return 3 + (1 - cov / s.max) * 3 + Math.min(2, c.pop / 4000) + (r.buildings ? 0 : 1);
+      const sc = 3 + (1 - cov / s.max) * 3 + Math.min(2, c.pop / 4000) + (r.buildings ? 0 : 1);
+      // urgent (>= 8: skips the variety rule) only when the service is practically missing in a grown town
+      return cov < 0.1 && c.pop >= s.pop * 2 ? sc : Math.min(7.9, sc);
     },
     make(c) {
       const r = svc()[s.key] || {};
@@ -44623,7 +45046,7 @@ function addTempMod(entry) {
 }
 function grant(S, g) {
   const r = g.reward || {};
-  if (r.money > 0) VC.money.earn(r.money, 'reward');
+  if (r.money > 0) VC.money.earn(r.money, 'goal');
   if (r.mods) addTempMod({ id: 'goal:' + g.id, source: 'goal', label: r.label || g.title, mods: Object.assign({}, r.mods), until: S.time.day + (r.days || 90) });
 }
 
@@ -44650,6 +45073,7 @@ function ensure(S) {
     if (!g.reward.long) g.reward.long = rewardLong(g.reward);
     if (!g.focus || typeof g.focus !== 'object') g.focus = {};
     if (!g.cat) g.cat = KINDS[g.kind].cat;
+    if (!isFinite(g.lastProg)) g.lastProg = S.time.day; // older saves: the stale clock starts now
   }
   return G;
 }
@@ -44685,6 +45109,10 @@ function evaluate(S) {
     g.cur = typeof v === 'number' && isFinite(v) ? Math.round(v * 1000) / 1000 : 0;
     g.progress = clamp01(p);
     try { g.text = textOf(K, g, v); } catch (e) { g.text = ''; }
+    if (K.title && p < 1) { try { const t = K.title(g, v); if (t) g.title = t; } catch (e) { /* keep */ } }
+    // stale-goal bookkeeping: the best progress so far and when it was reached
+    if (!(g.best >= 0)) { g.best = g.progress; g.lastProg = S.time.day; }
+    else if (g.progress > g.best + 0.005) { g.best = g.progress; g.lastProg = S.time.day; }
     if (p >= 1) complete(S, g);
   }
   lastEvalDay = S.time.day;
@@ -44694,7 +45122,10 @@ function complete(S, g) {
   g.done = true;
   g.progress = 1;
   g.doneDay = S.time.day;
+  g.shown = 0;
   const G = S.goals;
+  const K0 = KINDS[g.kind];
+  if (K0 && K0.doneTitle) { try { g.title = K0.doneTitle(g); } catch (e) { /* keep */ } }
   G.count++;
   G.done.push(g.id);
   if (G.done.length > DONE_CAP) G.done.splice(0, G.done.length - DONE_CAP);
@@ -44724,6 +45155,8 @@ function generate(S, forceKind) {
       if (!(s > 0)) continue;
       // variety: a second goal of the same category has to be urgent to win
       if (s < 8 && G.active.some((g) => g.cat === K.cat)) s -= 2.5;
+      // ... and two "X coverage to N%" goals at once only when the new one is urgent
+      if (K.svc && s < 8 && G.active.some((g) => KINDS[g.kind] && KINDS[g.kind].svc)) s -= 3;
       cands.push({ K, s: s + rnd() * 1.5 });
     }
     cands.sort((a, b) => b.s - a.s);
@@ -44733,7 +45166,7 @@ function generate(S, forceKind) {
     let f = null;
     try { f = K.make(cx); } catch (e) { console.error('[goals] make ' + K.key, e); f = null; }
     if (!f) continue;
-    const g = Object.assign({ id: 'g' + (G.seq + 1), kind: K.key, cat: K.cat, day, progress: 0, cur: 0, text: '', done: false }, f);
+    const g = Object.assign({ id: 'g' + (G.seq + 1), kind: K.key, cat: K.cat, day, progress: 0, cur: 0, text: '', done: false, lastProg: day }, f);
     g.reward = Object.assign({}, g.reward || {});
     g.reward.text = rewardText(g.reward);
     g.reward.long = rewardLong(g.reward);
@@ -44744,6 +45177,7 @@ function generate(S, forceKind) {
       if (p >= 1 && !forceKind) { G.cool[K.key] = day + 30; continue; }
       g.cur = typeof v === 'number' && isFinite(v) ? v : 0;
       g.progress = clamp01(p);
+      g.best = g.progress;
       g.text = textOf(K, g, v);
     } catch (e) { /* keep defaults */ }
     G.seq++;
@@ -44757,10 +45191,19 @@ function onDay() {
   const S = S_();
   if (!live(S) || tutorialOn()) return;
   const G = S.goals, day = S.time.day;
-  // auto-claim forgotten rewards so the slot frees up
+  // auto-claim forgotten rewards so the slot frees up — only after the card has shown them a while
+  // (real seconds, counted by the HUD; without a HUD the game days alone decide)
+  const hudOn = !!(VC.hud && VC.hud.register);
   for (let i = G.active.length - 1; i >= 0; i--) {
     const g = G.active[i];
-    if (g.done && day - (g.doneDay || day) >= AUTO_CLAIM_DAYS) claim(g.id, true);
+    if (g.done && day - (g.doneDay || day) >= AUTO_CLAIM_DAYS && (!hudOn || (g.shown || 0) >= AUTO_CLAIM_SEC)) claim(g.id, true);
+  }
+  // rotate out a goal that has not moved for a long time (at most one a month; fresh progress first)
+  const isStale = (g) => !g.done && day - (isFinite(g.lastProg) ? g.lastProg : g.day) >= STALE_DAYS;
+  if (day - (G.rotDay || -1e9) >= ROTATE_GAP && G.active.some(isStale)) {
+    evaluate(S);
+    const stale = G.active.find(isStale);
+    if (stale) { G.rotDay = day; rotate(S, stale); }
   }
   if (G.active.length < MAX_ACTIVE && day >= G.next) {
     const g = generate(S);
@@ -44799,6 +45242,18 @@ function claim(id, silent) {
   VC.bus.emit('goalClaimed', { goal: g, auto: !!silent });
   VC.bus.emit('goalsChanged', G.active);
   return true;
+}
+/** A goal that sat still for STALE_DAYS makes room for a fresh one (its kind rests a while). */
+function rotate(S, g) {
+  const G = S.goals;
+  const i = G.active.indexOf(g);
+  if (i < 0) return;
+  G.active.splice(i, 1);
+  G.cool[g.kind] = Math.max(G.cool[g.kind] || 0, S.time.day + 240);
+  const n = generate(S);
+  G.next = S.time.day + (n ? NEXT_DAYS : 2);
+  if (!n) VC.bus.emit('goalsChanged', G.active);
+  VC.bus.emit('goalRotated', { goal: g, next: n });
 }
 /** Replaces an open goal with another (its kind cools down for a while). */
 function swap(id) {
@@ -44845,6 +45300,8 @@ function focusOf(id) {
 const Goals = (VC.goals = {
   KINDS,
   MAX_ACTIVE,
+  AUTO_CLAIM_SEC,
+  STALE_DAYS,
   init() {
     if (inited) return;
     inited = true;
@@ -45696,10 +46153,8 @@ function tryLevelUp(S, b) {
   b.simReplay = true;
   X.constructing.add(b.id);
   VC.world.changed(b);
-  if (++X.levelUps <= 3) {
-    burst('sparkle', b, 14);
-    sfx({ name: 'levelup', x: b.x + b.w / 2, z: b.z + b.d / 2, vol: 0.4 });
-  }
+  // (the sparkle burst comes from the particles module, which bursts on every level-up it sees)
+  if (++X.levelUps <= 3) sfx({ name: 'levelup', x: b.x + b.w / 2, z: b.z + b.d / 2, vol: 0.4 });
 }
 
 /**
@@ -45996,7 +46451,13 @@ function updateStats(S) {
   st.traffic = tr ? tr.avgCongestion : 0;
   // landmarks + parks + policy visitors (Tourism Campaign), all scaled by the tourism modifier
   let visitors = 0;
-  for (const k in S.policies) if (S.policies[k] && VC.POLICY[k] && VC.POLICY[k].visitors) visitors += VC.POLICY[k].visitors;
+  // (the policy's slider scales its visitors like its cost: 50 % ad budget = half the visitors)
+  for (const k in S.policies) {
+    const d = VC.POLICY[k];
+    if (!d || !d.visitors || !S.policies[k]) continue;
+    const lv = VC.econ && VC.econ.policyLevel ? VC.econ.policyLevel(k) : S.policies[k] === true ? 1 : clamp(+S.policies[k] || 0, 0, 1);
+    visitors += d.visitors * lv;
+  }
   st.tourism = Math.round((t.tourismRaw + t.parks * 1.5 + visitors) * Math.max(0, 1 + (mods.tourism || 0)));
   st.buildings = t.growables + t.catalog;
   st.abandoned = t.abandoned;
@@ -50145,9 +50606,10 @@ function onKeyFallback(e) {
 /*
  * VOXELPOLIS — HUD: Mayor's Desk card (the display side of VC.desk). A decision card slides into the shared
  * left column (.gl-col, under the goals card; below the windows layer): the presenting advisor's portrait,
- * name and role, days left to decide, the story, 2-3 choice buttons each with a line of effect chips (green
+ * name and role, time left to decide, the story, 2-3 choice buttons each with a line of effect chips (green
  * good, red bad, gold money, violet gamble; how long it lasts on the right) and a countdown bar. Not a modal:
- * the game keeps running.
+ * the game keeps running. The countdown follows VC.desk.timeLeft(): game days, or — when fast-forwarding
+ * makes the real-time minimum the later deadline — real seconds ("⏳ 42 s").
  *   FOLDED  "–" folds the card into a "📨 1" badge in the goals card header (or, while the goals card is
  *           hidden, a slim "Decision waiting" pill); click it to reopen. The countdown keeps running.
  *   OUTCOME choosing shows the outcome text in the card ("Got it" / auto-close after 14 s, paused on hover).
@@ -50156,9 +50618,16 @@ function onKeyFallback(e) {
  *   Nothing in the title-screen demo. Toasts keep off the open card (VC.ui.toastAvoid).
  * While the card is open the column carries .desk-open (+ a 'deskstate' DOM event) and the goals list folds
  * away. Registers as a VC.hud part (order 46).
+ *
+ * COLUMN LAYOUT (VC.deskHud.layout(), also used by ui/hud_goals.js): the shared left column sits under the
+ * top bar — or under the tutorial card while that shows (set synchronously when a card appears, so it never
+ * slides in underneath it) — and its max-height stops above whatever HUD block lies below it in its lane:
+ * the minimap (+ legend), the toolbar, the ticker, advisor cards and the dock when they reach that far
+ * (measured with getBoundingClientRect, re-checked 5x a second, on show / state changes and on resize).
+ * The desk card's body and the goals list scroll inside it instead of running into those blocks.
  */
 const h = VC.h;
-const DK = { col: null, card: null, badge: null, v: null, state: 'none', acc: 0, outT: 0, hover: false, choices: [], daysEl: null, pillDays: null, badgeDays: null, timer: null, out: null };
+const DK = { col: null, card: null, badge: null, v: null, state: 'none', acc: 0, lay: 0, outT: 0, hover: false, choices: [], daysEl: null, pillDays: null, badgeDays: null, timer: null, out: null, body: null };
 const esc = (s) => (VC.ui && VC.ui.esc ? VC.ui.esc(s) : String(s == null ? '' : s));
 const demo = () => !!(VC.state && VC.state.demo) || !!(VC.menu && VC.menu.active);
 const OUT_MS = 14000;
@@ -50190,7 +50659,7 @@ function build(v) {
   DK.badgeDays = h('span', { class: 'dk-badge-d' });
   DK.badge = h('button', { class: 'dk-badge', 'data-tip': esc(v.title) + '<br><small>A decision is waiting on your desk</small>', 'aria-label': 'Open the decision on your desk', onclick: (e) => { e.stopPropagation(); reopen(); } },
     '📨', h('b', null, '1'), DK.badgeDays);
-  DK.daysEl = h('span', { class: 'dk-days', 'data-tip': 'Days left to decide — after that the matter settles itself' });
+  DK.daysEl = h('span', { class: 'dk-days', 'data-tip': 'Time left to decide — after that the matter settles itself.<br><small>You always get at least a minute of real time, even at top speed.</small>' });
   const a = v.advisor || {};
   // header: portrait | "Mayor's Desk · days left" over the presenter | fold
   const head = h('div', { class: 'dk-head' },
@@ -50211,8 +50680,15 @@ function build(v) {
   DK.out = h('div', { class: 'dk-out' });
   DK.timer = h('i');
   // the body scrolls when the viewport is too short for the whole story (the column is height-capped)
-  card.append(pill, h('div', { class: 'dk-full' }, head, h('div', { class: 'dk-body' }, title, text, h('div', { class: 'dk-choices' }, DK.choices), DK.out)), h('div', { class: 'dk-timer' }, DK.timer));
+  DK.body = h('div', { class: 'dk-body' }, title, text, h('div', { class: 'dk-choices' }, DK.choices), DK.out);
+  DK.body.addEventListener('scroll', moreHint, { passive: true });
+  card.append(pill, h('div', { class: 'dk-full' }, head, DK.body), h('div', { class: 'dk-timer' }, DK.timer));
   return card;
+}
+/** Fades the bottom of the card body while more choices are scrolled out of view. */
+function moreHint() {
+  const b = DK.body;
+  if (b) b.classList.toggle('more', b.scrollHeight - b.clientHeight - b.scrollTop > 4);
 }
 /** state: 'open' (full card) | 'min' (folded: header badge or pill) | 'done' (outcome) | 'none'. */
 function setState(st) {
@@ -50224,6 +50700,7 @@ function setState(st) {
   deskClass(st === 'open' || st === 'done');
   dock();
   refresh();
+  layoutCol();
   if (VC.ui && VC.ui.layoutToasts) VC.ui.layoutToasts();
 }
 /** .desk-open on the shared column (+ a DOM event so the goals card folds / unfolds right away). */
@@ -50253,6 +50730,7 @@ function show(v, sound, state) {
   DK.v = v;
   DK.card = build(v);
   DK.col.appendChild(DK.card);
+  layoutCol(); // before the first paint: never slide in under the tutorial card
   setState(state || 'open');
   if (sound) VC.bus.emit('sfx', { name: 'advisor' });
 }
@@ -50312,17 +50790,30 @@ function onResolved(e) {
 function refresh() {
   const S = VC.state;
   if (!DK.card || !DK.v || !S) return;
+  moreHint();
   if (DK.state === 'done') {
     if (!DK.hover && performance.now() - DK.outT > OUT_MS) close(false);
     return;
   }
-  const left = Math.max(0, DK.v.expires - S.time.day);
-  const t = ' · ⏳ ' + (left === 1 ? '1 day' : left + ' days');
+  // game days, or real seconds when fast-forwarding makes the real-time minimum the later deadline
+  const tl = VC.desk && VC.desk.timeLeft ? VC.desk.timeLeft() : null;
+  const left = tl ? tl.days : Math.max(0, DK.v.expires - S.time.day);
+  let t, short, frac, urgent;
+  if (tl && tl.bySec) {
+    const sec = Math.ceil(tl.sec);
+    t = ' · ⏳ ' + sec + ' s';
+    short = sec + 's';
+    frac = tl.frac;
+    urgent = sec <= 10;
+  } else {
+    t = ' · ⏳ ' + (left === 1 ? '1 day' : left + ' days');
+    short = left + 'd';
+    frac = tl ? tl.frac : left / (DK.v.decideDays || 60);
+    urgent = left <= 10;
+  }
   if (DK.daysEl.textContent !== t) DK.daysEl.textContent = t;
-  const short = left + 'd';
   if (DK.pillDays.textContent !== short) { DK.pillDays.textContent = short; DK.badgeDays.textContent = short; }
-  DK.timer.style.width = Math.round((left / (DK.v.decideDays || 60)) * 1000) / 10 + '%';
-  const urgent = left <= 10;
+  DK.timer.style.width = Math.round(frac * 1000) / 10 + '%';
   DK.card.classList.toggle('urgent', urgent);
   if (DK.badge) DK.badge.classList.toggle('urgent', urgent);
   for (const b of DK.choices) {
@@ -50333,13 +50824,71 @@ function refresh() {
     }
   }
 }
-/** Keeps the column under the tutorial card when a decision shows up while the tutorial runs. */
-function layoutCol() {
-  if (!DK.col) return;
-  const tut = DK.card && VC.hud.root ? VC.hud.root.querySelector('.tut-card:not(.out)') : null;
-  const top = tut ? Math.round(tut.getBoundingClientRect().bottom + 8) + 'px' : '';
-  if (DK.col.style.top !== top) DK.col.style.top = top;
+/* ---------------- column layout (see header) ---------------- */
+const COL_TOP = 70, COL_W = 324, COL_GAP = 8, COL_MIN = 96;
+// size changes of the blocks around the column (minimap legend, tutorial card, …) re-layout it before the
+// next paint; the 5 Hz poll covers moves without a size change
+let colRO = null;
+const colSeen = new WeakSet();
+function watch(el) {
+  if (!el || colSeen.has(el)) return;
+  if (!colRO) {
+    if (typeof ResizeObserver !== 'function') return;
+    colRO = new ResizeObserver(() => layoutCol());
+  }
+  colSeen.add(el);
+  colRO.observe(el);
 }
+/** Visible element's screen rect (null when missing / hidden / zero-sized). */
+function rectOf(el) {
+  if (!el || !el.offsetParent && getComputedStyle(el).position !== 'fixed') return null;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0 ? r : null;
+}
+/**
+ * Places the shared left column: top under the top bar (or the tutorial card while it shows), max-height
+ * down to the first HUD block below it that shares its lane (minimap + legend, toolbar, ticker, advisor
+ * cards, dock). Sets --gl-avail (CSS px) for the goals list's peek cap.
+ */
+function layoutCol() {
+  const col = DK.col || ensureCol();
+  const root = VC.hud && VC.hud.root;
+  if (!col || !root || !VC.hud.visible) return;
+  DK.col = col;
+  const s = (VC.ui && VC.ui.scale && VC.ui.scale()) || 1;
+  const vh = window.innerHeight;
+  let top = COL_TOP;
+  const bar = root.querySelector('.hud-top');
+  watch(bar);
+  watch(root.querySelector('.hl-tut'));
+  if (bar && bar.offsetHeight) top = Math.max(top, Math.round(8 + bar.offsetHeight * s + COL_GAP));
+  // the tutorial card (z above the column) only shares the spot with a desk card: goals hide meanwhile
+  const tut = DK.card ? rectOf(root.querySelector('.tut-card:not(.out)')) : null;
+  if (tut) top = Math.max(top, Math.round(tut.bottom + COL_GAP));
+  const x0 = 10, x1 = 10 + COL_W * s;
+  let bottom = vh - COL_GAP;
+  const tick = root.querySelector('.hud-ticker');
+  if (tick && !tick.classList.contains('hidden') && tick.offsetHeight) bottom = Math.min(bottom, vh - tick.offsetHeight - COL_GAP);
+  for (const sel of ['.hud-bl', '.hud-toolbar', '.hl-notes', '.hud-dock']) {
+    for (const el of root.querySelectorAll(sel)) {
+      watch(el);
+      const r = rectOf(el);
+      // blocks in the column's lane that start below its top (a block beside the top would leave no room)
+      if (!r || r.right <= x0 || r.left >= x1 || r.top < top + COL_MIN * s) continue;
+      bottom = Math.min(bottom, Math.floor(r.top - COL_GAP));
+    }
+  }
+  const avail = Math.max(COL_MIN, (bottom - top) / s);
+  const t = top + 'px', mh = Math.floor(avail) + 'px';
+  if (col.style.top !== t) col.style.top = t;
+  if (col.style.maxHeight !== mh) {
+    col.style.maxHeight = mh;
+    col.style.setProperty('--gl-avail', mh);
+  }
+}
+
+/** Shared with ui/hud_goals.js. */
+VC.deskHud = { layout: layoutCol };
 
 if (VC.hud && VC.hud.register) {
   VC.hud.register({
@@ -50357,6 +50906,8 @@ if (VC.hud && VC.hud.register) {
       if (VC.ui && VC.ui.toastAvoid) {
         VC.ui.toastAvoid.push(() => (DK.card && (DK.state === 'open' || DK.state === 'done') && VC.hud.visible ? DK.card.getBoundingClientRect() : null));
       }
+      window.addEventListener('resize', () => { DK.lay = 1; });
+      VC.bus.on('settings', () => { DK.lay = 1; }); // UI scale, ticker on/off
     },
     reset() {
       close(true);
@@ -50365,12 +50916,14 @@ if (VC.hud && VC.hud.register) {
       if (v && !demo()) show(v, false, 'open');
     },
     update(dt, rdt) {
+      // layout 5x a second (the tutorial card, minimap legend or ticker can change under the column)
+      DK.lay += rdt;
+      if (DK.lay >= 0.2) { DK.lay = 0; layoutCol(); }
       DK.acc += rdt;
       if (DK.acc < 0.5) return;
       DK.acc = 0;
       refresh();
       if (DK.state === 'min') dock();
-      layoutCol();
     },
   });
 }
@@ -50385,17 +50938,28 @@ if (VC.hud && VC.hud.register) {
  * (hidden while the tutorial runs), in a shared left column (.gl-col, also holding the Mayor's Desk card of
  * ui/hud_desk.js). The column stacks BELOW the windows layer (z 15 < 20): windows always cover it, never
  * the other way round.
- *   ITEMS     icon, title, why, live progress bar + text, reward, "Show me" (VC.goals.focusOf: camera,
- *             overlay, panel, palette, tool), "↻" swap on hover. Completed goals glow gold with a Claim button.
+ *   ITEMS     icon, title (live: problem goals keep their count current), why, live progress bar + text,
+ *             reward, "Show me" (VC.goals.focusOf: camera, overlay, panel, palette, tool), "↻" swap (dim,
+ *             full on hover). Completed goals glow gold with a Claim button; the real time a completed goal
+ *             is on screen (game running) is counted into g.shown — VC.goals only auto-claims after
+ *             AUTO_CLAIM_SEC of it, so fast-forwarding never skips the Claim button.
  *   HEADER    click to collapse / expand (remembered per browser); collapsed it shows mini progress bars and
- *             a "🎁 Claim" chip. While a desk decision is open the list folds away (the header peeks it).
+ *             a "🎁 Claim" chip. While a desk decision is open the list folds away (the header peeks it;
+ *             peeking, the list scrolls within ~40% of the column so the decision stays in view).
+ *   LAYOUT    the column is laid out by ui/hud_desk.js (VC.deskHud.layout): under the top bar / tutorial
+ *             card, height-capped above the minimap, toolbar and ticker; the goals list scrolls when the
+ *             column is too short for it.
  *   CELEBRATE bus 'goalDone' -> ONE toast (VC.ui.toast, sfx 'achievement') + VC.fx.confetti at the camera
- *             target. Claiming plays 'cash' and floats the reward over the item. Nothing in the demo.
+ *             target — unless a milestone banner went up in the last MS_QUIET_MS (that party is enough;
+ *             the item still glows gold). Claiming plays 'cash' and floats the reward over the item.
+ *             A goal rotated out for lack of progress (bus 'goalRotated') gets a quiet info toast.
+ *             Nothing in the demo.
  * Polls VC.goals.list() at 2 Hz (in-place DOM updates, no rebuild unless the set of goals changed).
  * Registers as a VC.hud part (order 45).
  */
 const h = VC.h;
-const GL = { col: null, card: null, list: null, count: null, chip: null, mini: null, items: new Map(), sig: '', acc: 0, collapsed: false, peek: false, vis: false };
+const GL = { col: null, card: null, list: null, count: null, chip: null, mini: null, items: new Map(), sig: '', acc: 0, run: 0, collapsed: false, peek: false, vis: false, msAt: -1e9 };
+const MS_QUIET_MS = 10000; // a goal completing this soon after a milestone banner celebrates quietly
 const LS_KEY = 'voxelpolis.goalsCollapsed';
 const esc = (s) => (VC.ui && VC.ui.esc ? VC.ui.esc(s) : String(s == null ? '' : s));
 const tutorialOn = () => !!(VC.hud && VC.hud.tutorialStep && VC.hud.tutorialStep() >= 0);
@@ -50429,6 +50993,12 @@ function build() {
   GL.col.appendChild(GL.card);
   // the desk card opening / closing folds the list right away (hud_desk dispatches this on the column)
   GL.col.addEventListener('deskstate', applyCompact);
+  GL.list.addEventListener('scroll', moreHint, { passive: true });
+}
+/** Fades the bottom edge of the goals list while more of it is scrolled out of view. */
+function moreHint() {
+  const l = GL.list;
+  if (l) l.classList.toggle('more', l.scrollHeight - l.clientHeight - l.scrollTop > 4);
 }
 function saveCollapsed() {
   try { localStorage.setItem(LS_KEY, GL.collapsed ? '1' : '0'); } catch (e) { /* private mode / blocked storage */ }
@@ -50453,6 +51023,7 @@ function applyCompact() {
   if (!deskOpen()) GL.peek = false;
   const compact = GL.collapsed || (deskOpen() && !GL.peek);
   GL.card.classList.toggle('compact', compact);
+  GL.card.classList.toggle('peek', deskOpen() && !compact);
 }
 
 /* ---------------- items ---------------- */
@@ -50460,16 +51031,17 @@ function makeItem(g) {
   const bar = h('i');
   const ptext = h('span', { class: 'gl-ptext' });
   const act = h('div', { class: 'gl-act' });
+  const title = h('div', { class: 'gl-title' }, g.title || '');
   const el = h('div', { class: 'gl-item cat-' + (g.cat || 'grow') + ' new' },
     h('div', { class: 'gl-ico' }, g.icon || '🎯'),
     h('div', { class: 'gl-main' },
-      h('div', { class: 'gl-title' }, g.title || ''),
+      title,
       h('div', { class: 'gl-desc', 'data-tip': esc(g.desc || '') }, g.desc || ''),
       h('div', { class: 'gl-prow' }, h('div', { class: 'gl-bar' }, bar), ptext),
       h('div', { class: 'gl-row' }, h('span', { class: 'gl-reward', 'data-tip': '<b>Reward</b><br>' + esc(rewardLong(g)) }, (g.reward && g.reward.text) || ''), act)),
     h('button', { class: 'gl-swap', 'data-tip': 'Swap for a different goal', 'aria-label': 'Swap goal', onclick: (e) => { e.stopPropagation(); swapGoal(g.id, el); } }, '↻'));
   setTimeout(() => el.classList.remove('new'), 700);
-  const it = { el, bar, ptext, act, g, done: null, pv: -1, tv: null, mini: h('i', null, h('b')) };
+  const it = { el, bar, ptext, act, title, g, done: null, pv: -1, tv: null, tt: g.title || '', mini: h('i', null, h('b')) };
   setActions(it);
   return it;
 }
@@ -50522,6 +51094,7 @@ function syncItems(goals) {
     }
     const t = g.done ? 'Complete!' : g.text || '';
     if (t !== it.tv) { it.tv = t; it.ptext.textContent = t; }
+    if ((g.title || '') !== it.tt) { it.tt = g.title || ''; it.title.textContent = it.tt; } // live counts
   }
   const n = goals.length;
   const txt = claimable ? '' : `${n} active`;
@@ -50539,6 +51112,7 @@ function refresh() {
   }
   applyCompact();
   if (vis) syncItems(goals);
+  moreHint();
 }
 
 /* ---------------- actions ---------------- */
@@ -50575,6 +51149,8 @@ function swapGoal(id, el) {
 }
 function celebrate(g) {
   if (!g || demo() || !VC.hud.visible) return;
+  // the milestone banner just threw a party for (nearly) the same thing: glow gold, no second fanfare
+  if (performance.now() - GL.msAt < MS_QUIET_MS) { refresh(); return; }
   const reward = rewardLong(g) ? `<br><small>Claim your reward: ${esc(rewardLong(g))}</small>` : '';
   VC.ui.toast(`<b>Goal complete!</b> ${esc(g.title)}${reward}`, {
     type: 'good', icon: '🎯', duration: 6500, sfx: 'achievement',
@@ -50596,6 +51172,12 @@ if (VC.hud && VC.hud.register) {
       build();
       VC.bus.on('goalsChanged', () => { if (VC.hud.visible) refresh(); });
       VC.bus.on('goalDone', (e) => celebrate(e && e.goal));
+      VC.bus.on('milestone', () => { GL.msAt = performance.now(); });
+      VC.bus.on('goalRotated', (e) => {
+        if (!e || !e.goal || demo() || !VC.hud.visible) return;
+        const nx = e.next ? ` — here is a fresh one: <b>${esc(e.next.title)}</b>` : '';
+        VC.ui.toast(`“${esc(e.goal.title)}” sat still for a long while, so it made room${nx}.`, { type: 'info', icon: '🔄', duration: 6500 });
+      });
       // toasts pick a lane that keeps off the goals card when they can
       if (VC.ui && VC.ui.toastAvoid) VC.ui.toastAvoid.push(() => (GL.vis && GL.card && VC.hud.visible ? GL.card.getBoundingClientRect() : null));
     },
@@ -50610,9 +51192,16 @@ if (VC.hud && VC.hud.register) {
     },
     update(dt, rdt) {
       GL.acc += rdt;
+      if (dt > 0) GL.run += rdt; // real time with the game running
       if (GL.acc < 0.5) return;
       GL.acc = 0;
       refresh();
+      // completed goals on screen: count the real time (VC.goals waits for it before auto-claiming)
+      const run = Math.min(GL.run, 1);
+      GL.run = 0;
+      if (run > 0 && GL.vis && VC.hud.isVisible && VC.hud.isVisible()) {
+        for (const g of (VC.goals && VC.goals.list ? VC.goals.list() : [])) if (g.done) g.shown = Math.round(((g.shown || 0) + run) * 100) / 100;
+      }
     },
     onHide() { GL.vis = false; if (GL.card) GL.card.classList.add('hide'); },
   });
@@ -54344,7 +54933,7 @@ const CATS = {
   misc: ['📦', 'Other'],
 };
 /** Display order of categories (unknown ones sort after, alphabetically). */
-const CAT_ORDER = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'income', 'reward', 'loan'];
+const CAT_ORDER = ['tax:R', 'tax:C', 'tax:I', 'tourism', 'grant', 'income', 'reward', 'goal', 'desk', 'loan', 'deskDeal', 'refund'];
 for (const d of VC.DEPARTMENTS) CAT_ORDER.push('upkeep:' + d.key);
 CAT_ORDER.push('roadUpkeep', 'policy', 'loanPayment', 'construction', 'roads', 'zoning', 'pline', 'demolish', 'terraform', 'trees', 'misc');
 U.catInfo = (cat) => {
@@ -55400,13 +55989,20 @@ P.defs.milestones = {
  * WHAT-IF PREVIEW (Taxes + Departments tabs): grabbing a tax or funding slider (pointer or keyboard)
  * snapshots the city (forecast net, tax effects, funding, power/water supply); while it moves — the
  * settings apply live, as before — a glass card pinned to the bottom of the tab compares now vs.
- * that snapshot: monthly net change, R/C/I demand arrows (VC.econ.taxEffect deltas), citizens' mood
+ * that snapshot: monthly net change as a FIRST-MONTH ESTIMATE (the forecast at today's residents,
+ * corrected by how many residents a tax hike / service cut drives away — or a cut / boost draws in —
+ * within a month: reaction(), calibrated on branched saves of a stable town; every tax dollar
+ * follows the residents, since shops and factories lose their workers and customers too),
+ * R/C/I demand arrows (VC.econ.taxEffect deltas), citizens' mood
  * and approval, service effectiveness (VC.econ.effectivenessAt, strikes included), the likely knock-on
  * effects per department (crime, fires, traffic, brownouts…) and strike / diminishing-returns
  * warnings. It lingers ~2.5 s after release; grabbing the same slider again keeps the snapshot.
  * The Presets buttons show the same card for the whole budget. Departments also show the city
  * wage level (forecast().wageMul) and per-row cost breakdown tooltips; the Overview's income and
  * expense rows explain the state grant, wages and policies in tooltips.
+ * MAYOR'S DESK COMMITMENTS: recurring deals agreed on the Mayor's Desk are forecast lines ('deskDeal',
+ * "Mayor's Desk commitments") and, while any run, the Overview lists them (deal, $/month, months left)
+ * from VC.econ.deskCommitments().
  */
 const P = VC.panels, U = P.util, h = VC.h, M = VC.M;
 const ZK = ['R', 'C', 'I'];
@@ -55572,6 +56168,11 @@ function catTip(cat) {
   if (cat === 'income') return "<b>Venues</b><br>Ticket and casino income. Rises with happiness and the venues' department funding.";
   if (cat === 'tourism') return '<b>Tourism</b><br>Visitors drawn by landmarks, parks and the Tourism Campaign.';
   if (cat === 'loanPayment') return '<b>Loan payments</b><br>Interest + principal of every outstanding loan.';
+  if (cat === 'deskDeal') {
+    const deals = U.api('econ', 'deskCommitments', [], []) || [];
+    const rows = deals.map((d) => `${U.esc(d.label)}: <b>${U.smoney(d.amount)}/mo</b> · ${d.left} mo left`).join('<br>');
+    return "<b>Mayor’s Desk commitments</b><br>Recurring deals you agreed to on the Mayor’s Desk." + (rows ? '<br>' + rows : '');
+  }
   if (cat.startsWith('upkeep:') && WAGE[cat.slice(7)]) {
     const w = U.num(forecastRaw().wageMul, 1);
     return w > 1.005 ? `<b>Includes city wages ×${w.toFixed(2)}</b><br>Service staff earn more as the city grows.` : null;
@@ -55581,6 +56182,56 @@ function catTip(cat) {
 
 /* ---------------- What-if preview ---------------- */
 const LINGER = 2500; // ms the card stays after a slider is released
+/**
+ * First-month population reaction (fractions of residents), calibrated by branching one save of a
+ * stable ~4k town and running a month per change: R tax 9 -> 13/17/20 % lost 7/15/21 % of residents
+ * (C/I tax changes: none within the month), police / utilities at 25 % about 13 %, fire 3 %, roads 3 %,
+ * education 2 %; tax cuts and better funding draw people in more slowly.
+ */
+const REACT = {
+  taxDown: 0.28, // per unit of worse residential tax effect (VC.econ.taxEffect)
+  taxUp: 0.3, // per unit of better tax effect (only where homes have room — kept modest)
+  svc: { police: 0.19, fire: 0.05, education: 0.03, parks: 0.01 }, // per unit of lost effectiveness
+  up: 0.5, // gains from better funding count half (people move in slower than they leave)
+  roads: 0.1, // per unit of road effectiveness below 60 % (potholes)
+  power: 0.9, water: 0.7, // per share of demand left unserved
+};
+/** Estimated change in residents (fraction, first month) between the snapshot b and the current settings. */
+function reaction(b) {
+  let d = 0;
+  const dt = taxEff('R') - b.tax.R;
+  d += dt < 0 ? REACT.taxDown * dt : REACT.taxUp * dt;
+  for (const k in REACT.svc) {
+    if (b.eff[k] == null) continue;
+    const de = effAt(k, fundOf(k)) - b.eff[k];
+    d += REACT.svc[k] * de * (de > 0 ? REACT.up : 1);
+  }
+  if (b.eff.roads != null) {
+    const pot = (e) => Math.max(0, 0.6 - e);
+    const dp = pot(effAt('roads', fundOf('roads'))) - pot(b.eff.roads);
+    d -= REACT.roads * dp * (dp < 0 ? REACT.up : 1);
+  }
+  if (b.eff.utilities != null) {
+    const r = utilMul(effAt('utilities', fundOf('utilities'))) / Math.max(0.01, utilMul(b.eff.utilities));
+    for (const [s, k] of [[b.power, REACT.power], [b.water, REACT.water]]) {
+      if (!s || !(s.demand > 0)) continue;
+      const short = (sup) => Math.max(0, 1 - sup / s.demand);
+      const du = short(s.supply * r) - short(s.supply);
+      d -= k * du * (du < 0 ? REACT.up : 1);
+    }
+  }
+  return M.clamp(d, -0.6, 0.25);
+}
+/** {est (first-month net), move ($ the reaction adds / costs), pop (fraction)} for the current settings vs b. */
+function firstMonth(b, net) {
+  const f = forecastRaw(), inc = f.income || {};
+  const taxes = U.num(inc['tax:R']) + U.num(inc['tax:C']) + U.num(inc['tax:I']);
+  const pop = reaction(b);
+  const move = Math.round(taxes * pop);
+  return { est: net + move, move, pop };
+}
+/** "~15 % of residents" */
+const popPct = (p) => '~' + Math.max(1, Math.round(Math.abs(p) * 100)) + '% ' + (p < 0 ? 'of residents' : 'more residents');
 /** Mood label for a tax effect value (positive = citizens like it). */
 function moodOf(e) {
   if (e > 0.12) return ['😄 happy', 'good'];
@@ -55632,6 +56283,9 @@ function makeWhatIf(c, o = {}) {
     };
     rows.push(el);
   }
+  // the net row explains itself: the forecast vs the first-month estimate while comparing
+  rows[0].setAttribute('data-tip', 'Monthly net');
+  rows[0]._tip = () => (st && st.tip ? st.tip : '<b>Monthly net</b><br>Forecast for next month at the current settings.');
   const card = h('div', { class: 'pn-wi ' + (inline ? 'inline' : 'float'), role: 'status' }, h('div', { class: 'pn-wi-head' }, h('span', { class: 'pn-wi-badge' }, '🔮 What if'), title), ...rows);
   if (inline) c.appendChild(card);
   let st = null; // {kind, key, base, live, until}
@@ -55680,7 +56334,14 @@ function makeWhatIf(c, o = {}) {
     const who = z === 'R' ? 'Residents' : 'Businesses';
     rows[2].set('Mood', `${who} ` + (m0[0] === m1[0] ? span('t-' + m1[1], m1[0]) : `${m0[0]} → ${span('t-' + m1[1], m1[0])}`) + ' · approval ' + span('pn-wi-ar t-' + toneOf(Math.abs(sum) >= 0.01 ? sum : 0), arrows(sum / 3, 0.004, 0.04, 0.1)));
     const hi = to > 12, lo = to < 5;
-    rows[3].set(hi || lo ? 'Heads-up' : '', hi ? span('t-warn', 'Above 12% growth stalls and citizens start moving out.') : span('t-info', 'Very low taxes attract growth but thin the coffers.'));
+    const fm = st.fm;
+    const moves = fm && Math.abs(fm.pop) >= 0.01;
+    let warn = '';
+    if (moves && fm.pop < 0) warn = span('t-warn', `${popPct(fm.pop)} leave within a month (in the net)`);
+    else if (moves) warn = span('t-good', `${popPct(fm.pop)} if homes have room (in the net)`);
+    else if (hi) warn = span('t-warn', 'Above 12% growth stalls and citizens start moving out.');
+    else if (lo) warn = span('t-info', 'Very low taxes attract growth but thin the coffers.');
+    rows[3].set(warn ? 'Heads-up' : '', warn);
   }
   /** Inline idle readout: the city as it stands (what the next drag will be compared with). */
   function idleRows() {
@@ -55741,6 +56402,9 @@ function makeWhatIf(c, o = {}) {
       else if (key === 'utilities') fx.push('⚡💧 plant output ' + span(tn, '×' + r.toFixed(2)));
     }
     if (all || WAGE[key]) fx.push('😊 approval ' + span(tn, arrows(de, 0.01, 0.1, 0.25)));
+    // residents reacting within the first month (already counted in the monthly net above)
+    const fm = st.fm;
+    if (fm && Math.abs(fm.pop) >= 0.01) fx.unshift('👥 ' + span(fm.pop < 0 ? 't-bad' : 't-good', popPct(fm.pop) + (fm.pop < 0 ? ' move away' : '')));
     rows[2].set('Likely', fx.join(' · '));
     // warnings
     let warn = supply;
@@ -55795,8 +56459,12 @@ function makeWhatIf(c, o = {}) {
       const b = st.base;
       const f = forecastRaw();
       const net = typeof f.net === 'number' ? f.net : forecast().net;
-      const dn = net - b.net;
-      rows[0].set('Monthly net', `${U.smoney(b.net)} → <b>${U.smoney(net)}</b> ` + span('pn-wi-d t-' + (dn > 0.5 ? 'good' : dn < -0.5 ? 'bad' : 'muted'), (dn > 0.5 ? '▲ ' : dn < -0.5 ? '▼ ' : '') + U.smoney(dn) + '/mo'));
+      // first-month estimate: today's residents' forecast + the residents who leave / arrive meanwhile
+      st.fm = firstMonth(b, net);
+      const est = st.fm.est, dn = est - b.net;
+      const tipNet = `<b>First-month estimate</b><br>Forecast at today's residents: <b>${U.smoney(net)}</b>/mo<br>` + (Math.abs(st.fm.move) >= 1 ? `Residents ${st.fm.pop < 0 ? 'moving away' : 'moving in'} (${popPct(st.fm.pop)}): <b>${U.smoney(st.fm.move)}</b>/mo<br>` : '') + '<small>A rough guide: later months drift further as demand, growth and abandonment follow.</small>';
+      rows[0].set('Monthly net', `${U.smoney(b.net)} → <b>${U.smoney(est)}</b> ` + span('pn-wi-d t-' + (dn > 0.5 ? 'good' : dn < -0.5 ? 'bad' : 'muted'), (dn > 0.5 ? '▲ ' : dn < -0.5 ? '▼ ' : '') + U.smoney(dn) + '/mo') + ' <small>first-month est.</small>');
+      st.tip = tipNet;
       if (st.kind === 'tax') taxRows(b);
       else deptRows(b);
     },
@@ -55826,6 +56494,15 @@ function tabOverview(c) {
       h('div', { class: 'pn-brk-col exp' }, h('div', { class: 'pn-brk-head' }, h('span', null, '🧾 Expenses'), expTot), expBox, expEmpty)
     ), srcNote)
   );
+
+  // Mayor's Desk commitments (recurring deals; billed with the monthly budget, so already in the net above)
+  const dealBody = h('tbody');
+  const dealSec = U.sec('📨 Mayor’s Desk commitments',
+    h('table', { class: 'pn-table' },
+      h('thead', null, h('tr', null, h('th', null, 'Deal'), h('th', { class: 'num' }, 'Per month'), h('th', { class: 'num' }, 'Months left'))),
+      dealBody),
+    h('div', { class: 'note' }, 'Recurring payments agreed on the Mayor’s Desk — included in the monthly net and the breakdown above.'));
+  c.appendChild(dealSec);
 
   // actuals vs forecast table
   const cells = {};
@@ -55882,6 +56559,14 @@ function tabOverview(c) {
     U.show(expEmpty, !exp.length);
     U.txt(incTot, U.money(f.totalIncome));
     U.txt(expTot, U.money(f.totalExpenses));
+    const deals = U.api('econ', 'deskCommitments', [], []) || [];
+    U.show(dealSec, deals.length > 0);
+    U.keyed(dealBody, deals, (d) => d.id, () => h('tr', null, h('td'), h('td', { class: 'num' }), h('td', { class: 'num' })), (tr, d) => {
+      U.txt(tr.children[0], d.label);
+      U.txt(tr.children[1], U.smoney(d.amount) + '/mo');
+      U.tone(tr.children[1], d.amount > 0 ? 'good' : 'bad');
+      U.txt(tr.children[2], String(d.left));
+    });
     U.txt(srcNote, !inc.length && !exp.length ? 'Nothing on the books yet — zone land and build services to get the economy going.' : f.src === 'forecast' ? 'Forecast for next month at current rates, funding and policies.' : 'Based on last month’s books (no forecast available yet).');
 
     const cm = ledgerSums(S.ledger && S.ledger.month), cl = ledgerSums(S.ledger && S.ledger.last);

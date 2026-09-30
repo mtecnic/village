@@ -573,6 +573,8 @@ const PING = { x: 0, z: 0, w: 1, d: 1, until: 0, c: [2.6, 1.9, 0.5, 1], f: [1.6,
 const LAYER = {
   name: 'tools',
   order: 990,
+  /** No GL objects of its own (previews go through the core gizmos): nothing to rebuild after a context loss. */
+  restore() {},
   transparent() {
     const S = VC.state;
     if (!S || S.demo || (VC.menu && VC.menu.active) || !VC.gfx.gizmo) return;

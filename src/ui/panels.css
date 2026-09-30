@@ -2,7 +2,7 @@
    milestones, disasters, save, inspector). Premium dark glass; all classes prefixed pn-. */
 
 /* ---------------- window chrome ---------------- */
-.win.pn-win { max-height: calc((100vh - 150px) / var(--ui-scale, 1)); max-width: calc((100vw - 16px) / var(--ui-scale, 1)); min-height: 0; background: linear-gradient(180deg, rgba(20, 26, 42, 0.86), rgba(12, 16, 28, 0.84)); box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06); }
+.win.pn-win { max-height: calc((100vh - 176px) / var(--ui-scale, 1)); max-width: calc((100vw - 16px) / var(--ui-scale, 1)); min-height: 0; background: linear-gradient(180deg, rgba(20, 26, 42, 0.86), rgba(12, 16, 28, 0.84)); box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06); }
 .win.pn-win::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 2px; border-radius: var(--radius) var(--radius) 0 0; background: linear-gradient(90deg, transparent, rgba(90, 209, 255, 0.7), rgba(179, 136, 255, 0.7), transparent); opacity: 0.8; pointer-events: none; }
 .win.pn-win .win-head { padding: 9px 10px 9px 14px; }
 .win.pn-win .win-title { font-size: 15px; }
@@ -15,11 +15,12 @@
 @keyframes pnFade { from { opacity: 0; transform: translateY(4px); } }
 
 /* ---------------- tones ---------------- */
-.t-good { color: var(--good); }
-.t-warn { color: var(--warn); }
-.t-bad { color: var(--bad); }
-.t-info { color: var(--accent); }
-.t-muted { color: var(--text3); }
+/* tone classes (set by VC.panels.util.tone); scoped so they cannot collide with other modules */
+.pn-win .t-good { color: var(--good); }
+.pn-win .t-warn { color: var(--warn); }
+.pn-win .t-bad { color: var(--bad); }
+.pn-win .t-info { color: var(--accent); }
+.pn-win .t-muted { color: var(--text3); }
 .pn-ic { display: inline-block; width: 1.35em; text-align: center; margin-right: 2px; }
 .pn-grow { flex: 1; }
 
@@ -33,7 +34,7 @@
 .pn-line + .pn-line { border-top: 1px dashed var(--line); }
 .pn-line-label { color: var(--text2); display: flex; align-items: center; min-width: 0; }
 .pn-line-val { font-family: var(--mono); font-weight: 700; text-align: right; white-space: nowrap; }
-.note.lead { margin: 0 0 12px; font-size: 12.5px; color: var(--text2); }
+.pn-win .note.lead { margin: 0 0 12px; font-size: 12.5px; color: var(--text2); }
 .pn-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
 .pn-toolbar-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text3); font-weight: 800; margin-right: 2px; }
 .pn-banner { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px; font-size: 12.5px; font-weight: 600; margin: 10px 0; border: 1px solid currentColor; background: rgba(255, 255, 255, 0.03); }

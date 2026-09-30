@@ -567,23 +567,42 @@ function uiScale() {
   return (VC.settings && +VC.settings.uiScale) || 1;
 }
 /**
- * Default window position in CSS px inside the zoomed .win (screen px / uiScale).
- * Tries the panel's preferred spot, then the other standard spots and "right of an open window",
- * taking the first that does not overlap an open panel; otherwise cascades from the preferred spot.
+ * CSS zoom applied to a window element (1 when the UI framework scales with the `scale` property,
+ * where left/top are plain screen px; with `zoom`, left/top are multiplied by the zoom).
+ */
+function zoomOf(el) {
+  const z = parseFloat(getComputedStyle(el).zoom);
+  return z > 0 && Math.abs(z - 1) > 1e-3 ? z : 1;
+}
+/** Moves a window so its visual top-left corner lands on screen px (x, y). */
+function applyPos(el, x, y) {
+  const z = zoomOf(el);
+  el.style.left = Math.round(x / z) + 'px';
+  el.style.top = Math.round(y / z) + 'px';
+}
+/** Visual top-left of a window in screen px (inverse of applyPos). */
+function readPos(el) {
+  const z = zoomOf(el);
+  return { x: (parseFloat(el.style.left) || 0) * z, y: (parseFloat(el.style.top) || 0) * z };
+}
+/**
+ * Default window position in screen px. Tries the panel's preferred spot, then the other standard
+ * spots and "beside an open window", taking the first that does not overlap an open panel;
+ * otherwise cascades from the preferred spot. Keeps clear of the HUD top bar and right-hand dock.
  */
 function placement(key, def) {
   const s = uiScale();
-  const vw = window.innerWidth / s, vh = window.innerHeight / s;
-  const w = Math.min(def.width || 480, vw - 8);
-  const top = 72 / s + 6;
-  const hgt = Math.max(200, vh - top - 90);
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const w = Math.min((def.width || 480) * s, vw - 8); // visual width
+  const top = Math.round(66 * s + 12);
+  const hgt = Math.max(200, vh - top - 110);
   const rects = [];
   for (const p of openP.values()) {
-    if (p.key === key || !VC.ui.isOpen(p.key)) continue;
-    const el = p.win.el;
-    rects.push({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight });
+    if (p.key === key || !VC.ui.isOpen(p.key) || p.win.el.style.display === 'none') continue;
+    const r = p.win.el.getBoundingClientRect();
+    rects.push({ x: r.left, y: r.top, w: r.width, h: r.height });
   }
-  const L = 16, Cx = (vw - w) / 2, R = vw - w - 16;
+  const L = 14, Cx = (vw - w) / 2, R = vw - w - 14 - 58 * s; // right: leave room for the dock
   const xs = def.place === 'right' ? [R, L, Cx] : def.place === 'center' ? [Cx, L, R] : [L, Cx, R];
   for (const r of rects) xs.push(r.x + r.w + 10, r.x - w - 10);
   const free = (x) => !rects.some((r) => x < r.x + r.w && x + w > r.x && top < r.y + r.h && top + hgt > r.y);
@@ -596,6 +615,15 @@ function placement(key, def) {
     y += 26;
   }
   return { x: Math.max(4, Math.min(x, vw - w - 4)), y: Math.max(4, Math.min(y, vh - 120)) };
+}
+/** Creates the window for a panel at its remembered or default position (screen px). */
+function makeWin(key, def, title, icon) {
+  const pos = posMem[key] || placement(key, def);
+  const win = VC.ui.window(key, { title, icon, width: def.width || 480, x: 0, y: 0, cls: 'pn-win pn-' + key });
+  // keep the whole window on screen (a remembered spot may come from another UI scale / window size)
+  const wv = Math.min((def.width || 480) * uiScale(), window.innerWidth - 8);
+  applyPos(win.el, M.clamp(pos.x, 4, Math.max(4, window.innerWidth - wv - 4)), M.clamp(pos.y, 4, Math.max(4, window.innerHeight - 80)));
+  return win;
 }
 
 function runUpd(p, fn, force) {
@@ -637,8 +665,7 @@ function build(p) {
 function onClosed(key) {
   const p = openP.get(key);
   if (p) {
-    const el = p.win.el;
-    posMem[key] = { x: parseFloat(el.style.left) || 0, y: parseFloat(el.style.top) || 0 };
+    posMem[key] = readPos(p.win.el);
     if (p.def.onClose) U.safe(() => p.def.onClose(p));
     openP.delete(key);
   }
@@ -676,13 +703,6 @@ const P = (VC.panels = {
       // closing the inspector clears the tool selection highlight
       inspTarget = null;
       if (VC.tools && VC.tools.selectedId) VC.tools.selectedId = 0;
-    });
-    // keep remembered positions reachable after the browser window shrinks
-    window.addEventListener('resize', () => {
-      for (const k in posMem) {
-        posMem[k].x = Math.min(posMem[k].x, window.innerWidth / uiScale() - 120);
-        posMem[k].y = Math.min(posMem[k].y, window.innerHeight / uiScale() - 80);
-      }
     });
     for (const k in defs) if (defs[k].init) U.safe(() => defs[k].init());
     window.addEventListener('keydown', onHotkey);
@@ -734,8 +754,7 @@ const P = (VC.panels = {
     }
     const info = LIST.find((l) => l.key === key) || {};
     if (o.tab) tabMem[key] = o.tab;
-    const pos = posMem[key] || placement(key, def);
-    const win = VC.ui.window(key, { title: def.title || info.name || key, icon: def.icon || info.icon, width: def.width || 480, x: pos.x, y: pos.y, cls: 'pn-win pn-' + key });
+    const win = makeWin(key, def, def.title || info.name || key, def.icon || info.icon);
     p = { key, def, win, body: win.body, opts: o };
     openP.set(key, p);
     build(p);
@@ -771,8 +790,7 @@ const P = (VC.panels = {
     if (VC.tools) VC.tools.selectedId = target.id != null ? target.id : 0;
     let p = openP.get('inspector');
     if (!p || !VC.ui.isOpen('inspector')) {
-      const pos = posMem.inspector || placement('inspector', def);
-      const win = VC.ui.window('inspector', { title: 'Inspector', icon: '🔍', width: def.width, x: pos.x, y: pos.y, cls: 'pn-win pn-inspector' });
+      const win = makeWin('inspector', def, 'Inspector', '🔍');
       p = { key: 'inspector', def, win, body: win.body, opts: {} };
       openP.set('inspector', p);
     } else p.win.show();
@@ -794,6 +812,9 @@ function onHotkey(e) {
   if (tg && (tg.tagName === 'INPUT' || tg.tagName === 'TEXTAREA' || tg.tagName === 'SELECT' || tg.isContentEditable)) return;
   const it = LIST.find((l) => l.hotkey === e.code);
   if (!it) return;
+  // same guards as the HUD: not over modals, the title menu or its demo city
+  if ((VC.ui && VC.ui.modalCount && VC.ui.modalCount()) || document.querySelector('.modal-back')) return;
+  if ((VC.menu && VC.menu.active) || (VC.state && VC.state.demo)) return;
   const t0 = e.timeStamp;
   setTimeout(() => {
     if (lastCall.key === it.key && lastCall.t >= t0) return;

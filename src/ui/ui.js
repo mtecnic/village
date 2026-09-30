@@ -50,8 +50,9 @@
  *   innerHTML, data-tip, toast or confirm text; VC.ui.sanitize(html) -> DocumentFragment;
  *   VC.ui.isTextEntry(el) true for fields that take typing (hotkeys must stay off), false for sliders,
  *   checkboxes and buttons; VC.ui.layoutToasts(); VC.ui.toastAvoid (array of fn() -> rect|null).
- * Z-ORDER (all inside #ui, bounded): HUD chrome 0-5 < title menu 10 < windows layer 20 (its own stacking
- *   context; window z-indices are local and renormalised) < tutorial / advisor cards 25-26 < toasts 30 <
+ * Z-ORDER (all inside #ui, bounded): juice popups 0 < HUD chrome 0-5 < title menu 10 < windows layer 20 (its
+ *   own stacking context; window z-indices are local and renormalised) < the tool bar while a palette is open 22
+ *   (base.css, :has) < tutorial / advisor cards 25-26 < toasts 30 <
  *   milestone banner 35 < pause menu 40 (windows opened from it: 45) < popovers 50 < modals 60 <
  *   photo hint 70 < fade 80 < tooltip 100.
  * FOCUS: sliders, checkboxes, selects and buttons are blurred after a pointer interaction so game
@@ -59,6 +60,15 @@
  * UI scale: blocks use the CSS `scale: var(--ui-scale)` property (never `zoom`) so all layout math is in
  *   screen px. Position scaled floating elements with left/top or the `translate` property, not `transform`.
  * Bus: listens to 'toast' {text, type, icon, duration} (suppressed while the title-screen demo city runs).
+ * EMOJI / LABELS: at init a canvas probe checks for a colour-emoji font; without one <html> gets class
+ *   'no-emoji' (URL ?emoji=0 / ?emoji=1 forces it; a canvas that does not read back — privacy modes — counts
+ *   as "has emoji"). A MutationObserver on #ui (batched per frame) makes every ICON-ONLY control (button,
+ *   [role=button], .tab, .card, .seg-btn with no letters or digits in its text: emoji or symbols such as ×)
+ *   accessible: it gets an aria-label (from aria-label / title / data-tip; 'Close' for a bare ×) and a title
+ *   when it has no tooltip, and its emoji glyph element gets class 'ui-emo' + data-abbr (a short caption,
+ *   e.g. 'Budget', 'Stats'), which base.css shows instead of the glyph under .no-emoji. In controls that
+ *   also have a text label the emoji element gets 'ui-emo-deco' (hidden under .no-emoji: no tofu boxes next
+ *   to the words). VC.ui.hasEmoji, VC.ui.abbr(label), VC.ui.labelIcons(root) (run the pass now).
  */
 const h = VC.h;
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -144,6 +154,7 @@ const ui = (VC.ui = {
     window.addEventListener('resize', onResize);
     VC.bus.on('windowOpened', () => { layoutToasts(); requestAnimationFrame(layoutToasts); }); // again once content is in
     VC.bus.on('windowClosed', () => layoutToasts());
+    initIconLabels();
   },
   esc,
   sanitize,
@@ -645,6 +656,12 @@ const ui = (VC.ui = {
   modalCount: () => modals.length,
   /** Re-picks the toast lane (call when something toasts must avoid appears or moves). */
   layoutToasts: () => layoutToasts(),
+  /** True when a colour-emoji font is available (canvas probe; see the header). */
+  hasEmoji: true,
+  /** Short text caption for an icon-only control labelled `label` ('City Statistics' -> 'Stats'). */
+  abbr: (label) => abbr(label),
+  /** Labels the icon-only controls under root now (normally automatic). */
+  labelIcons: (root) => labelPass(root || ui.root),
 });
 
 /* ---------------- tweening (counters) ---------------- */
@@ -851,6 +868,171 @@ function initFocusRelease() {
     // selects: the dropdown is closed once 'change' fires; checkboxes / radios toggle on click
     if (t && (t.tagName === 'SELECT' || (t.tagName === 'INPUT' && /^(checkbox|radio)$/i.test(t.type)))) setTimeout(release, 0);
   }, true);
+}
+
+/* ---------------- emoji support / icon-only control labels ---------------- */
+/**
+ * Colour-emoji probe: draws a house on a small canvas; no coloured pixel = no colour emoji font (Linux without
+ * Noto Color Emoji, old Windows / macOS) -> the glyphs would be tofu or monochrome boxes.
+ */
+function probeEmoji() {
+  const q = VC.params ? VC.params.get('emoji') : null;
+  if (q === '0' || q === '1') return q === '1';
+  try {
+    const c = document.createElement('canvas');
+    c.width = c.height = 24;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    if (!g) return true;
+    // readback sanity check: canvas privacy protections return blank / noisy pixels -> no verdict
+    g.fillStyle = '#f00';
+    g.fillRect(0, 0, 4, 4);
+    const t = g.getImageData(1, 1, 1, 1).data;
+    if (!(t[0] > 200 && t[1] < 60 && t[2] < 60)) return true;
+    g.clearRect(0, 0, 24, 24);
+    g.textBaseline = 'top';
+    g.font = '18px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla", sans-serif';
+    g.fillText('\u{1F3E0}', 2, 2); // 🏠 (Emoji 1.0)
+    const d = g.getImageData(0, 0, 24, 24).data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] > 80 && Math.abs(d[i] - d[i + 1]) + Math.abs(d[i + 1] - d[i + 2]) > 60) return true;
+    }
+    return false;
+  } catch (e) {
+    return true; // unknown: keep the icons
+  }
+}
+let EMO_RE = null;
+try { EMO_RE = new RegExp('\\p{Extended_Pictographic}', 'u'); } catch (e) { EMO_RE = null; }
+const EMO_STRIP = /[\s\uFE0E\uFE0F\u200D\u20E3]|\uD83C[\uDFFB-\uDFFF]/g;
+/** True when text consists of emoji only (variation selectors, ZWJ and skin tones allowed). */
+function emojiOnly(t) {
+  if (!t || !EMO_RE) return false;
+  const s = t.replace(EMO_STRIP, '');
+  if (!s) return false;
+  for (const ch of s) if (!EMO_RE.test(ch)) return false;
+  return true;
+}
+const ABBR = {
+  statistics: 'Stats', policies: 'Policy', advisors: 'Advice', milestones: 'Ranks', disasters: 'Hazard',
+  education: 'Edu', transportation: 'Transit', landmarks: 'Sights', bulldozer: 'Doze', bulldoze: 'Doze', demolish: 'Doze',
+  terraform: 'Terra', terrain: 'Terra', residential: 'Res', commercial: 'Com', industrial: 'Ind', utilities: 'Util',
+  overlays: 'Maps', overlay: 'Maps', settings: 'Setup', screenshot: 'Photo', achievements: 'Awards', emergency: 'Emerg',
+  recreation: 'Parks', services: 'Serv.', inspect: 'Info', select: 'Info', notifications: 'News', minimize: 'Min',
+  how: 'Help', help: 'Help', population: 'Pop.', transport: 'Transit', sanitation: 'Waste', budget: 'Budget',
+  pause: 'Pause', play: 'Play', fast: 'Fast', faster: 'Fast', ultra: 'Ultra', fullscreen: 'Full', mute: 'Sound',
+  sound: 'Sound', audio: 'Sound', menu: 'Menu', advisor: 'Advice', inbox: 'Inbox', close: 'Close', dismiss: 'Close',
+};
+const STOP_WORDS = new Set(['city', 'the', 'and', 'of', 'a', 'an', 'my', 'to', 'new', 'open', 'show', 'toggle', 'your']);
+function abbr(label) {
+  const words = String(label || '').replace(/<[^>]*>/g, ' ').split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const w = words.find((x) => !STOP_WORDS.has(x.toLowerCase())) || words[0] || '';
+  const a = ABBR[w.toLowerCase()];
+  if (a) return a;
+  return w.length <= 6 ? w : w.slice(0, 5) + '.';
+}
+/** Plain-text label of a control: aria-label, title, else the first <b> (or all text) of its data-tip. */
+function labelOf(el) {
+  let l = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+  if (!l) {
+    const tip = el.getAttribute('data-tip') || '';
+    if (tip && tip !== '1') {
+      const m = /<b>([^<]+)<\/b>/i.exec(tip);
+      l = (m ? m[1] : tip.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+    }
+  }
+  if (l.length > 70) l = l.slice(0, 68) + '…';
+  if (l.indexOf('&') < 0) return l;
+  const t = document.createElement('textarea'); // decode entities (&amp; …) without parsing HTML
+  t.innerHTML = l;
+  return t.value;
+}
+const ICON_CTRL = 'button, [role="button"], .tab, .card, .seg-btn';
+let TEXT_RE = /[A-Za-z0-9\u00C0-\u024F\u0370-\u04FF]/;
+try { TEXT_RE = new RegExp('[\\p{L}\\p{N}]', 'u'); } catch (e) { /* old engines: Latin / Greek / Cyrillic */ }
+/** Default names for symbol-only controls without any label. */
+const SYMBOL_NAMES = { '×': 'Close', '✕': 'Close', '✖': 'Close', '−': 'Minimize', '–': 'Minimize', '+': 'Expand', '?': 'Help' };
+/** Labels one control: accessible name for icon-only controls, captions / decoration marks for emoji glyphs. */
+function labelControl(el) {
+  if (!el.isConnected) return;
+  // the glyph carriers: leaf elements (or bare text nodes) whose text is emoji only
+  const glyphs = [];
+  let other = '';
+  const walk = (n) => {
+    for (let c = n.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3) {
+        const t = c.nodeValue;
+        if (!t.trim()) continue;
+        if (emojiOnly(t)) glyphs.push(c);
+        else other += t;
+      } else if (c.nodeType === 1) {
+        const tag = c.tagName, cl = c.classList;
+        if (tag === 'KBD' || tag === 'svg' || tag === 'SVG' || cl.contains('kbd') || cl.contains('tbt-key') || cl.contains('dock-label') || cl.contains('card-badge') || /badge/.test(c.className)) continue;
+        if (!c.firstElementChild && emojiOnly(c.textContent)) glyphs.push(c);
+        else walk(c);
+      }
+    }
+  };
+  walk(el);
+  if (TEXT_RE.test(other)) {
+    // a labelled control: its emoji are decoration (hidden without an emoji font)
+    for (const g of glyphs) if (g.nodeType === 1 && !g.classList.contains('ui-emo-deco') && !g.classList.contains('ui-emo')) g.classList.add('ui-emo-deco');
+    return;
+  }
+  let label = labelOf(el);
+  if (!label && !glyphs.length) label = SYMBOL_NAMES[other.trim()] || '';
+  if (!label) return;
+  if (!el.getAttribute('aria-label')) el.setAttribute('aria-label', label);
+  if (!el.getAttribute('title') && !el.hasAttribute('data-tip') && !el._tip) el.setAttribute('title', label);
+  if (ui.hasEmoji || !glyphs.length) return;
+  const cap = abbr(label);
+  for (let g of glyphs) {
+    if (g.nodeType === 3) {
+      const span = document.createElement('span');
+      g.parentNode.insertBefore(span, g);
+      span.appendChild(g);
+      g = span;
+    }
+    if (g.dataset.abbr !== cap) g.dataset.abbr = cap;
+    if (!g.classList.contains('ui-emo')) g.classList.add('ui-emo');
+  }
+}
+function labelPass(root) {
+  if (!root || root.nodeType !== 1) return;
+  if (root.matches && root.matches(ICON_CTRL)) labelControl(root);
+  const list = root.querySelectorAll(ICON_CTRL);
+  for (let i = 0; i < list.length; i++) labelControl(list[i]);
+}
+function initIconLabels() {
+  ui.hasEmoji = probeEmoji();
+  document.documentElement.classList.toggle('no-emoji', !ui.hasEmoji);
+  if (!window.MutationObserver) return;
+  const pending = new Set();
+  let raf = 0;
+  const flush = () => {
+    raf = 0;
+    for (const el of pending) {
+      try { labelPass(el); } catch (e) { /* never break the UI over a label */ }
+    }
+    pending.clear();
+  };
+  const mo = new MutationObserver((recs) => {
+    for (let r = 0; r < recs.length; r++) {
+      const added = recs[r].addedNodes;
+      for (let i = 0; i < added.length; i++) {
+        const n = added[i];
+        if (n.nodeType === 1) pending.add(n);
+        else if (!ui.hasEmoji && n.nodeType === 3 && n.parentElement && !n.parentElement.classList.contains('ui-emo')) {
+          // a control whose glyph text was replaced (e.g. a toggle icon) needs its caption again
+          const c = n.parentElement.closest && n.parentElement.closest(ICON_CTRL);
+          if (c) pending.add(c);
+        }
+      }
+    }
+    if (pending.size && !raf) raf = requestAnimationFrame(flush);
+  });
+  mo.observe(ui.root, { childList: true, subtree: true });
+  pending.add(ui.root);
+  raf = requestAnimationFrame(flush);
 }
 
 /* ---------------- tooltips ---------------- */

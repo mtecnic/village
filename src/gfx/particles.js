@@ -6,14 +6,17 @@
  *   - soft lit billboards (alpha, depth-bucket sorted): smoke, steam, dust, contrail, fog, wake,
  *     droplets (fountain, splash) and rain-splash rings — noise-shaped, lit by sun/sky/lightning, fogged
  *   - additive HDR sprites: fire, spark, ember, firework, sparkle (star glints), flash
- *   - small lit voxel cubes with physics + bounce (opaque pass): debris, confetti, leaf
+ *   - small lit voxel cubes with physics + bounce (opaque pass): debris, confetti, leaf, coin (spinning gold
+ *     cubes with a warm self-glint: month-end income / level-up juice, see ui/hud_notify.js)
  *
  * API
  *   emit(type, x, y, z, opts)        one particle; returns its index or -1
  *   burst(type, x, y, z, n, opts)    n particles with type-specific spread; returns the count emitted
  *   opts: { vx, vy, vz, life, size, grow, color:[r,g,b] | paletteIndex, colors:[...], alpha, spread,
  *           emissive (soft types: warm self-glow), grav, jitter (position radius) }
- *   count(), clear(), TYPES (names), stats
+ *   coins(x, y, z, n)                a small shower of spinning gold coins + a few golden glints
+ *   count(), clear(), TYPES (names), stats, restore() (re-creates this layer's GL objects after a WebGL
+ *   context restore)
  *
  * AUTOMATIC EFFECTS (driven by the world, all culled near the camera):
  *   building emitters (VC.models emitters: smoke/steam/fire/sparkle/fountain) of built, powered,
@@ -62,6 +65,8 @@ const TYPES = {
   debris: { k: K_CUBE, life: [2.5, 4.5], size: [0.05, 0.12], col: [0.5, 0.48, 0.45], grav: 9.8, drag: 0.25, spread: 2.2, vy: 3.5, bounce: 0.35, jit: 0.3 },
   confetti: { k: K_CUBE, life: [4, 6.5], size: [0.035, 0.05], col: [1, 1, 1], grav: 1.3, drag: 1.9, spread: 3, vy: 4.5, flutter: 1.6, bounce: 0.05, jit: 0.3 },
   leaf: { k: K_CUBE, life: [2.5, 4], size: [0.035, 0.055], col: [0.2, 0.42, 0.1], grav: 1.1, drag: 1.6, spread: 1.4, vy: 1.6, flutter: 1, bounce: 0.1, jit: 0.3 },
+  // gold coins: pop up, spin, bounce once or twice and vanish (emis = default warm glint, not only at night)
+  coin: { k: K_CUBE, life: [1.5, 2.3], size: [0.07, 0.1], col: [0.95, 0.56, 0.08], grav: 8, drag: 0.35, spread: 1.7, vy: 4.4, bounce: 0.42, jit: 0.25, emis: 0.32 },
 };
 const TYPE_NAMES = Object.keys(TYPES);
 const TYPE_LIST = TYPE_NAMES.map((k) => TYPES[k]);
@@ -74,14 +79,14 @@ TYPE_NAMES.forEach((k, i) => (TYPE_ID[k] = i));
 const NT = TYPE_LIST.length;
 const TK = new Uint8Array(NT), TDRAG = new Float32Array(NT), TWIND = new Float32Array(NT), TBUOY = new Float32Array(NT);
 const TGRAV = new Float32Array(NT), TFLUT = new Float32Array(NT), TBOUNCE = new Float32Array(NT);
-const TFLICK = new Float32Array(NT), TPULSE = new Float32Array(NT);
+const TFLICK = new Float32Array(NT), TPULSE = new Float32Array(NT), TEMIS = new Float32Array(NT);
 const TJIT = new Float32Array(NT), TSPREAD = new Float32Array(NT), TVY = new Float32Array(NT), TGROW = new Float32Array(NT);
 const TLIFE0 = new Float32Array(NT), TLIFE1 = new Float32Array(NT), TSIZE0 = new Float32Array(NT), TSIZE1 = new Float32Array(NT), TA = new Float32Array(NT);
 const DK = new Float32Array(NT), DKY = new Float32Array(NT); // per-frame drag decay (xz, y)
 for (let t = 0; t < NT; t++) {
   const T = TYPE_LIST[t];
   TK[t] = T.k; TDRAG[t] = T.drag || 0; TWIND[t] = T.wind || 0; TBUOY[t] = T.buoy || 0; TGRAV[t] = T.grav || 0;
-  TFLUT[t] = T.flutter || 0; TBOUNCE[t] = T.bounce || 0.2; TFLICK[t] = T.flicker || 0; TPULSE[t] = T.pulse || 0;
+  TFLUT[t] = T.flutter || 0; TBOUNCE[t] = T.bounce || 0.2; TFLICK[t] = T.flicker || 0; TPULSE[t] = T.pulse || 0; TEMIS[t] = T.emis || 0;
   TJIT[t] = T.jit || 0; TSPREAD[t] = T.spread || 0; TVY[t] = T.vy || 0; TGROW[t] = T.grow || 1; TA[t] = T.a == null ? 1 : T.a;
   TLIFE0[t] = T.life[0]; TLIFE1[t] = T.life[1]; TSIZE0[t] = T.size[0]; TSIZE1[t] = T.size[1];
 }
@@ -91,6 +96,7 @@ const SMOKE_DARK = [0.1, 0.095, 0.09], SMOKE_WOOD = [0.55, 0.55, 0.58];
 const WELD_OPT = { spread: 1.4 };
 const AUTUMN_COLS = [[0.75, 0.3, 0.05], [0.85, 0.5, 0.08], [0.6, 0.16, 0.05], [0.5, 0.35, 0.12], [0.9, 0.7, 0.15]];
 const PETAL_COLS = [[1, 0.7, 0.8], [1, 0.85, 0.9], [0.98, 0.95, 0.97], [0.95, 0.55, 0.75]];
+const COIN_GLINT = { color: [3.2, 2.3, 0.6], jitter: 0.5 };
 
 /* ---------------- SoA pool ---------------- */
 const px = new Float32Array(MAX), py = new Float32Array(MAX), pz = new Float32Array(MAX);
@@ -172,6 +178,18 @@ const Pt = (VC.particles = {
     for (let i = 0; i < n; i++) if (spawn(tid, x, y, z, opts, true) >= 0) k++;
     return k;
   },
+  /** A small shower of spinning gold coins with a few golden glints (income / level-up juice). */
+  coins(x, y, z, n = 14) {
+    if (!isFinite(x + y + z)) return 0;
+    const k = Pt.burst('coin', x, y, z, n, null);
+    Pt.burst('sparkle', x, y + 0.3, z, Math.max(3, n >> 2), COIN_GLINT);
+    return k;
+  },
+  /** WebGL context restore: re-creates the programs' buffers / VAOs and the glow batch. */
+  restore() {
+    initGL();
+    Pt.glows = VC.fxgl.glowBatch(256);
+  },
 
   update(dt, rdt) {
     const S = VC.state;
@@ -243,9 +261,9 @@ function spawn(tid, x, y, z, o, isBurst) {
   cr[i] = col[0] * jv; cg[i] = col[1] * jv; cb[i] = col[2] * jv;
   ca[i] = o && o.alpha != null ? o.alpha : TA[tid];
   rot[i] = r() * M.PI2;
-  rotV[i] = (r() - 0.5) * (TK[tid] === K_CUBE ? 14 : 1.2);
+  rotV[i] = (r() - 0.5) * (tid === TYPE_ID.coin ? 26 : TK[tid] === K_CUBE ? 14 : 1.2);
   seed[i] = r();
-  emis[i] = o && o.emissive ? o.emissive : 0;
+  emis[i] = o && o.emissive ? o.emissive : TEMIS[tid];
   ptype[i] = tid;
   rest[i] = 0;
   return i;
@@ -769,7 +787,8 @@ function onBldChange(b) {
   if (b.fire > 0) burnSet.add(b); // (sim.ignite announces every new fire with world.changed)
   const prev = levelSeen.get(b);
   levelSeen.set(b, b.level);
-  if (prev == null || !(b.level > prev) || b.built < 1) return;
+  // (a sim level-up replays the construction, so b.built is < 1 here: no built check)
+  if (prev == null || !(b.level > prev) || b.abandoned) return;
   const cx = b.x + b.w / 2, cz = b.z + b.d / 2;
   if (!nearCam(cx, cz, 60)) return;
   let hgt = b.hgt || 1;

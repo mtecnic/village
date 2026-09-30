@@ -49,9 +49,23 @@
  * EXTRA HELPERS: G.frustumPlanes(m, out), G.boxVisible(planes, x0,y0,z0,x1,y1,z1), G.sphereVisible(planes,
  *   x,y,z,r), G.depthProgram(name, vsBody, opts) (empty-FS program for shadow casters), G.sunDirection(a,
  *   season, out), G.profile() -> per-phase GPU ms (debug; stalls), G.camFrustum (camera planes this frame),
- *   G.FIXED_TOD (settings.dayNight presets), G.aq (dynamic-resolution controller state, debug).
+ *   G.FIXED_TOD (settings.dayNight presets), G.aq (dynamic-resolution controller state, debug),
+ *   G.onFrame(fn) -> off(): fn(ctx) after every RENDERED frame (skipped frames keep the old image and call
+ *   nothing), with this frame's camera matrices — for DOM overlays anchored to world points (they then move
+ *   in lockstep with the 3D image instead of one frame behind). Errors are caught (logged once per fn).
+ *   G.dpr (effective device-pixel ratio of the canvas), G.pixelBudget() (internal render pixels allowed).
  * DYNAMIC RESOLUTION: autoQuality() scales the internal resolution (settings.autoQuality) from GPU-bound
- *   frames only (GPU timer queries when available; CPU-bound frames — sim ticks, autosave — never lower it).
+ *   frames only (GPU timer queries when available, else sampled fence latency; CPU-bound frames — sim ticks,
+ *   autosave — never lower it). VSYNC-AWARE: the display / rAF cadence is measured (30 / 48 / 50 Hz caps such
+ *   as battery saver or Low Power Mode are not a slow GPU; 120 / 144 Hz displays are not asked for more than
+ *   60 fps). See the DYNAMIC RESOLUTION block below.
+ * PIXEL BUDGET: the internal render size is capped in absolute pixels per preset (VC.QUALITY[q].maxPx; for a
+ *   preset without one: low 1.2 / medium 2.1 / high 3.7 / ultra 8.3 Mpx), so 4K / 5K displays do not allocate
+ *   8+ Mpx HDR targets.
+ *   The canvas keeps the full (capped) DPR for crisp compositing; only the internal targets shrink.
+ * CANVAS SIZE: follows window resizes AND devicePixelRatio changes without a resize (window dragged between a
+ *   Retina and a 1x monitor: matchMedia resolution watcher). G.W / G.H are the REAL drawing-buffer size
+ *   (gl.drawingBufferWidth / Height: browsers may allocate less than canvas.width for huge canvases).
  *
  * SHADER PROGRAMS: G.program(name, vs, fs, opts) returns {name, prog, u, use()}. Requesting the same name with
  *   identical sources returns the cached program. Programs link asynchronously where possible
@@ -118,10 +132,7 @@ G.init = function (canvas) {
   if (!gl) return false;
   G.gl = gl;
   initCaps(gl);
-  G.caps.renderer = (() => {
-    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
-    return dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-  })();
+  G.caps.renderer = rendererName(gl);
   // CPU rasterizers (SwiftShader, llvmpipe, WARP): shaders get `#define LIB_SOFT` (layers may skip costly
   // extras) and the shadow map is smaller / refreshed less often, so headless tests stay responsive.
   // URL ?soft=0 / ?soft=1 overrides the detection (e.g. full-quality screenshots in headless tests).
@@ -130,14 +141,16 @@ G.init = function (canvas) {
   G.caps.software = softParam != null ? softParam === '1' : G.caps.cpuRenderer;
 
   initResources(gl);
-  // Fallback tonemap (used only when VC.post is missing or failed).
+  // Fallback tonemap (used only when VC.post is missing or failed). Lazy: a driver that cannot compile it
+  // must not stop the boot (it is finalized on first use, i.e. almost never).
   G._tonemap = G.program(
     'core_tonemap',
     `out vec2 vUv; void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); vUv = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`,
     `in vec2 vUv; uniform sampler2D uSrc; uniform float uExposure; out vec4 fragColor;
      vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
      void main(){ vec3 c = texture(uSrc, vUv).rgb; c = aces(c * uExposure * 0.8); c = pow(c, vec3(1.0/2.2));
-       vec2 q = vUv - 0.5; c *= 1.0 - dot(q, q) * 0.45; fragColor = vec4(c, 1.0); }`
+       vec2 q = vUv - 0.5; c *= 1.0 - dot(q, q) * 0.45; fragColor = vec4(c, 1.0); }`,
+    { lazy: true }
   );
   initGizmos();
 
@@ -152,17 +165,62 @@ G.init = function (canvas) {
   canvas.addEventListener('webglcontextrestored', () => onContextRestored());
   // Main-thread frame start (this callback runs before main.js' frame callback): lets the resolution
   // controller tell CPU-bound frames (simulation ticks, autosave) from GPU-bound ones.
+  // It also records every rAF interval (display cadence, see vsyncEstimate).
   const tick = () => {
-    G._rafStart = performance.now();
+    const t = performance.now();
+    if (G._rafStart && !document.hidden) rafPush(t - G._rafStart);
+    G._rafStart = t;
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+  // a hidden tab gets no rAF: the first interval after it returns is not a frame time
+  document.addEventListener('visibilitychange', () => { G._rafStart = 0; G._lastRender = 0; aqReset(); });
   // pre-compile every terrain feature variant (rain / snow / overlay) in the background
   G.warmup(() => VC.terrain && VC.terrain.warmup && VC.terrain.warmup(true));
   G.resize();
   window.addEventListener('resize', () => G.resize());
+  watchDpr();
   return true;
 };
+
+/**
+ * Renderer name for diagnostics / CPU-rasterizer detection. RENDERER first: Firefox already returns the
+ * (sanitised) real GPU there and logs a deprecation warning when WEBGL_debug_renderer_info is requested;
+ * the debug extension is only queried when RENDERER is the generic 'WebKit WebGL' (Chrome, Safari).
+ */
+function rendererName(gl) {
+  let r = '';
+  try { r = String(gl.getParameter(gl.RENDERER) || ''); } catch (e) { r = ''; }
+  if (!r || /^(webkit webgl|webgl|generic renderer)$/i.test(r.trim())) {
+    try {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      const u = dbg && gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+      if (u) r = String(u);
+    } catch (e) { /* keep RENDERER */ }
+  }
+  return r;
+}
+
+/**
+ * devicePixelRatio can change without a window resize (a window dragged between a Retina and a 1x display,
+ * OS scaling changes): a one-shot matchMedia query on the current resolution re-arms itself on every change.
+ */
+function watchDpr() {
+  if (typeof window === 'undefined' || !window.matchMedia) return;
+  try {
+    const mq = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
+    const on = () => {
+      G.resize();
+      if (VC.ui && VC.ui.layoutToasts) VC.ui.layoutToasts();
+      watchDpr();
+    };
+    if (mq.addEventListener) mq.addEventListener('change', on, { once: true });
+    else if (mq.addListener) {
+      const f = () => { mq.removeListener(f); on(); };
+      mq.addListener(f); // Safari < 14
+    }
+  } catch (e) { /* old browsers: window resize only */ }
+}
 
 /** Extensions / capabilities (called again after a context restore: extensions must be re-enabled). */
 function initCaps(gl) {
@@ -509,22 +567,35 @@ G.quadIndexBuffer = function (quads) {
 G.quality = function () {
   return VC.QUALITY[(VC.settings && VC.settings.quality) || 'high'] || VC.QUALITY.high;
 };
+/** Default absolute pixel budgets (internal render pixels) per preset key; VC.QUALITY[q].maxPx overrides. */
+const MAX_PX = { low: 1.2e6, medium: 2.1e6, high: 3.7e6, ultra: 8.3e6 };
+/** Internal render-pixel budget of the current preset. */
+G.pixelBudget = function () {
+  const q = G.quality();
+  if (q && q.maxPx > 0) return q.maxPx;
+  const k = (VC.settings && VC.settings.quality) || 'high';
+  return MAX_PX[k] || MAX_PX.high;
+};
 G.resize = function () {
   const gl = G.gl;
   if (!gl) return;
   const q = G.quality();
-  const dpr = Math.min(window.devicePixelRatio || 1, q.maxDpr);
+  const dpr = Math.min(window.devicePixelRatio || 1, q.maxDpr || 1);
   const cw = Math.max(1, Math.floor(window.innerWidth * dpr));
   const ch = Math.max(1, Math.floor(window.innerHeight * dpr));
   if (G.canvas.width !== cw || G.canvas.height !== ch) {
     G.canvas.width = cw;
     G.canvas.height = ch;
   }
-  G.W = cw;
-  G.H = ch;
-  G.resScale = M.clamp(q.scale * G.autoScale, 0.35, 1);
-  const rw = Math.max(1, Math.round(cw * G.resScale));
-  const rh = Math.max(1, Math.round(ch * G.resScale));
+  // the real drawing buffer (may be smaller than requested for very large canvases)
+  G.W = Math.max(1, gl.drawingBufferWidth || cw);
+  G.H = Math.max(1, gl.drawingBufferHeight || ch);
+  G.dpr = dpr;
+  // preset scale, capped by the absolute pixel budget; dynamic resolution scales relative to that base
+  const base = Math.min(q.scale || 1, Math.sqrt(G.pixelBudget() / (G.W * G.H)));
+  G.resScale = M.clamp(base * G.autoScale, 0.35, 1);
+  const rw = Math.max(1, Math.round(G.W * G.resScale));
+  const rh = Math.max(1, Math.round(G.H * G.resScale));
   if (rw !== G.rw || rh !== G.rh || !G.hdr) {
     G.rw = rw;
     G.rh = rh;
@@ -551,84 +622,223 @@ function createHDR() {
 }
 
 /*
- * DYNAMIC RESOLUTION: adapts G.autoScale (0.5..1, steps of 0.05) so GPU-bound scenes hold ~50+ fps.
- * Per rendered frame it records the frame interval, the main-thread time of the frame (rAF start -> end of
- * render: simulation, module updates, draw submission) and, with EXT_disjoint_timer_query_webgl2, the GPU
- * time. Every ~1 s window uses MEDIANS (a single hitch — month tick, autosave — cannot trigger anything):
- *   - slow window (> 24 ms): counts only when the GPU is the bottleneck (GPU timer > 80 % of the budget, or,
- *     without a timer, the main thread was idle for > 40 % of the frame). CPU-bound windows never lower the
- *     resolution: fewer pixels would not help.
- *   - 2 slow windows -> step down: proportional to the measured GPU time when known, else a fixed 0.05 /
- *     0.1 step (the frame interval is vsync-quantized, 33.3 ms at "30 fps" says nothing about how much
- *     too slow the GPU is, so proportional steps overshoot).
- *   - 4 fast windows (< 18.5 ms) -> probe up by 0.05 (with a GPU timer only if the predicted cost fits).
+ * DYNAMIC RESOLUTION: adapts G.autoScale (0.5..1, steps of 0.05) so GPU-bound scenes hold their frame rate.
+ * Per rendered frame it records the frame interval (REAL time between rendered frames: main.js clamps its
+ * dt to 0.1 s, which would stretch a 1 s window over many seconds on a hopelessly slow GPU), the main-thread
+ * time of the frame (rAF start -> end of render: simulation, module updates, draw submission) and the GPU
+ * cost: the GPU timer
+ * (EXT_disjoint_timer_query_webgl2) when available, else a SAMPLED FENCE LATENCY (every 4th frame a fence is
+ * polled from short timers until it signals: time from the start of the frame's GL work to its completion —
+ * max(submission, GPU time), which only exceeds the main-thread time when the GPU is the bottleneck).
+ * VSYNC AWARENESS: every rAF interval goes into a ring; the window's 20th percentile, snapped to a standard
+ * refresh rate (30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240 Hz), is the display cadence V. vmin = the
+ * fastest cadence seen (a slower one replaces it after 60 s: battery saver switched on). The frame budget B
+ * is max(vmin, 16.7 ms) — never more than 60 fps is demanded — except when the GPU cost fills the whole
+ * interval (the cadence is GPU-limited, not display-limited): then B = 16.7 ms. So a 30 Hz rAF cap (Chrome
+ * Energy Saver, Safari Low Power Mode) with an idle GPU never lowers the resolution, and 48 / 50 Hz panels
+ * can climb back up (their frames count as fast).
+ * Every ~1 s window uses MEDIANS (a single hitch — month tick, autosave — cannot trigger anything):
+ *   - slow window (interval > max(24 ms, 1.3 B)): counts only when the GPU is the bottleneck (GPU cost
+ *     > 80 % of the budget or > 70 % of the interval; a fence latency must also be clearly above the
+ *     main-thread time, since it includes the submission; without any GPU measurement, the old heuristic —
+ *     main thread idle > 40 % — and only while the display itself runs at 57+ Hz).
+ *     CPU-bound windows never lower the resolution: fewer pixels would not help. A hitch (one long frame:
+ *     shader compile, autosave) is CPU time, so it never counts either.
+ *   - 2 slow windows -> step down: proportional to the measured GPU cost when known, else a fixed 0.05 /
+ *     0.1 step (the frame interval is vsync-quantized, so proportional steps from it overshoot).
+ *   - 4 fast windows (interval < max(18.5 ms, 1.12 B)) -> probe up by 0.05 (only if the predicted GPU cost
+ *     fits when it is measured). A window whose measured GPU cost is under half the budget while it is not
+ *     GPU-bound counts as fast too (the frame rate is limited elsewhere: more pixels cost nothing).
  *   - a level the controller had to leave for being slow is blocked, with exponential backoff per level
  *     (30, 60, 120, 240 s), so a level that failed is not retried every half minute (no saw-tooth).
- *     With a GPU timer, a probe whose predicted cost clearly fits ignores the block (scene got lighter).
+ *     With a GPU measurement, a probe whose predicted cost clearly fits ignores the block (scene got lighter).
  *   - every change is followed by a 1.5 s settle period (reallocation hitches are ignored).
- * G.aq exposes the state (debug).
+ *   - a step down is judged 2 windows after it settled: if neither the frame interval (-8 %) nor the GPU cost
+ *     (by at least half of the pixel saving) improved, fewer pixels were not the cure (vertex-bound scene; slow compositor / present, which
+ *     fence latency cannot tell from our GPU work): the step is undone and stepping down pauses for 60 s,
+ *     doubling up to 10 min while it keeps being futile.
+ * G.aq exposes the state (debug; G.aq.last = the last window's figures).
  */
-const AQ_BUDGET = 20, AQ_SLOW = 24, AQ_FAST = 18.5;
-const AQ = (G.aq = { t: 0, iv: [], cpu: [], gpu: [], slow: 0, fast: 0, settle: 0, time: 0, fails: new Uint8Array(21), until: new Float64Array(21), last: null });
+const AQ_BUDGET = 20, AQ_SLOW = 24, AQ_FAST = 18.5, MS60 = 1000 / 60;
+const AQ = (G.aq = {
+  t: 0, iv: [], cpu: [], gpu: [], fl: [], slow: 0, fast: 0, settle: 0, time: 0, useTimer: true,
+  probe: null, futile: 0, futileUntil: 0, prevWin: null,
+  fails: new Uint8Array(21), until: new Float64Array(21), last: null,
+  raf: new Float32Array(160), rafI: 0, rafN: 0, rafWin: 0, rafSort: new Float32Array(160), vsync: MS60, vmin: 0, vage: 0,
+});
+/** One display (rAF) interval into the ring. */
+function rafPush(ms) {
+  AQ.raf[AQ.rafI] = ms;
+  AQ.rafI = (AQ.rafI + 1) % AQ.raf.length;
+  if (AQ.rafN < AQ.raf.length) AQ.rafN++;
+  AQ.rafWin++;
+}
+/** Median rAF interval of the current window (the latest samples only; NaN without any). */
+function rafRecent() {
+  const L = AQ.raf.length, n = Math.min(AQ.rafWin, AQ.rafN);
+  if (!n) return NaN;
+  const b = AQ.rafSort.subarray(0, n);
+  for (let k = 0; k < n; k++) b[k] = AQ.raf[(AQ.rafI - 1 - k + L * 2) % L];
+  b.sort();
+  return b[n >> 1];
+}
+const REFRESH_MS = [30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240].map((hz) => 1000 / hz);
 function aqReset() {
-  AQ.t = 0; AQ.iv.length = AQ.cpu.length = AQ.gpu.length = 0; AQ.slow = AQ.fast = 0;
+  AQ.t = 0; AQ.iv.length = AQ.cpu.length = AQ.gpu.length = AQ.fl.length = 0; AQ.slow = AQ.fast = 0; AQ.rafWin = 0;
 }
 function median(a) {
   if (!a.length) return NaN;
   const b = a.slice().sort((x, y) => x - y);
   return b[b.length >> 1];
 }
-/** One rendered frame: interval rdt (s), main-thread ms. Returns the new scale or 0 (no change). */
-function aqFrame(rdt, cpuMs) {
-  if (AQ.settle > 0) { AQ.settle -= rdt; if (AQ.settle > 0) { AQ.gpu.length = 0; return 0; } }
-  AQ.t += rdt;
-  AQ.iv.push(rdt * 1000);
+/** Display / rAF cadence (ms): 20th percentile of the recent rAF intervals, snapped to a standard rate. */
+function vsyncEstimate() {
+  const n = AQ.rafN;
+  if (n < 20) return AQ.vsync;
+  const b = AQ.rafSort.subarray(0, n);
+  b.set(AQ.raf.subarray(0, n));
+  b.sort();
+  const p = b[Math.floor(n * 0.2)];
+  let best = p, bd = Infinity;
+  for (let i = 0; i < REFRESH_MS.length; i++) {
+    const d = Math.abs(REFRESH_MS[i] - p) / REFRESH_MS[i];
+    if (d < bd) { bd = d; best = REFRESH_MS[i]; }
+  }
+  return bd < 0.08 ? best : p;
+}
+/**
+ * One rendered frame: real interval since the previous rendered frame (s), main-thread ms. Returns the new
+ * scale or 0 (no change).
+ */
+function aqFrame(iv, cpuMs) {
+  if (AQ.settle > 0) { AQ.settle -= iv; if (AQ.settle > 0) { AQ.gpu.length = AQ.fl.length = 0; return 0; } }
+  AQ.t += iv;
+  AQ.iv.push(iv * 1000);
   AQ.cpu.push(cpuMs);
   if (AQ.t < 1.0) return 0;
-  const win = AQ.t, fm = median(AQ.iv), cm = median(AQ.cpu), gm = median(AQ.gpu);
-  AQ.t = 0; AQ.iv.length = AQ.cpu.length = AQ.gpu.length = 0;
+  const win = AQ.t, fm = median(AQ.iv), cm = median(AQ.cpu), gm = median(AQ.gpu), flm = AQ.fl.length >= 2 ? median(AQ.fl) : NaN;
+  const rr = rafRecent(); // this window's display cadence (the percentile below lags a cadence change by seconds)
+  AQ.t = 0; AQ.iv.length = AQ.cpu.length = AQ.gpu.length = AQ.fl.length = 0; AQ.rafWin = 0;
   AQ.time += win;
-  const hasGpu = gm === gm; // not NaN
+  // display cadence
+  const V = (AQ.vsync = vsyncEstimate());
+  if (!AQ.vmin || V < AQ.vmin * 0.9) { AQ.vmin = V; AQ.vage = 0; }
+  else if (V > AQ.vmin * 1.2) { AQ.vage += win; if (AQ.vage > 60) { AQ.vmin = V; AQ.vage = 0; } }
+  else AQ.vage = 0;
+  const hasGpu = gm === gm; // not NaN: GPU timer
+  const est = hasGpu ? gm : flm; // GPU cost estimate (timer, else fence latency), NaN when unknown
+  const hasEst = est === est;
+  const saturated = hasEst && est > fm * 0.8; // the GPU fills the interval: the cadence is GPU-limited
+  const B = saturated ? MS60 : Math.max(AQ.vmin || MS60, MS60);
+  const budget = Math.max(AQ_BUDGET, B * 0.9);
+  const slowMs = Math.max(AQ_SLOW, B * 1.3), fastMs = Math.max(AQ_FAST, B * 1.12);
   const s = G.autoScale, lv = Math.round(s * 20);
   let gpuBound;
-  if (hasGpu) gpuBound = gm > AQ_BUDGET * 0.8 || gm > fm * 0.7;
-  else gpuBound = cm < fm * 0.6;
-  AQ.last = { fm: +fm.toFixed(1), cpu: +cm.toFixed(1), gpu: hasGpu ? +gm.toFixed(1) : null, gpuBound, scale: s };
-  if (fm > AQ_SLOW) {
+  if (hasGpu) gpuBound = gm > budget * 0.8 || gm > fm * 0.7;
+  // fence latency ~ max(submission, GPU time): it points at the GPU only when clearly above the main thread
+  else if (hasEst) gpuBound = est > cm * 1.25 && (est > budget * 0.8 || est > fm * 0.7);
+  // no GPU measurement at all: an idle main thread only means something while the display runs at 57+ Hz
+  // (at a capped 30 / 50 Hz cadence the main thread idles by design), now and in this window
+  else gpuBound = V <= MS60 * 1.05 && !(rr > MS60 * 1.15) && cm < fm * 0.6;
+  AQ.last = { fm: +fm.toFixed(1), cpu: +cm.toFixed(1), gpu: hasGpu ? +gm.toFixed(1) : null, fence: flm === flm ? +flm.toFixed(1) : null, vsync: +V.toFixed(1), vmin: +(AQ.vmin || 0).toFixed(1), budget: +B.toFixed(1), gpuBound, scale: s };
+  // "roomy": the frame rate is short of the target for another reason (main thread, compositor) while our GPU
+  // work is small: fewer pixels would not help, more cost nothing — counts like a fast window
+  const roomy = hasEst && !gpuBound && est < budget * 0.5;
+  if (fm > slowMs && gpuBound) {
     AQ.fast = 0;
-    AQ.slow = gpuBound ? AQ.slow + 1 : 0;
-  } else if (fm < AQ_FAST) {
+    AQ.slow++;
+  } else if (fm < fastMs || roomy) {
     AQ.slow = 0;
     AQ.fast++;
   } else AQ.slow = AQ.fast = 0;
+  const pw = AQ.prevWin;
+  AQ.prevWin = { fm, est };
+  // A step down that bought nothing — fewer pixels, yet neither the frame interval nor the GPU cost improved
+  // (a vertex-bound scene, or a slow compositor / present that fence latency cannot tell from our own GPU
+  // work) — is undone, and stepping down pauses (60 s, doubling up to 10 min).
+  const P = AQ.probe;
+  if (P && s !== P.to) AQ.probe = null;
+  else if (P) { P.fm2 += fm; P.est2 += est; P.n2++; }
+  if (P && AQ.probe && P.n2 >= 2) {
+    AQ.probe = null;
+    // means over the 2 windows before / after the step; at least half of the pixel saving must show in the
+    // GPU cost (or the frame interval must improve)
+    const r2 = (P.to * P.to) / (P.from * P.from), fa = P.fm2 / P.n2, ea = P.est2 / P.n2;
+    const gain = fa < P.fm * 0.92 || (ea === ea && P.est === P.est && ea < P.est * (1 - 0.5 * (1 - r2)));
+    AQ.last.gain = gain;
+    if (!gain) {
+      AQ.futile = Math.min(600, AQ.futile ? AQ.futile * 2 : 60);
+      AQ.futileUntil = AQ.time + AQ.futile;
+      AQ.slow = AQ.fast = 0;
+      const pl = Math.round(P.from * 20);
+      AQ.fails[pl] = 0; AQ.until[pl] = 0; // that level was not the problem
+      return P.from;
+    }
+    AQ.futile = 0;
+  }
   let n = s;
   if (AQ.slow >= 2) {
     AQ.slow = 0;
-    // this level is too slow: block it (exponential backoff per level)
-    AQ.fails[lv] = Math.min(AQ.fails[lv] + 1, 4);
-    AQ.until[lv] = AQ.time + 30 * Math.pow(2, AQ.fails[lv] - 1);
-    const target = hasGpu ? s * Math.sqrt((AQ_BUDGET * 0.9) / gm) : s - (fm > 40 ? 0.1 : 0.05);
-    n = M.clamp(target, s - 0.15, s - 0.05);
+    if (AQ.time >= AQ.futileUntil) {
+      // this level is too slow: block it (exponential backoff per level)
+      AQ.fails[lv] = Math.min(AQ.fails[lv] + 1, 4);
+      AQ.until[lv] = AQ.time + 30 * Math.pow(2, AQ.fails[lv] - 1);
+      const target = hasEst ? s * Math.sqrt((budget * 0.9) / est) : s - (fm > 40 ? 0.1 : 0.05);
+      n = M.clamp(target, s - 0.15, s - 0.05);
+    }
   } else if (AQ.fast >= 4 && s < 1) {
     AQ.fast = 0;
     const up = s + 0.05, ul = lv + 1;
-    const pred = hasGpu ? (gm * (up * up)) / (s * s) : 0;
-    const blocked = AQ.time < AQ.until[ul] && !(hasGpu && pred < AQ_BUDGET * 0.6);
-    if (!blocked && (!hasGpu || pred < AQ_BUDGET * 0.85)) n = up;
+    const pred = hasEst ? (est * (up * up)) / (s * s) : 0;
+    const blocked = AQ.time < AQ.until[ul] && !(hasEst && pred < budget * 0.6);
+    if (!blocked && (!hasEst || pred < budget * 0.85)) n = up;
   }
   // a level that has not failed for a long time is forgiven one failure
   for (let i = 10; i <= 20; i++) if (AQ.fails[i] && AQ.time > AQ.until[i] + 240) { AQ.fails[i]--; AQ.until[i] = AQ.time - 1; }
   n = Math.round(M.clamp(n, 0.5, 1) * 20) / 20;
+  // judge a step down over the two windows after it settled (against the two slow windows before it)
+  if (n < s) {
+    AQ.probe = { from: s, to: n, fm: pw ? (fm + pw.fm) / 2 : fm, est: pw ? (est + pw.est) / 2 : est, fm2: 0, est2: 0, n2: 0 };
+    AQ.prevWin = null;
+  }
   return n !== s ? n : 0;
 }
-function autoQuality(rdt, cpuMs) {
+/**
+ * Test hooks (debug only). AQ.feed(intervalMs, cpuMs, gpuMs?, fenceMs?, rafMs?) feeds one synthetic rendered
+ * frame (interval, main-thread time, optional GPU timer / fence latency) plus one display (rAF) interval, and
+ * applies a decision like autoQuality does (without reallocating targets); returns the new scale or 0.
+ * AQ.feedRaf(ms) adds a display interval alone (a vsync the frame pacing skipped). AQ.resetAll(scale = 1)
+ * forgets everything (cadence history, blocked levels) and sets G.autoScale. AQ.useTimer = false forces the
+ * fence-latency path on GPUs that have the timer extension.
+ */
+AQ.feed = function (intervalMs, cpuMs, gpuMs, fenceMs, rafMs) {
+  rafPush(rafMs || intervalMs);
+  if (gpuMs != null && AQ.settle <= 0) AQ.gpu.push(gpuMs);
+  if (fenceMs != null && AQ.settle <= 0) AQ.fl.push(fenceMs);
+  const n = aqFrame(intervalMs / 1000, cpuMs);
+  if (n) { G.autoScale = n; AQ.settle = 1.5; aqReset(); }
+  return n;
+};
+/** (tests) one display interval without a rendered frame (frames the pacing skipped). */
+AQ.feedRaf = (ms) => rafPush(ms);
+AQ.resetAll = function (scale) {
+  aqReset();
+  AQ.settle = 0; AQ.time = 0; AQ.last = null;
+  AQ.fails.fill(0); AQ.until.fill(0);
+  AQ.probe = AQ.prevWin = null; AQ.futile = AQ.futileUntil = 0;
+  AQ.rafI = AQ.rafN = AQ.rafWin = 0; AQ.vsync = MS60; AQ.vmin = 0; AQ.vage = 0;
+  G.autoScale = scale || 1;
+};
+/** iv: real seconds since the previous rendered frame; cpuMs: main-thread ms of this frame. */
+function autoQuality(iv, cpuMs) {
   if (!VC.settings || !VC.settings.autoQuality) {
     if (G.autoScale !== 1) { G.autoScale = 1; G.resize(); }
     aqReset();
     return;
   }
   if (typeof document !== 'undefined' && document.hidden) return;
-  const n = aqFrame(rdt, cpuMs);
+  if (!(iv > 0)) return;
+  const n = aqFrame(Math.min(iv, 5), cpuMs);
   if (n) {
     G.autoScale = n;
     AQ.settle = 1.5;
@@ -637,10 +847,40 @@ function autoQuality(rdt, cpuMs) {
   }
 }
 
+/*
+ * Fence-latency sampler (no GPU timer): every 4th rendered frame a fence is inserted after the frame and
+ * polled from short timers (the sync status only updates between tasks) until it signals; the time from the
+ * start of the frame's GL work to completion feeds AQ.fl. At most one sample is in flight.
+ */
+const FL = { sync: null, t0: 0, timer: 0 };
+function fenceSample(gl, t0) {
+  if (FL.sync || (GT.ext && AQ.useTimer) || G.frameCount % 4 || !VC.settings || !VC.settings.autoQuality || AQ.settle > 0) return;
+  const f = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (!f) return;
+  FL.sync = f;
+  FL.t0 = t0;
+  FL.timer = setTimeout(fencePoll, 1);
+}
+function fencePoll() {
+  FL.timer = 0;
+  const gl = G.gl, f = FL.sync;
+  if (!f) return;
+  if (G.lost || !gl || gl.isContextLost()) { FL.sync = null; return; }
+  const st = gl.getSyncParameter(f, gl.SYNC_STATUS);
+  const dt = performance.now() - FL.t0;
+  if (st === gl.SIGNALED || dt > 250) {
+    gl.deleteSync(f);
+    FL.sync = null;
+    if (st === gl.SIGNALED && AQ.settle <= 0) AQ.fl.push(dt);
+    return;
+  }
+  FL.timer = setTimeout(fencePoll, 2);
+}
+
 /* GPU frame timer (EXT_disjoint_timer_query_webgl2): feeds the resolution controller when available. */
 const GT = { ext: null, pool: [], inflight: [], active: null };
 function gpuTimerBegin(gl) {
-  if (!GT.ext || GT.active || GT.inflight.length >= 4 || !VC.settings || !VC.settings.autoQuality) return;
+  if (!GT.ext || !AQ.useTimer || GT.active || GT.inflight.length >= 4 || !VC.settings || !VC.settings.autoQuality) return;
   const q = GT.pool.pop() || gl.createQuery();
   gl.beginQuery(GT.ext.TIME_ELAPSED_EXT, q);
   GT.active = q;
@@ -1110,7 +1350,8 @@ function initGizmos() {
     `layout(location=0) in vec3 aPos; layout(location=1) in vec4 aCol; out vec4 vCol; out vec3 vWp;
      void main(){ vCol = aCol; vWp = aPos; gl_Position = uViewProj * vec4(aPos, 1.0); }`,
     `in vec4 vCol; in vec3 vWp; out vec4 fragColor;
-     void main(){ float pulse = 0.85 + 0.15 * sin(TIME * 6.0); fragColor = vec4(vCol.rgb * (1.0 + NIGHT * 0.5), vCol.a * pulse); }`
+     void main(){ float pulse = 0.85 + 0.15 * sin(TIME * 6.0); fragColor = vec4(vCol.rgb * (1.0 + NIGHT * 0.5), vCol.a * pulse); }`,
+    { lazy: true } // (finalized on the first tool preview; a compile failure never stops the boot)
   );
   GZ.vbo = gl.createBuffer();
   GZ.vao = gl.createVertexArray();
@@ -1327,7 +1568,12 @@ G.render = function (dt, rdt, force) {
     G.drawLayers('opaque', ctx);
     if (G._prof) profMark('opaque');
     G.drawLayers('transparent', ctx);
-    drawGizmos();
+    try { drawGizmos(); } catch (e) {
+      // (a gizmo program that failed to compile must not cost every frame its post pass)
+      if (!G._gizmoErr) console.error('[gfx] gizmos failed', e);
+      G._gizmoErr = true;
+      G.gizmo.clear();
+    }
     G.drawLayers('late', ctx);
     if (G._prof) profMark('transparent');
   }
@@ -1364,15 +1610,38 @@ G.render = function (dt, rdt, force) {
   if (!force) gpuTimerEnd(gl);
   if (CAP.queue.length) captureNow(gl);
   gpuFence(gl, now);
+  if (!force) fenceSample(gl, now);
   if (G._prof) profMark('post');
   if (!force) {
     const t = performance.now();
     // main-thread time of this frame: rAF start (core tick) -> now, or this render call alone
     const start = G._rafStart && t - G._rafStart < 1000 ? G._rafStart : now;
-    autoQuality(rdt, t - start);
+    // real interval since the previous rendered frame (skipped frames included; 0 after a hidden tab)
+    const iv = G._lastRender ? (now - G._lastRender) / 1000 : 0;
+    G._lastRender = now;
+    autoQuality(iv, t - start);
   }
   if (CAP.jobs.length) capturePoll();
+  if (FH.length) frameHooks(ctx);
 };
+
+/* Post-frame hooks (G.onFrame): DOM overlays synced to the rendered camera. */
+const FH = [];
+G.onFrame = function (fn) {
+  if (typeof fn !== 'function') return () => {};
+  const e = { fn, err: false };
+  FH.push(e);
+  return () => { const i = FH.indexOf(e); if (i >= 0) FH.splice(i, 1); };
+};
+function frameHooks(ctx) {
+  for (let i = 0; i < FH.length; i++) {
+    const e = FH[i];
+    try { e.fn(ctx); } catch (err) {
+      if (!e.err) console.error('[gfx] onFrame hook failed', err);
+      e.err = true;
+    }
+  }
+}
 
 /* GPU-synchronous phase timing (debug only: stalls the pipeline). */
 const _profPx = new Uint8Array(4);
@@ -1542,7 +1811,10 @@ G.onRestore = function (fn, owner) {
 function onContextLost() {
   G.lost = true;
   G.lostCount = (G.lostCount || 0) + 1;
+  G._lastRender = 0;
   FP.fences.length = FP.times.length = 0;
+  if (FL.timer) clearTimeout(FL.timer);
+  FL.sync = null; FL.timer = 0;
   GT.inflight.length = GT.pool.length = 0;
   GT.active = null;
   for (const c of CAP.queue) c.resolve(null);
@@ -1551,7 +1823,40 @@ function onContextLost() {
   CAP.jobs = [];
   CAP.fbos = [];
   VC.bus.emit('toast', { text: 'Graphics context lost — recovering…', type: 'warn', icon: '⚠️' });
+  // saves that only live in memory (storage blocked, e.g. file:// in some browsers) would not survive the
+  // reload a failed recovery needs: if the context is not back soon, offer an export (a quick driver reset
+  // that recovers by itself shows no dialog)
+  clearTimeout(G._lostTimer);
+  G._lostTimer = setTimeout(() => { if (G.lost && memoryOnly()) offerExport('lost'); }, 2500);
   VC.bus.emit('glLost');
+}
+
+/** True when saves only live in memory (browser storage blocked): reloading the page would lose the city. */
+function memoryOnly() {
+  try {
+    const i = VC.save && VC.save.storageInfo && VC.save.storageInfo();
+    return !!i && i.mode === 'memory';
+  } catch (e) {
+    return false;
+  }
+}
+/**
+ * Blocking dialog with "Export city" (keeps the dialog) and "Reload" for a graphics failure while saves live in
+ * memory only. kind 'lost' (waiting for the browser to restore the context) or 'reload' (restore needs a reload).
+ * Returns false when no dialog could be shown (no UI, no real city).
+ */
+function offerExport(kind) {
+  const U = VC.ui, S = VC.state, h = VC.h;
+  if (!U || !U.modal || !h || !S || S.demo) return false;
+  if (G._lostModal) G._lostModal();
+  const txt = kind === 'lost'
+    ? 'The graphics driver stopped responding. The game is trying to recover. This browser is not keeping saves for this page, so reloading would lose your city: export it first.'
+    : 'Graphics restarted, but some effects can only come back with a page reload. This browser is not keeping saves for this page: export your city before reloading.';
+  const exp = U.button('Export city', () => { try { VC.save.exportFile(); } catch (e) { console.error('[gfx] export failed', e); } }, { icon: '💾', cls: 'primary' });
+  const rel = U.button('Reload', () => location.reload(), { icon: '🔄', cls: kind === 'lost' ? '' : 'danger' });
+  const body = h('div', null, h('p', { style: { margin: '0 0 12px' } }, txt), h('div', { class: 'row' }, exp, rel));
+  G._lostModal = U.modal('⚠️ Graphics problem', body, kind === 'lost' ? [{ label: 'Keep waiting' }] : []);
+  return true;
 }
 
 function onContextRestored() {
@@ -1594,11 +1899,15 @@ function onContextRestored() {
   }
   VC.bus.emit('glRestored');
   G._unrestored = stale.size ? stale : null;
+  clearTimeout(G._lostTimer);
+  if (G._lostModal) { G._lostModal(); G._lostModal = null; }
   if (stale.size) {
     const names = [...stale].map((L) => L.name).join(', ');
     console.warn('[gfx] WebGL context restored; layers without restore support: ' + names);
     if (G.restoreFallback) {
-      // cannot rebuild those layers' GL objects: keep the city safe and reload
+      // cannot rebuild those layers' GL objects: keep the city safe and reload — unless saves only live in
+      // memory (the reload would lose the city): then the player exports first and reloads from the dialog
+      if (memoryOnly() && offerExport('reload')) return;
       try { if (VC.save && VC.save.autosaveSync) VC.save.autosaveSync(); } catch (e) { /* ignore */ }
       VC.bus.emit('toast', { text: 'Graphics restarted — reloading (your city was autosaved)…', type: 'warn', icon: '⚠️' });
       setTimeout(() => location.reload(), 600);

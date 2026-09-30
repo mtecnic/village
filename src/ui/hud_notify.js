@@ -21,8 +21,13 @@
  *   DISASTER    bus 'disaster' {phase:'start', type, x, z, id} -> one red alert card whose "Show me" follows
  *               the LIVE VC.disasters.active entry (by id; start point as fallback). Closes on phase 'end'.
  *   DEMO        nothing at all while VC.state.demo (title-screen city) or the title menu is up.
+ *   JUICE       floating "+12 👥" / "⭐ Level 2!" / "💰 +$" pills over growing buildings, month-end cha-ching
+ *               with coin showers, a small celebration every 25 % toward the next milestone (see JUICE below;
+ *               VC.settings.juice === false turns it off). Never notifications: no toasts, at most one sound.
  * API (on VC.hud): pushNews(text, breaking?), showMilestone(index, milestone?, unlockItems?),
- *   unlocksBetween(popLo, popHi), describeUnlocks(keys) -> [{key, icon, name, kind}], showNote(n)
+ *   unlocksBetween(popLo, popHi), describeUnlocks(keys) -> [{key, icon, name, kind}], showNote(n),
+ *   juice: {pop(x, y, z, text, cls?) (a world-anchored pill, rate-limited), stats(), texts(), month(), poll(),
+ *   hold(on)} (the last five: debug / tests)
  */
 const h = VC.h;
 const TK = { x: 0, queue: [], items: [], trackW: 0, speed: 64, hover: false, lastText: '', genericIdx: 0, viewW: 0, recent: [] };
@@ -90,9 +95,10 @@ function stateHeadline() {
   const opts = [];
   const name = esc(S.name || 'the city');
   if (st.pop > 0) opts.push(`${name} is now home to ${VC.fmt.num(st.pop)} proud citizens`);
-  if ((dm.R || 0) > 0.5) opts.push('Housing crunch! Families queue around the block for new homes');
-  if ((dm.C || 0) > 0.5) opts.push('Shoppers demand more stores — commercial space in short supply');
-  if ((dm.I || 0) > 0.5) opts.push('Manufacturers want to expand: industrial land in hot demand');
+  // demand headlines only once people live here (at pop 0 the demand is only the starting pull)
+  if (st.pop > 0 && (dm.R || 0) > 0.5) opts.push('Housing crunch! Families queue around the block for new homes');
+  if (st.pop > 0 && (dm.C || 0) > 0.5) opts.push('Shoppers demand more stores — commercial space in short supply');
+  if (st.pop > 0 && (dm.I || 0) > 0.5) opts.push('Manufacturers want to expand: industrial land in hot demand');
   if ((st.unemployment || 0) > 0.12) opts.push('Job fairs packed as unemployment climbs to ' + VC.fmt.pct(st.unemployment));
   if ((st.powerDemand || 0) > (st.powerSupply || 0) && st.powerDemand > 0) opts.push('Blackouts! Residents light candles as power demand outstrips supply');
   if ((st.waterDemand || 0) > (st.waterSupply || 0) && st.waterDemand > 0) opts.push('Dry taps reported across town — water officials “looking into it”');
@@ -215,7 +221,7 @@ function showNote(n) {
   for (const a of n.actions || []) actions.appendChild(h('button', { class: 'btn small ' + (a.cls || ''), onclick: (e) => { e.stopPropagation(); VC.bus.emit('sfx', { name: 'click' }); a.onClick && a.onClick(); if (!a.keep) close(); } }, a.label));
   actions.appendChild(h('button', { class: 'btn small ghost', onclick: (e) => { e.stopPropagation(); close(); } }, 'Dismiss'));
   card.append(
-    h('div', { class: 'adv-portrait' }, h('span', null, n.icon || '🧑‍💼')),
+    h('div', { class: 'adv-portrait' }, h('span', null, n.icon || '💼')),
     h('div', { class: 'adv-main' },
       h('div', { class: 'adv-top' }, h('b', { class: 'adv-name' }, n.name || 'Advisor'), n.role ? h('span', { class: 'adv-role' }, n.role) : null, n.chip ? h('span', { class: 'adv-chip' }, n.chip) : null),
       n.title ? h('div', { class: 'adv-title', html: n.title }) : null,
@@ -270,7 +276,7 @@ function closeNote(key) {
 function onAdvisor(m) {
   if (!m || !live()) return;
   const sev = m.severity || 'info';
-  const a = (VC.ADVISORS && VC.ADVISORS[m.advisor]) || { name: 'City Advisor', role: '', icon: '🧑‍💼', color: '#5ad1ff' };
+  const a = (VC.ADVISORS && VC.ADVISORS[m.advisor]) || { name: 'City Advisor', role: '', icon: '💼', color: '#5ad1ff' };
   if (sev === 'good') {
     VC.ui.toast(`<b>${esc(a.name)}:</b> ${esc(m.title || m.text || '')}`, { type: 'good', icon: a.icon, duration: 5000 });
     return;
@@ -548,11 +554,391 @@ function claimNotifications() {
 }
 
 /* ================================================================== */
+/* JUICE: rewarding growth feedback (never spammy)                      */
+/* ================================================================== */
+/*
+ * Derived only from existing events + cheap polling (the sim emits nothing new):
+ *   - construction: buildings with built < 1 are tracked from bldAdd / bldChange (a sim level-up or
+ *     redevelopment replays the construction) and polled every 0.25 s; a finished RESIDENTIAL lot joins the
+ *     move-in list (polled every 0.5 s for up to 60 game days): each bulk gain (>= 30 % of its capacity, at
+ *     least 3 residents) floats "+N 👥" from its roof.
+ *   - level-ups (bldChange with b.level above the level seen before, growables only): "⭐ Level N!", plus
+ *     "💰 +$" and a small shower of 'coin' particles for commercial / industrial. The sparkle burst is the
+ *     particle module's own level-up effect and the 'levelup' sound comes from the sim (no sound here).
+ *   - month end (a profitable month, at most every 6 s real time, never in sandbox): ONE gentle 'chaching'
+ *     (skipped while a milestone banner celebrates), a coin shower over the busiest commercial building on
+ *     screen and a few gold coins hopping out of the funds display (the HUD floats the "+$1,234" delta there).
+ *   - milestone progress: every 25 % of the way to the next milestone (peak population) -> tiny confetti at
+ *     the camera target, a "🎯 50% of the way to Town" pill under the top bar and a soft 'progress' chime.
+ *     Crossing a milestone itself celebrates nothing here (the milestone banner does).
+ * World pills are pooled DOM elements placed by VC.gfx.onFrame (after each rendered frame, with that frame's
+ * camera: the VC.camera.worldToScreen projection, done in place without allocating), so they stay glued to
+ * the 3D image. Only buildings within ~70 units of the camera eye whose anchor projects into the safe screen
+ * area (clear of the top bar and the tool bar) get one. Rate: token bucket (2.5 / s, burst 3; level-ups have
+ * priority over move-ins), one pill per building per ~2 s, a pool of 10. Lifetimes are real time (the rise /
+ * fade is the CSS animation jpRise, 1.75 s). Nothing while VC.state.demo, the title menu, photo / hidden UI,
+ * or with VC.settings.juice === false (read defensively: missing = on). No state is saved: progress quarters
+ * are re-derived on reset (loading a city never celebrates).
+ */
+const J = {
+  layer: null, pool: [], live: [], coins: [], msPill: null, msTimer: 0,
+  tokens: 3, tokT: 0, unhook: null, hold: false,
+  building: new Map(), moveIn: new Map(), levels: new Map(), lastPop: new Map(), // building: id -> pop at start
+  pollB: 0, pollM: 0, pollMs: 0, monthPending: false, lastMonthFx: -1e9, msIdx: -1, msQ: 0,
+};
+const JUICE_POOL = 10;
+const JUICE_LIFE = 1750; // ms: the jpRise animation (base.css)
+const JUICE_RATE = 2.5, JUICE_BURST = 3; // pills per second (token bucket)
+const JUICE_DIST2 = 70 * 70; // world units from the camera eye
+const JUICE_BLD_GAP = 2200; // ms between two pills of the same building
+const MONTH_FX_GAP = 6000; // ms between two month-end effects
+/** Juice is live: a real city with the HUD showing (not photo / hidden UI) and VC.settings.juice not false. */
+function juiceOn() {
+  const st = VC.settings, H = VC.hud;
+  if (st && st.juice === false) return false;
+  return live() && !H.uiHidden && !H.photo;
+}
+/** Pill text with emoji, or the plain variant without a colour-emoji font (VC.ui.hasEmoji false). */
+const jt = (emo, plain) => (VC.ui && VC.ui.hasEmoji === false ? plain : emo);
+
+function buildJuice(root) {
+  J.layer = h('div', { class: 'juice', 'aria-hidden': 'true' });
+  root.insertBefore(J.layer, root.firstChild); // first in the HUD: pills paint under every other HUD element
+  for (let i = 0; i < JUICE_POOL; i++) {
+    const inner = h('div', { class: 'jp-in' });
+    const el = h('div', { class: 'jp' }, inner);
+    el.style.display = 'none';
+    J.layer.appendChild(el);
+    J.pool.push({ el, inner, x: 0, y: 0, z: 0, ox: 0, oy: 0, t0: 0, end: 0, sx: NaN, sy: NaN, cls: '', shown: false, vis: true });
+  }
+  // placement after each rendered frame (same camera as the image); older cores: in update()
+  if (VC.gfx && VC.gfx.onFrame) J.unhook = VC.gfx.onFrame(placePopups);
+}
+/** Hides every live pill / coin / progress pill (pooled pills go back to the pool). */
+function clearPopups() {
+  for (const p of J.live) { p.el.style.display = 'none'; J.pool.push(p); }
+  J.live.length = 0;
+  for (const c of J.coins) c.remove();
+  J.coins.length = 0;
+  clearTimeout(J.msTimer);
+  if (J.msPill) { J.msPill.remove(); J.msPill = null; }
+}
+function resetJuice(S) {
+  clearPopups();
+  J.building.clear();
+  J.moveIn.clear();
+  J.levels.clear();
+  J.lastPop.clear();
+  J.monthPending = false;
+  J.tokens = JUICE_BURST;
+  if (!S) return;
+  for (const b of S.buildings.values()) {
+    J.levels.set(b.id, b.level);
+    if (b.built < 1) J.building.set(b.id, b.pop || 0);
+  }
+  const m = msProgress(S);
+  J.msIdx = m ? m.idx : -1;
+  J.msQ = m ? m.q : 0;
+}
+
+/* ---- screen projection ---- */
+const PRJ = { x: 0, y: 0 };
+/**
+ * VC.camera.worldToScreen(x, y, z) into PRJ (canvas CSS px) without allocating; false when behind the camera
+ * or more than `margin` px off screen.
+ */
+function project(x, y, z, margin) {
+  const cam = VC.camera, m = cam && cam.viewProj, cv = VC.gfx && VC.gfx.canvas;
+  if (!m || !cv) return false;
+  const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+  if (w <= 0.01) return false;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  PRJ.x = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / w * 0.5 + 0.5) * W;
+  PRJ.y = (0.5 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w * 0.5) * H;
+  return PRJ.x > -margin && PRJ.x < W + margin && PRJ.y > -margin && PRJ.y < H + margin;
+}
+/** PRJ lies in the popup-safe screen area (clear of the top bar and the tool bar). */
+function safeOnScreen() {
+  const cv = VC.gfx.canvas;
+  return PRJ.y > 80 && PRJ.y < cv.clientHeight - 100 && PRJ.x > 24 && PRJ.x < cv.clientWidth - 24;
+}
+/**
+ * World Y to anchor a pill on building b (above the roof; for a tall building seen from close up part-way
+ * up, else just above the ground), or NaN when b is farther than ~70 units from the camera eye or no anchor
+ * is in the safe screen area.
+ */
+function bldAnchor(b) {
+  const cam = VC.camera, pos = cam && cam.pos;
+  if (!pos || !VC.world) return NaN;
+  const x = b.x + b.w * 0.5, z = b.z + b.d * 0.5, gy = VC.world.topY(b.x, b.z), hg = b.hgt || 1;
+  const dx = x - pos[0], dy = gy + hg * 0.5 - pos[1], dz = z - pos[2];
+  if (dx * dx + dy * dy + dz * dz > JUICE_DIST2) return NaN;
+  let y = gy + hg + 0.35;
+  if (project(x, y, z, 0) && safeOnScreen()) return y;
+  y = gy + hg * 0.55;
+  if (hg > 2.5 && project(x, y, z, 0) && safeOnScreen()) return y;
+  y = gy + 0.9;
+  if (project(x, y, z, 0) && safeOnScreen()) return y;
+  return NaN;
+}
+/**
+ * Takes a pill token (rate limit). reserve: tokens that must stay in the bucket afterwards (low-priority
+ * pills leave room for level-ups).
+ */
+function juiceToken(reserve) {
+  if (!J.pool.length) return false;
+  const now = performance.now();
+  J.tokens = Math.min(JUICE_BURST, J.tokens + (Math.max(0, now - J.tokT) / 1000) * JUICE_RATE);
+  J.tokT = now;
+  if (J.tokens < 1 + (reserve || 0)) return false;
+  J.tokens -= 1;
+  return true;
+}
+/** Building b had no pill for a while (pills of one building never stack). */
+function bldFree(b, now) {
+  const t = J.lastPop.get(b.id);
+  return t == null || now - t > JUICE_BLD_GAP;
+}
+/**
+ * Floats a pill (text, class) rising from world point (x, y, z). delay: ms before it appears; ox, oy: screen
+ * offset in px (x UI scale), e.g. to set a second pill of the same building beside the first.
+ */
+function popAt(x, y, z, text, cls, delay, ox, oy) {
+  const p = J.pool.pop();
+  if (!p) return null;
+  p.x = x; p.y = y; p.z = z;
+  p.ox = ox || 0; p.oy = oy || 0;
+  p.t0 = performance.now() + (delay || 0);
+  p.end = p.t0 + JUICE_LIFE + 1500; // (a pill that never got a frame to appear in is dropped anyway)
+  p.sx = p.sy = NaN;
+  p.shown = false;
+  p.inner.textContent = text;
+  if (p.cls !== cls) { p.inner.className = 'jp-in ' + cls; p.cls = cls; }
+  p.el.style.display = 'none';
+  J.live.push(p);
+  if (!J.unhook) placePopups();
+  return p;
+}
+function recycle(i) {
+  const p = J.live[i];
+  p.el.style.display = 'none';
+  J.live.splice(i, 1);
+  J.pool.push(p);
+}
+/** Expires pills (real time, from the moment they appeared). Also runs from update(). */
+function expirePopups(now) {
+  if (J.hold) return;
+  for (let i = J.live.length - 1; i >= 0; i--) if (now >= J.live[i].end) recycle(i);
+}
+/**
+ * Places the live pills for the frame just rendered (VC.gfx.onFrame). A pill appears (display: the CSS
+ * rise / fade starts) at its start time; off screen it is only made invisible, so its animation keeps its
+ * place in time.
+ */
+function placePopups() {
+  if (!J.live.length) return;
+  const now = performance.now();
+  expirePopups(now);
+  const us = J.live.length ? VC.ui.scale() : 1;
+  for (let i = 0; i < J.live.length; i++) {
+    const p = J.live[i];
+    if (now < p.t0) continue;
+    const on = project(p.x, p.y, p.z, 80);
+    if (on) {
+      const sx = Math.round((PRJ.x + p.ox * us) * 2) / 2, sy = Math.round((PRJ.y + p.oy * us) * 2) / 2;
+      if (sx !== p.sx || sy !== p.sy) {
+        p.sx = sx; p.sy = sy;
+        p.el.style.translate = sx + 'px ' + sy + 'px';
+      }
+    }
+    if (on !== p.vis) { p.vis = on; p.el.style.visibility = on ? '' : 'hidden'; }
+    if (!p.shown) {
+      // display none -> shown restarts the jpRise animation; the pill lives as long as it runs
+      p.shown = true;
+      p.end = now + JUICE_LIFE;
+      if (p.el !== J.layer.lastElementChild) J.layer.appendChild(p.el); // the newest pill paints on top
+      p.el.style.display = '';
+    }
+  }
+}
+
+/* ---- construction / move-in / level-ups ---- */
+function onJuiceBldAdd(b) {
+  if (!b) return;
+  J.levels.set(b.id, b.level);
+  if (b.built < 1) J.building.set(b.id, b.pop || 0);
+}
+function onJuiceBldRemove(b) {
+  if (!b) return;
+  J.levels.delete(b.id);
+  J.building.delete(b.id);
+  J.moveIn.delete(b.id);
+  J.lastPop.delete(b.id);
+}
+function onJuiceBldChange(b) {
+  if (!b) return;
+  if (b.built < 1 && !J.building.has(b.id)) J.building.set(b.id, b.pop || 0); // (a replay keeps its residents)
+  const prev = J.levels.get(b.id);
+  J.levels.set(b.id, b.level);
+  if (prev == null || !(b.level > prev) || b.key !== 'grow' || b.abandoned || !juiceOn()) return;
+  const y = bldAnchor(b);
+  if (y !== y || !juiceToken(0)) return;
+  const x = b.x + b.w * 0.5, z = b.z + b.d * 0.5;
+  J.lastPop.set(b.id, performance.now());
+  popAt(x, y, z, jt('⭐ Level ' + b.level + '!', 'Level ' + b.level + '!'), 'jp-lvl', 0);
+  if (b.zt === 2 || b.zt === 3) {
+    // the money side of it: a second pill beside the first (no extra token: same event) + coins
+    popAt(x, y, z, jt('💰 +$', '+$'), 'jp-cash', 400, 72, 22);
+    const Pt = VC.particles;
+    if (Pt && Pt.coins) Pt.coins(x, y - 0.2, z, 8 + b.w * b.d * 2);
+  }
+}
+function pollBuilding(S) {
+  if (!J.building.size) return;
+  for (const [id, pop0] of J.building) {
+    const b = S.buildings.get(id);
+    if (!b) { J.building.delete(id); continue; }
+    if (b.built < 1) continue;
+    J.building.delete(id);
+    // residents of a finished (or rebuilt) home arrive over the next days: watch them move in (a level-up's
+    // replay already takes new residents in while it builds: they count from its start)
+    if (b.key === 'grow' && b.zt === 1 && !b.abandoned) J.moveIn.set(id, { shown: Math.min(pop0, b.pop || 0), until: S.time.day + 60 });
+  }
+}
+function pollMoveIn(S) {
+  if (!J.moveIn.size) return;
+  const on = juiceOn(), day = S.time.day, now = performance.now();
+  for (const [id, m] of J.moveIn) {
+    const b = S.buildings.get(id);
+    if (!b || b.abandoned || day > m.until) { J.moveIn.delete(id); continue; }
+    const pop = b.pop || 0, gain = pop - m.shown;
+    if (gain < 0) { m.shown = pop; continue; }
+    const full = b.cap > 0 && pop >= b.cap * 0.95;
+    if (gain >= Math.max(3, Math.ceil((b.cap || 0) * 0.3)) || (full && gain >= 1)) {
+      // shown or not (off screen, rate limit), these residents are counted: no pill for stale gains later
+      m.shown = pop;
+      if (on && bldFree(b, now)) {
+        const y = bldAnchor(b);
+        if (y === y && juiceToken(1)) {
+          J.lastPop.set(id, now);
+          const n = '+' + VC.fmt.num(gain);
+          popAt(b.x + b.w * 0.5, y, b.z + b.d * 0.5, jt(n + ' 👥', n + (gain === 1 ? ' resident' : ' residents')), 'jp-pop', 0);
+        }
+      }
+    }
+    if (full) J.moveIn.delete(id);
+  }
+}
+
+/* ---- month end: cha-ching ---- */
+function monthJuice(S) {
+  const now = performance.now();
+  if (S.sandbox || now - J.lastMonthFx < MONTH_FX_GAP) return;
+  const net = +((S.stats || {}).net);
+  if (!(net > 0)) return;
+  J.lastMonthFx = now;
+  // one sound per event: a milestone banner that just went up is the bigger news
+  if (!(MS.banner && !MS.banner._closed)) VC.bus.emit('sfx', { name: 'chaching' });
+  // coins over the busiest commercial building on screen
+  let best = null, bp = 0, by = 0;
+  for (const b of S.buildings.values()) {
+    if (b.key !== 'grow' || b.zt !== 2 || b.built < 1 || b.abandoned || !(b.pop > bp)) continue;
+    const y = bldAnchor(b);
+    if (y !== y) continue;
+    best = b;
+    bp = b.pop;
+    by = y;
+  }
+  const Pt = VC.particles;
+  if (best && Pt && Pt.coins) Pt.coins(best.x + best.w * 0.5, by, best.z + best.d * 0.5, 16);
+  coinSpray();
+}
+/** A few gold coins hopping out of the funds display (DOM, CSS-animated). */
+function coinSpray() {
+  const seg = VC.hud.root && VC.hud.root.querySelector('.tb-money');
+  if (!seg || !J.layer) return;
+  const r = seg.getBoundingClientRect(), lr = J.layer.getBoundingClientRect();
+  if (!r.width) return;
+  for (const c of J.coins) c.remove();
+  J.coins.length = 0;
+  const x0 = r.left - lr.left + Math.min(26, r.width * 0.25), y0 = r.top - lr.top + r.height * 0.55;
+  const done = (c) => {
+    c.remove();
+    const k = J.coins.indexOf(c);
+    if (k >= 0) J.coins.splice(k, 1);
+  };
+  for (let i = 0; i < 8; i++) {
+    const c = h('i', { class: 'jc', onanimationend: () => done(c) });
+    const s = c.style;
+    s.left = x0 + 'px';
+    s.top = y0 + 'px';
+    // a short hop out of the funds display, then a fall past the top bar into the city
+    s.setProperty('--dx', Math.round((Math.random() * 2 - 1) * 50 + 8) + 'px');
+    s.setProperty('--dy', Math.round(-8 - Math.random() * 16) + 'px');
+    s.setProperty('--fall', Math.round(58 + Math.random() * 40) + 'px');
+    s.setProperty('--spin', Math.round(360 + Math.random() * 540) + 'deg');
+    s.animationDelay = (i * 0.045).toFixed(3) + 's';
+    J.layer.appendChild(c);
+    J.coins.push(c);
+  }
+  const mine = J.coins.slice();
+  setTimeout(() => { for (const c of mine) if (c.isConnected) done(c); }, 3000); // (no animationend: tab hidden)
+}
+
+/* ---- milestone progress ---- */
+/** {idx, q (quarters 0..3 of the way to the next milestone), next} or null at the last milestone. */
+function msProgress(S) {
+  const L = VC.MILESTONES;
+  if (!S || !L || !L.length) return null;
+  const idx = VC.hud.milestoneIndex ? VC.hud.milestoneIndex(S) : S.milestone | 0;
+  const cur = L[idx], next = L[idx + 1];
+  if (!cur || !next) return null;
+  const p = ((S.peakPop || 0) - (cur.pop || 0)) / Math.max(1, next.pop - (cur.pop || 0));
+  return { idx, q: VC.M.clamp(Math.floor(p * 4), 0, 3), next };
+}
+function pollMilestone(S) {
+  const m = msProgress(S);
+  if (!m) return;
+  if (m.idx !== J.msIdx) { J.msIdx = m.idx; J.msQ = m.q; return; } // the milestone itself has its banner
+  if (m.q <= J.msQ) return;
+  J.msQ = m.q;
+  if (!juiceOn()) return;
+  const cam = VC.camera;
+  if (VC.fx && VC.fx.confetti && cam) VC.fx.confetti(cam.tx, cam.tz, 24);
+  VC.bus.emit('sfx', { name: 'progress' });
+  clearTimeout(J.msTimer);
+  if (J.msPill) J.msPill.remove();
+  const pill = h('div', { class: 'jms pe', role: 'status', onclick: () => VC.hud.openPanel && VC.hud.openPanel('milestones') },
+    h('b', null, jt('🎯 ', '') + m.q * 25 + '%'), ' of the way to ', h('em', null, m.next.name || 'the next milestone'));
+  J.layer.appendChild(pill);
+  J.msPill = pill;
+  J.msTimer = setTimeout(() => { pill.remove(); if (J.msPill === pill) J.msPill = null; }, 4300);
+}
+
+function updateJuice(dt, rdt) {
+  const S = VC.state;
+  if (!S || !J.layer) return;
+  if (J.live.length) {
+    if (J.unhook) expirePopups(performance.now());
+    else placePopups();
+  }
+  if (isDemo()) return;
+  if ((J.pollB += rdt) >= 0.25) { J.pollB = 0; pollBuilding(S); }
+  if ((J.pollM += rdt) >= 0.5) { J.pollM = 0; pollMoveIn(S); }
+  if ((J.pollMs += rdt) >= 1) { J.pollMs = 0; pollMilestone(S); }
+  if (J.monthPending) {
+    J.monthPending = false;
+    if (juiceOn()) monthJuice(S);
+  }
+}
+
+/* ================================================================== */
 VC.hud.register({
   name: 'notify',
   order: 30,
   init(root) {
     buildTicker(root);
+    buildJuice(root);
     const bus = VC.bus;
     bus.on('news', (n) => { if (!isDemo()) pushNews(n && (n.text || n), true); });
     bus.on('advisor', onAdvisor);
@@ -564,12 +950,22 @@ VC.hud.register({
     bus.on('achievement', onAchievement);
     bus.on('noMoney', onNoMoney);
     bus.on('settings', applyTickerSetting);
+    bus.on('settings', () => { if (VC.settings && VC.settings.juice === false) clearPopups(); });
+    bus.on('bldAdd', onJuiceBldAdd);
+    bus.on('bldRemove', onJuiceBldRemove);
+    bus.on('bldChange', onJuiceBldChange);
+    bus.on('month', () => { if (!isDemo()) J.monthPending = true; }); // handled next frame (econ has booked it)
+    bus.on('started', (S) => {
+      if (!S || S.demo || !VC.audio || !VC.audio.warm) return;
+      try { VC.audio.warm(['chaching', 'progress']); } catch (e) { /* sounds render on first use instead */ }
+    });
     window.addEventListener('resize', () => { if (MS.banner && !MS.banner._closed) fitBanner(); });
     VC.ui.toastAvoid.push(bannerRect);
     claimNotifications();
   },
-  reset() {
+  reset(S) {
     claimNotifications();
+    resetJuice(S);
     TK.queue = [];
     TK.recent = [];
     for (const c of NOTE.cards.slice()) c.close(true);
@@ -589,13 +985,32 @@ VC.hud.register({
   update(dt, rdt) {
     tickerUpdate(rdt);
     if (NOTE.queue.length) pumpNotes();
+    updateJuice(dt, rdt);
   },
   onShow() { TK.viewW = 0; },
   onHide() {
     for (const c of NOTE.cards.slice()) c.close(true);
     NOTE.queue = [];
     closeBanner();
+    clearPopups();
   },
 });
 
-Object.assign(VC.hud, { pushNews, showMilestone, unlocksBetween, describeUnlocks, showNote });
+const juiceApi = {
+  /** Floats a pill (plain text) from world point (x, y, z); cls: 'jp-pop' | 'jp-cash' | 'jp-lvl' | ''. */
+  pop(x, y, z, text, cls) {
+    if (!juiceOn() || !isFinite(x + y + z) || !juiceToken(0)) return false;
+    return !!popAt(x, y, z, String(text == null ? '' : text), cls || '', 0);
+  },
+  /** Live counts (debug / tests). */
+  stats: () => ({ live: J.live.length, shown: J.live.filter((p) => p.shown && p.vis).length, pool: J.pool.length, building: J.building.size, moveIn: J.moveIn.size, levels: J.levels.size, msQ: J.msQ, msIdx: J.msIdx, tokens: +J.tokens.toFixed(2), on: juiceOn() }),
+  /** Texts of the pills on screen now (tests). */
+  texts: () => J.live.filter((p) => p.shown && p.vis).map((p) => p.inner.textContent),
+  /** (tests) runs the month-end effect now, ignoring the 6 s gap. */
+  month() { J.lastMonthFx = -1e9; if (VC.state && juiceOn()) monthJuice(VC.state); },
+  /** (tests / screenshots) true keeps pills alive until hold(false). */
+  hold(on) { J.hold = !!on; },
+  /** (tests) polls construction / move-in / milestone progress now. */
+  poll() { const S = VC.state; if (S && !isDemo()) { pollBuilding(S); pollMoveIn(S); pollMilestone(S); } },
+};
+Object.assign(VC.hud, { pushNews, showMilestone, unlocksBetween, describeUnlocks, showNote, juice: juiceApi });

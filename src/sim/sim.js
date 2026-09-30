@@ -223,6 +223,33 @@ function fireRisk(S, b, def) {
 }
 
 /**
+ * Level up a nearly full, happy growable when land value (industry: education) allows and the
+ * zone's growth budget has room. Checked in the building's 4-day slice (~35% chance a month).
+ */
+function tryLevelUp(S, b) {
+  if (b.level >= 3 || b.pop < b.cap * 0.85 || b.happy <= 0.65 || !b.powered || !b.watered) return;
+  const zt = b.zt;
+  if (S.demand[ZK[zt]] <= 0 || X.growAcc[zt] <= 0 || X.rnd() >= 0.055) return;
+  const next = b.level + 1, i = b.simI, m = S.maps;
+  if (zt === 3) {
+    if (Math.max(m.edu[i], (X.cityEdu || 0) * 255) < EDU_REQ[next]) return;
+  } else if (m.landValue[i] < LV_REQ[zt][next]) return;
+  const old = b.cap;
+  b.level = next;
+  b.cap = capOf(b);
+  b.simCapL = next;
+  X.growAcc[zt] -= b.cap - old;
+  b.built = 0.6;
+  b.simReplay = true;
+  X.constructing.add(b.id);
+  VC.world.changed(b);
+  if (++X.levelUps <= 3) {
+    burst('sparkle', b, 14);
+    VC.bus.emit('sfx', { name: 'levelup', x: b.x + b.w / 2, z: b.z + b.d / 2, vol: 0.4 });
+  }
+}
+
+/**
  * One pass over all buildings. Cheap work (totals, occupancy) runs daily for everyone; the
  * heavier per-building evaluation (happiness, garbage, abandonment, fire risk) runs for a
  * quarter of the buildings per day (b.id + day) & 3, with rates scaled to the 4-day step.
@@ -358,7 +385,7 @@ function dailyBuildings(S, sim) {
       const zd = dem[ZK[zt]];
       const bad = b.happy < 0.22 || (b.happy < 0.35 && zd < -0.4);
       b.simUnhappy = bad ? b.simUnhappy + 4 : Math.max(0, b.simUnhappy - 8);
-      if (b.simUnhappy > 100) {
+      if (b.simUnhappy > 80 + (b.variant % 61)) { // 80..140 days: people don't all give up the same week
         b.abandoned = true;
         b.pop = 0;
         b.simAband = 0;
@@ -381,6 +408,7 @@ function dailyBuildings(S, sim) {
         }
       }
       if (b.fire <= 0 && rnd() < fireRisk(S, b, null) * 4) SIM.ignite(b);
+      tryLevelUp(S, b);
     }
     /* totals (exact, daily) */
     if (!b.powered) tot.unpowered++;
@@ -528,6 +556,7 @@ function updateDemand(S, instant) {
   const laborShort = jobsAll > 0 ? Math.max(0, 1 - (workers + 40 + pop * 0.04) / jobsAll) : 0;
   const wk = X.unemp > 0.03 ? X.unemp * 0.4 : -laborShort * 0.5;
   Cd += add(fC, wk >= 0 ? 'Available workers' : 'Labor shortage', wk);
+  if (t.airports) Cd += add(fC, 'Airport', 0.12);
   Cd += add(fC, 'Commercial taxes', X.taxZ[2] * 0.6);
   if (powerShort || waterShort) Cd += add(fC, 'Utility shortage', -0.15);
   Cd += add(fC, 'Policies', mods.demandC || 0);
@@ -541,6 +570,11 @@ function updateDemand(S, instant) {
   I += add(fI, 'Industrial taxes', X.taxZ[3] * 0.6);
   if (powerShort || waterShort) I += add(fI, 'Utility shortage', -0.15);
   I += add(fI, 'Policies', mods.demandI || 0);
+
+  // unmet capacity per zone (residents / jobs) — growth picks lot sizes that fit it
+  X.unmet[1] = Math.max(0, S.demand.R) * (120 + pop * 0.25);
+  X.unmet[2] = Math.max(0, needC - t.capC) + (S.demand.C > 0 ? 20 : 0);
+  X.unmet[3] = Math.max(0, workers - jobsAll) + Math.max(0, S.demand.I) * (60 + pop * 0.05);
 
   const fin = (v) => clamp(v > 0 ? v * mul : v / mul, -1, 1);
   // occupancy uses the city's appeal without the vacancy terms (else vacancy -> low demand -> more vacancy)
@@ -608,8 +642,13 @@ function tryGrow(S, i, zt, den, dem) {
     const rest = order.splice(1).sort((a, b) => b[0] * b[1] - a[0] * a[1]);
     for (const s of rest) order.push(s);
   }
+  // don't drop a 800-job tower into a town that needs 200 more jobs: skip lots far above the unmet need
+  let smallest = sizes[0];
+  for (const s of sizes) if (s[0] * s[1] < smallest[0] * smallest[1]) smallest = s;
+  const limit = Math.max(0, X.unmet[zt]) * 1.3;
   const h0 = S.height[i];
   for (const s of order) {
+    if (s !== smallest && G.cap[0] * s[0] * s[1] > limit) continue;
     for (let rot = 0; rot < (s[0] !== s[1] ? 2 : 1); rot++) {
       const w = rot ? s[1] : s[0], d = rot ? s[0] : s[1];
       for (let oz = 0; oz < d; oz++)
@@ -659,17 +698,25 @@ function placeGrow(S, x0, z0, w, d, zt, den) {
   return b;
 }
 
-function growth(S) {
-  const dem = S.demand, st = S.stats;
+/**
+ * Daily growth budget in CAPACITY units (residents / jobs) per zone. It scales sub-linearly
+ * with city size (big cities grow faster, but not exponentially) and is spent by new
+ * buildings AND level-ups, so a 480-resident tower costs as much as 80 cottages.
+ */
+const ZONE_SHARE = [0, 1, 0.4, 0.5];
+function growBudget(S) {
   const t = X.tot;
-  const drive = (1 + (t.pop + (t.capC + t.capI) * 0.5) / 350) * Math.max(0, 1 + (S.mods.growth || 0));
-  let any = false;
+  const rate = (14 + 0.45 * Math.sqrt(t.pop + (t.capC + t.capI) * 0.5)) * Math.max(0, 1 + (S.mods.growth || 0));
   for (let z = 1; z <= 3; z++) {
-    const d = dem[ZK[z]];
-    X.growAcc[z] = Math.min(3, X.growAcc[z] + Math.max(0, d) * drive);
-    if (X.growAcc[z] >= 1) any = true;
+    const u = Math.max(0, S.demand[ZK[z]]) * rate * ZONE_SHARE[z];
+    X.growRate[z] = u;
+    X.growAcc[z] = Math.min(u * 3 + 1, X.growAcc[z] + u);
   }
-  if (!any) return;
+}
+
+function growth(S) {
+  const dem = S.demand;
+  if (X.growAcc[1] <= 0 && X.growAcc[2] <= 0 && X.growAcc[3] <= 0) return;
   const N = S.N, perm = X.perm, zone = S.zone, bld = S.bld, road = S.road, flags = S.flags, rnd = X.rnd;
   const K = Math.ceil(N / 4);
   for (let k = 0; k < K; k++) {
@@ -678,15 +725,27 @@ function growth(S) {
     const code = zone[i];
     if (!code || bld[i] || road[i]) continue;
     const zt = code >> 2, den = code & 3;
-    if (X.growAcc[zt] < 1) continue;
+    if (X.growAcc[zt] <= 0) continue;
     const fl = flags[i];
     if (!(fl & F.ACCESS) || !(fl & F.POWER)) continue;
     if (den >= 2 && !(fl & F.WATER)) continue;
     const d = dem[ZK[zt]];
     if (d <= 0.02) continue;
-    const p = clamp(d * 1.5, 0.15, 1) * desirability(S, zt, i);
+    // development clusters: lots next to existing buildings fill first, so blocks fill up
+    // instead of scattering houses across every zoned field
+    const x = i % S.W;
+    let nb = 0;
+    if (x > 0 && bld[i - 1]) nb++;
+    if (x < S.W - 1 && bld[i + 1]) nb++;
+    if (i >= S.W && bld[i - S.W]) nb++;
+    if (i < N - S.W && bld[i + S.W]) nb++;
+    const p = clamp(d * 1.5, 0.15, 1) * desirability(S, zt, i) * (0.3 + 0.35 * nb);
     if (rnd() >= p) continue;
-    if (tryGrow(S, i, zt, den, d)) X.growAcc[zt] -= 1;
+    const nw = tryGrow(S, i, zt, den, d);
+    if (nw) {
+      X.growAcc[zt] -= nw.cap;
+      X.unmet[zt] -= nw.cap;
+    }
   }
 }
 
@@ -772,52 +831,32 @@ function fireStep(S) {
 /* monthly                                                               */
 /* ------------------------------------------------------------------ */
 function monthly(S) {
-  const rnd = X.rnd, m = S.maps, dem = S.demand;
+  const rnd = X.rnd;
   const clear = [];
-  let levelUps = 0;
   for (const b of S.buildings.values()) {
     if (b.key === 'rubble') {
       if (b.age > 180) clear.push(b);
       continue;
     }
     if (b.key !== 'grow' || b.abandoned || b.built < 1) continue;
-    const i = b.simI, zt = b.zt, zk = ZK[zt];
     // wealth drifts with land value (industry: education)
-    const tw = wealthFor(S, zt, i);
+    const tw = wealthFor(S, b.zt, b.simI);
     if (tw !== b.wealth) {
-      b.simWealthCnt = (b.simWealthCnt || 0) + 1;
+      b.simWealthCnt++;
       if (b.simWealthCnt >= 3 && rnd() < 0.4) {
         b.wealth += tw > b.wealth ? 1 : -1;
         b.simWealthCnt = 0;
         VC.world.changed(b);
       }
     } else b.simWealthCnt = 0;
-    // level up
-    if (b.level >= 3 || b.pop < b.cap * 0.85 || b.happy <= 0.65 || dem[zk] <= 0 || !b.powered) continue;
-    const next = b.level + 1;
-    if (!b.watered) continue;
-    if (zt === 3) {
-      if (Math.max(m.edu[i], (X.cityEdu || 0) * 255) < EDU_REQ[next]) continue;
-    } else if (m.landValue[i] < LV_REQ[zt][next]) continue;
-    if (rnd() >= 0.35) continue;
-    b.level = next;
-    b.cap = capOf(b);
-    b.built = 0.6;
-    b.simReplay = true;
-    X.constructing.add(b.id);
-    levelUps++;
-    VC.world.changed(b);
-    if (levelUps <= 3) {
-      burst('sparkle', b, 14);
-      VC.bus.emit('sfx', { name: 'levelup', x: b.x + b.w / 2, z: b.z + b.d / 2, vol: 0.4 });
-    }
   }
   X.selfEdit = true;
   for (const b of clear) VC.world.removeBuilding(b, 'cleared');
   X.selfEdit = false;
   if (X.abandonedMonth >= 3) toast(`${X.abandonedMonth} buildings were abandoned this month`, 'warn', '🏚️');
   X.abandonedMonth = 0;
-  X.levelUpsMonth = levelUps;
+  X.levelUpsMonth = X.levelUps;
+  X.levelUps = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -825,14 +864,16 @@ function monthly(S) {
 /* ------------------------------------------------------------------ */
 function checkShortages(S) {
   const day = S.time.day;
-  const p = X.power.shortage, w = X.water.shortage;
+  // a shortage is either a network that cannot serve everyone, or consumers with no plant at all
+  const p = X.power.shortage || (X.power.supply <= 0 && X.power.demand > 2);
+  const w = X.water.shortage || (X.water.supply <= 0 && X.water.demand > 2);
   if (p && !X.wasPowerShort && day - X.lastPowerToast > 45) {
     X.lastPowerToast = day;
-    toast('Power shortage! Parts of the city are blacking out. Build more power plants.', 'bad', '⚡');
+    toast(X.power.supply > 0 ? 'Power shortage! Parts of the city are blacking out. Build more power plants.' : 'The city has no power! Build a power plant and connect it with roads or power lines.', 'bad', '⚡');
   }
   if (w && !X.wasWaterShort && day - X.lastWaterToast > 45) {
     X.lastWaterToast = day;
-    toast('Water shortage! Taps are running dry. Build more pumps or towers.', 'bad', '💧');
+    toast(X.water.supply > 0 ? 'Water shortage! Taps are running dry. Build more pumps or towers.' : 'No water supply! Build a water tower or pump (pumps need power).', 'bad', '💧');
   }
   X.wasPowerShort = p;
   X.wasWaterShort = w;
@@ -892,7 +933,8 @@ Object.assign(SIM, {
       X.perm[j] = t;
     }
     X.permPos = 0;
-    X.growAcc = [0, 0.9, 0.6, 0.6];
+    X.growAcc = [0, 12, 4, 6]; // a little head start so the first homes appear within days
+    X.growRate = [0, 0, 0, 0];
     X.constructing = new Set();
     X.burning = new Set();
     X.pending = [];
@@ -905,9 +947,11 @@ Object.assign(SIM, {
     X.wasPowerShort = X.wasWaterShort = false;
     X.abandonedMonth = 0;
     X.levelUpsMonth = 0;
+    X.levelUps = 0;
     X.fill = 1;
     X.unemp = 0;
     X.rAppeal = 0.3;
+    X.unmet = [0, 150, 40, 80];
     X.cityEdu = 0;
     X.svcCov = 0;
     X.happyMod = S.mods.happiness || 0;
@@ -985,6 +1029,7 @@ Object.assign(SIM, {
       checkShortages(S);
       lap('net');
     }
+    growBudget(S);
     dailyBuildings(S, true);
     lap('bld');
     fireStep(S);
@@ -1114,7 +1159,7 @@ Object.assign(SIM, {
     }
     if (b.built < 1) L(b.simReplay ? 'Upgrading' : 'Under construction', pct(b.built), 'warn');
     if (b.fire > 0) {
-      L('ON FIRE', pct(b.fire) + ' burned', 'bad');
+      L('ON FIRE', pct(Math.min(1, b.fire)) + ' burned', 'bad');
       problems.push(m.fire[i] > 30 ? 'Burning! Firefighters are on the way.' : 'Burning with no fire coverage!');
     }
     if (b.key === 'grow') {
@@ -1203,18 +1248,23 @@ Object.assign(SIM, {
     return X.factors || { R: [], C: [], I: [] };
   },
 
+  /**
+   * {supply, demand (MW, whole city), plants:[{b, output}], served (MW delivered), connectedDemand,
+   *  shortage (some network cannot serve all its load), deficit (demand > supply), unpowered (buildings), networks}
+   */
   powerInfo() {
-    const p = X.power || { supply: 0, demand: 0, plants: [] };
+    const p = X.power || { supply: 0, demand: 0, plants: [], served: 0 };
     return {
       supply: p.supply, demand: p.demand, plants: p.plants.slice(), served: p.served,
-      connectedDemand: p.connectedDemand, shortage: p.shortage, unpowered: p.unpowered, networks: p.networks,
+      connectedDemand: p.connectedDemand, shortage: !!p.shortage, deficit: p.demand > p.supply, unpowered: p.unpowered | 0, networks: p.networks | 0,
     };
   },
+  /** Same shape as powerInfo with sources:[{b, output}] (kL) and unwatered. */
   waterInfo() {
-    const p = X.water || { supply: 0, demand: 0, sources: [] };
+    const p = X.water || { supply: 0, demand: 0, sources: [], served: 0 };
     return {
       supply: p.supply, demand: p.demand, sources: p.sources.slice(), served: p.served,
-      connectedDemand: p.connectedDemand, shortage: p.shortage, unwatered: p.unwatered, networks: p.networks,
+      connectedDemand: p.connectedDemand, shortage: !!p.shortage, deficit: p.demand > p.supply, unwatered: p.unwatered | 0, networks: p.networks | 0,
     };
   },
 

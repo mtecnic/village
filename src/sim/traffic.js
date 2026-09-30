@@ -17,6 +17,7 @@
  */
 const SIM = (VC.sim = VC.sim || {});
 const X = (SIM._ = SIM._ || {});
+const M = VC.M;
 
 const PEAK = 0.3; // share of commuters on the road in the peak hour
 const INF = 1e30;
@@ -81,7 +82,9 @@ SIM.computeTraffic = function () {
   const ROADS = VC.ROADS;
   // edge costs per road type
   const cost = [0, 1 / ROADS[1].speed, 1 / ROADS[2].speed, 1 / ROADS[3].speed];
-  const capOf = [1, ROADS[1].capacity, ROADS[2].capacity, ROADS[3].capacity];
+  // road maintenance funding: neglected roads (potholes, lane closures) carry less traffic
+  const rf = M.clamp(0.75 + 0.25 * (X.eff ? X.eff('roads') : 1), 0.75, 1.1);
+  const capOf = [1, ROADS[1].capacity * rf, ROADS[2].capacity * rf, ROADS[3].capacity * rf];
 
   dist.fill(INF);
   parent.fill(-1);

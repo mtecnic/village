@@ -36,11 +36,23 @@ function windFactor(S, b) {
   return (0.35 + 0.9 * wind) * (0.75 + 0.5 * M.sat(h / 24));
 }
 
+/** Utilities funding: underfunded plants run below capacity (60% at zero funding, ~108% at 150%). */
+function fundMul() {
+  const e = X.eff ? X.eff('utilities') : 1;
+  return M.clamp(0.6 + 0.4 * e, 0.6, 1.1);
+}
+/** Seasonal demand: winter heating, summer air-conditioning (power); summer gardens (water). */
+function seasonUse(S, water) {
+  const m = Math.floor(S.time.day / C.DAYS_PER_MONTH) % 12;
+  if (water) return m >= 5 && m <= 7 ? 1.15 : 1;
+  return m === 11 || m <= 1 ? 1.12 : m >= 5 && m <= 7 ? 1.06 : 1;
+}
+
 /** Power output (MW) of a building right now. */
 X.powerOut = function (S, b) {
   const def = VC.BLD[b.key];
   if (!def || !def.power || b.built < 1) return 0;
-  let p = def.power;
+  let p = def.power * fundMul();
   if (b.key === 'wind_turbine') p *= windFactor(S, b);
   else if (b.key === 'solar_farm') p *= solarFactor(S);
   if (b.fire > 0) p *= 0.4;
@@ -50,7 +62,7 @@ X.powerOut = function (S, b) {
 X.waterOut = function (S, b) {
   const def = VC.BLD[b.key];
   if (!def || !def.water || b.built < 1 || !b.powered) return 0;
-  return def.water * (b.fire > 0 ? 0.4 : 1);
+  return def.water * fundMul() * (b.fire > 0 ? 0.4 : 1);
 };
 /** Power consumption (MW). */
 X.powerUse = function (S, b) {
@@ -65,7 +77,7 @@ X.powerUse = function (S, b) {
     if (def.powerUse != null) u = def.powerUse;
     else u = (def.jobs || 0) * 0.05 + (def.housing ? Math.max(b.pop, def.housing * 0.1) * USE_R : 0);
   }
-  return u * (1 + (S.mods.powerUse || 0));
+  return u * Math.max(0.2, 1 + (S.mods.powerUse || 0)) * seasonUse(S, false);
 };
 /** Water consumption (kL). */
 X.waterUse = function (S, b) {
@@ -80,7 +92,7 @@ X.waterUse = function (S, b) {
     if (def.waterUse != null) u = def.waterUse;
     else u = (def.jobs || 0) * WUSE_J + (def.housing ? Math.max(b.pop, def.housing * 0.1) * WUSE_R : 0);
   }
-  return u * (1 + (S.mods.waterUse || 0));
+  return u * Math.max(0.2, 1 + (S.mods.waterUse || 0)) * seasonUse(S, true);
 };
 /** Does this building need power / water at all? (parks, rubble and plants don't) */
 X.needsPower = (b) => {
